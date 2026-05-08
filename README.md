@@ -139,6 +139,7 @@ CORS_ALLOW_ORIGIN=https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space
 USER_AGENT=Murmur/0.1
 ENABLE_SIGNUP=false
 DEFAULT_USER_ROLE=pending
+FB_USER_AGENT=the-browser-user-agent-that-exported-your-cookies
 ```
 
 Free Spaces have enough RAM for Open WebUI, but the disk is ephemeral and free CPU basic Spaces sleep after inactivity. For persistence without paid Hugging Face storage, an external database would be ideal; however, Hugging Face Spaces networking may block direct Postgres connections on port `5432`, so Neon may not work from a free Space. If Neon fails to connect, remove `DATABASE_URL`, `PGVECTOR_DB_URL`, `VECTOR_DB`, and `PGSSLMODE` and use the default local SQLite storage, understanding that state may be lost on restart.
@@ -219,6 +220,8 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `OPENWEBUI_MODEL` | Yes | | Model ID from Open WebUI |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
+| `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
+| `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook requests |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
 | `ALLOWED_THREAD_IDS` | No | | Comma-separated Messenger thread IDs |

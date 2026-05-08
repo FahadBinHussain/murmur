@@ -10,6 +10,8 @@ export PROXY_LISTEN_HOST="$PUBLIC_HOST"
 export PROXY_LISTEN_PORT="$PUBLIC_PORT"
 export PROXY_TARGET_BASE_URL="http://${OPENWEBUI_INTERNAL_HOST}:${OPENWEBUI_INTERNAL_PORT}"
 export FB_COOKIES_PATH="${FB_COOKIES_PATH:-/app/murmur/cookies.json}"
+export MURMUR_ENABLED="${MURMUR_ENABLED:-true}"
+export MURMUR_RESTART_SECONDS="${MURMUR_RESTART_SECONDS:-60}"
 
 shutdown() {
   local code="${1:-0}"
@@ -27,6 +29,12 @@ shutdown() {
 }
 
 trap 'shutdown 143' TERM INT
+
+start_murmur() {
+  echo "Starting Murmur..."
+  /app/murmur/.venv/bin/python -m murmur &
+  MURMUR_PID="$!"
+}
 
 if [[ -n "${FB_COOKIES_JSON_B64:-}" ]]; then
   echo "Writing Messenger cookies from FB_COOKIES_JSON_B64."
@@ -82,9 +90,11 @@ while true; do
   sleep 2
 done
 
-echo "Starting Murmur..."
-/app/murmur/.venv/bin/python -m murmur &
-MURMUR_PID="$!"
+if [[ "$MURMUR_ENABLED" == "true" ]]; then
+  start_murmur
+else
+  echo "Murmur is disabled; Open WebUI will keep running."
+fi
 
 set +e
 while true; do
@@ -96,9 +106,13 @@ while true; do
     wait "$PROXY_PID"
     shutdown "$?"
   fi
-  if ! kill -0 "$MURMUR_PID" 2>/dev/null; then
+  if [[ "$MURMUR_ENABLED" == "true" ]] && [[ -n "${MURMUR_PID:-}" ]] && ! kill -0 "$MURMUR_PID" 2>/dev/null; then
     wait "$MURMUR_PID"
-    shutdown "$?"
+    MURMUR_EXIT_CODE="$?"
+    echo "Murmur exited with code ${MURMUR_EXIT_CODE}; restarting in ${MURMUR_RESTART_SECONDS}s."
+    MURMUR_PID=""
+    sleep "$MURMUR_RESTART_SECONDS"
+    start_murmur
   fi
   sleep 2
 done

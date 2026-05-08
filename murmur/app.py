@@ -17,6 +17,8 @@ class Settings:
     openwebui_login_password: str | None
     openwebui_model: str
     fb_cookies_path: str
+    fb_user_agent: str | None
+    fb_proxy: str | None
     bot_prefix: str
     respond_only_on_prefix: bool
     max_history_messages: int
@@ -56,6 +58,8 @@ def load_settings() -> Settings:
         or None,
         openwebui_model=os.environ["OPENWEBUI_MODEL"],
         fb_cookies_path=os.getenv("FB_COOKIES_PATH", "cookies.json"),
+        fb_user_agent=os.getenv("FB_USER_AGENT") or None,
+        fb_proxy=os.getenv("FB_PROXY") or None,
         bot_prefix=os.getenv("BOT_PREFIX", "/ai").strip(),
         respond_only_on_prefix=env_bool("RESPOND_ONLY_ON_PREFIX", True),
         max_history_messages=int(os.getenv("MAX_HISTORY_MESSAGES", "12")),
@@ -77,7 +81,11 @@ class Murmur:
             lambda: deque(maxlen=settings.max_history_messages)
         )
         self.openwebui_token: str | None = None
-        self.client = Client(cookies_file_path=settings.fb_cookies_path)
+        self.client = Client(
+            cookies_file_path=settings.fb_cookies_path,
+            userAgent=settings.fb_user_agent,
+            proxy=settings.fb_proxy,
+        )
         self.client.event(EventType.LISTENING)(self.on_listening)
         self.client.event(EventType.MESSAGE)(self.on_message)
 
