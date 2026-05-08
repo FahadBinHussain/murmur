@@ -1,3 +1,10 @@
+---
+title: Murmur
+sdk: docker
+app_port: 7860
+suggested_hardware: cpu-basic
+---
+
 # Murmur
 
 Murmur is a Facebook Messenger AI bridge for Open WebUI.
@@ -88,10 +95,53 @@ docker build -t murmur .
 Run:
 
 ```bash
-docker run --env-file .env -v ./cookies.json:/app/murmur/cookies.json:ro murmur
+docker run --env-file .env -p 7860:7860 -v ./cookies.json:/app/murmur/cookies.json:ro murmur
 ```
 
-Open WebUI is served on port `8080` by default.
+Open WebUI is served on port `7860` by default for Hugging Face Spaces compatibility.
+
+## Hugging Face Spaces
+
+Create a new Hugging Face Space with:
+
+```text
+SDK: Docker
+Hardware: CPU basic
+```
+
+This repository is already configured for Docker Spaces through the README front matter:
+
+```yaml
+sdk: docker
+app_port: 7860
+suggested_hardware: cpu-basic
+```
+
+Required Hugging Face Space secrets:
+
+```env
+WEBUI_SECRET_KEY=long-random-secret
+WEBUI_ADMIN_EMAIL=your-admin-email@example.com
+WEBUI_ADMIN_PASSWORD=strong-admin-password
+
+OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=your-openrouter-api-key
+OPENWEBUI_MODEL=openrouter/free
+
+FB_COOKIES_JSON_B64=base64-encoded-cookies-json
+```
+
+Optional but recommended:
+
+```env
+WEBUI_URL=https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space
+CORS_ALLOW_ORIGIN=https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space
+USER_AGENT=Murmur/0.1
+ENABLE_SIGNUP=false
+DEFAULT_USER_ROLE=pending
+```
+
+Free Spaces have enough RAM for Open WebUI, but the disk is ephemeral and free CPU basic Spaces sleep after inactivity. For persistence without paid Hugging Face storage, an external database would be ideal; however, Hugging Face Spaces networking may block direct Postgres connections on port `5432`, so Neon may not work from a free Space. If Neon fails to connect, remove `DATABASE_URL`, `PGVECTOR_DB_URL`, `VECTOR_DB`, and `PGSSLMODE` and use the default local SQLite storage, understanding that state may be lost on restart.
 
 ## Render Free + Neon Free
 

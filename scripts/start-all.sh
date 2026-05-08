@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PUBLIC_PORT="${PORT:-8080}"
+export PUBLIC_PORT="${PORT:-7860}"
 export PUBLIC_HOST="${HOST:-0.0.0.0}"
 export OPENWEBUI_INTERNAL_HOST="${OPENWEBUI_INTERNAL_HOST:-127.0.0.1}"
 export OPENWEBUI_INTERNAL_PORT="${OPENWEBUI_INTERNAL_PORT:-8081}"
@@ -65,8 +65,11 @@ while true; do
       echo "Listening sockets:"
       netstat -ltnp || true
     fi
-    echo "Open WebUI process:"
-    ps -fp "$OPENWEBUI_PID" || true
+    if [[ -d "/proc/${OPENWEBUI_PID}" ]]; then
+      echo "Open WebUI process ${OPENWEBUI_PID} is still running."
+    else
+      echo "Open WebUI process ${OPENWEBUI_PID} is not visible in /proc."
+    fi
   fi
   if ! kill -0 "$PROXY_PID" 2>/dev/null; then
     echo "Public proxy exited before Open WebUI became healthy."
