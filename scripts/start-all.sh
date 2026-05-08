@@ -37,7 +37,7 @@ elif [[ -n "${FB_COOKIES_JSON:-}" ]]; then
 fi
 
 echo "Starting public proxy on ${PROXY_LISTEN_HOST}:${PROXY_LISTEN_PORT}"
-python -m murmur.proxy &
+/app/murmur/.venv/bin/python -m murmur.proxy &
 PROXY_PID="$!"
 
 echo "Starting Open WebUI on ${OPENWEBUI_INTERNAL_HOST}:${OPENWEBUI_INTERNAL_PORT}"
@@ -80,7 +80,7 @@ while true; do
 done
 
 echo "Starting Murmur..."
-python -m murmur &
+/app/murmur/.venv/bin/python -m murmur &
 MURMUR_PID="$!"
 
 set +e
