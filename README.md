@@ -128,7 +128,25 @@ Run this once in Neon before deploying:
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-Generate the cookie base64 on Windows PowerShell:
+Generate the cookie base64 from your local `cookies.json`:
+
+```powershell
+.\scripts\cookies-b64.ps1
+```
+
+Or use the CMD wrapper if PowerShell script execution is blocked:
+
+```cmd
+.\scripts\cookies-b64.cmd
+```
+
+To copy it straight to your clipboard:
+
+```powershell
+.\scripts\cookies-b64.ps1 -Copy
+```
+
+Direct PowerShell one-liner:
 
 ```powershell
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.json"))
