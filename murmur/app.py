@@ -39,6 +39,7 @@ class Settings:
     fb_mqtt_watchdog_seconds: int
     messenger_upload_retries: int
     messenger_upload_retry_seconds: float
+    messenger_upload_endpoints: tuple[str, ...]
     bot_prefix: str
     respond_only_on_prefix: bool
     respond_to_bot_replies: bool
@@ -59,6 +60,7 @@ class PromptRequest:
 class BotResponse:
     text: str | None = None
     image_paths: tuple[str, ...] = ()
+    image_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,19 @@ def parse_model_aliases(default_model: str) -> dict[str, str]:
         aliases[alias] = model
 
     return aliases
+
+
+def parse_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    values = tuple(
+        item.strip()
+        for item in raw_value.replace("\n", ",").split(",")
+        if item.strip()
+    )
+    return values or default
 
 
 def load_settings() -> Settings:
@@ -161,6 +176,13 @@ def load_settings() -> Settings:
         messenger_upload_retries=int(os.getenv("MESSENGER_UPLOAD_RETRIES", "3")),
         messenger_upload_retry_seconds=float(
             os.getenv("MESSENGER_UPLOAD_RETRY_SECONDS", "3")
+        ),
+        messenger_upload_endpoints=parse_csv_env(
+            "MESSENGER_UPLOAD_ENDPOINTS",
+            (
+                "https://upload.facebook.com/ajax/mercury/upload.php",
+                "https://upload.messenger.com/ajax/mercury/upload.php",
+            ),
         ),
         bot_prefix=os.getenv("BOT_PREFIX", "/ai").strip(),
         respond_only_on_prefix=env_bool("RESPOND_ONLY_ON_PREFIX", True),
@@ -434,6 +456,11 @@ class Murmur:
                     await asyncio.sleep(0.5)
 
             for index, path in enumerate(response.image_paths):
+                image_url = (
+                    response.image_urls[index]
+                    if index < len(response.image_urls)
+                    else None
+                )
                 try:
                     sent_message_id = await self.send_image_path(
                         message,
@@ -444,14 +471,16 @@ class Murmur:
                         self.sent_message_ids[message.thread_id].append(sent_message_id)
                     replied = True
                 except Exception as exc:
-                    image_errors.append(exc)
+                    image_errors.append((exc, image_url))
                     print(f"Failed to upload image for message {message.id}: {exc}")
                 await asyncio.sleep(0.5)
 
             if image_errors:
+                error, image_url = image_errors[-1]
                 await self.send_upload_failure_message(
                     message,
-                    image_errors[-1],
+                    error,
+                    image_url,
                     reply_to_message=None if replied else message.id,
                 )
         finally:
@@ -480,51 +509,96 @@ class Murmur:
         last_error = None
 
         for attempt in range(1, attempts + 1):
-            try:
-                print(
-                    "Uploading Messenger image "
-                    f"{Path(path).name} (attempt {attempt}/{attempts})."
-                )
-                return await self.client.uploadFiles(
-                    file_path=[path],
-                    voice_clip=False,
-                )
-            except Exception as exc:
-                last_error = exc
-                print(
-                    "Messenger image upload "
-                    f"attempt {attempt}/{attempts} failed: {exc}"
-                )
-                if attempt < attempts:
-                    await asyncio.sleep(self.settings.messenger_upload_retry_seconds)
+            for endpoint in self.settings.messenger_upload_endpoints:
+                endpoint_host = urlparse(endpoint).netloc or endpoint
+                try:
+                    print(
+                        "Uploading Messenger image "
+                        f"{Path(path).name} via {endpoint_host} "
+                        f"(attempt {attempt}/{attempts})."
+                    )
+                    return await self.upload_image_path_to_endpoint(path, endpoint)
+                except Exception as exc:
+                    last_error = exc
+                    print(
+                        "Messenger image upload "
+                        f"via {endpoint_host} attempt {attempt}/{attempts} "
+                        f"failed: {exc}"
+                    )
+            if attempt < attempts:
+                await asyncio.sleep(self.settings.messenger_upload_retry_seconds)
 
         raise RuntimeError("Messenger image upload failed") from last_error
+
+    async def upload_image_path_to_endpoint(
+        self,
+        path: str,
+        endpoint: str,
+    ) -> list[int]:
+        state = getattr(self.client, "_state", None)
+        if state is None:
+            raise RuntimeError("Messenger client state is not initialized.")
+
+        async with state.get_files_from_paths([path]) as files:
+            file_dict = {
+                f"upload_{index}": file_data
+                for index, file_data in enumerate(files)
+            }
+            body = await state._post(
+                endpoint,
+                data={"voice_clip": "false"},
+                files=file_dict,
+            )
+
+            payload = body.get("payload") if isinstance(body, dict) else None
+            metadata = (
+                payload.get("metadata")
+                if isinstance(payload, dict)
+                and isinstance(payload.get("metadata"), dict)
+                else None
+            )
+            if metadata is None or len(metadata) != len(files):
+                raise RuntimeError(f"Unexpected Messenger upload response: {body}")
+
+            return [next(iter(item.values())) for item in metadata.values()]
 
     async def send_upload_failure_message(
         self,
         message: Message,
         error: Exception,
+        image_url: str | None,
         reply_to_message: str | None,
     ) -> None:
         sent_message_id = await self.client.send_message(
-            text=self.upload_failure_text(error),
+            text=self.upload_failure_text(error, image_url),
             thread_id=message.thread_id,
             reply_to_message=reply_to_message,
         )
         if sent_message_id:
             self.sent_message_ids[message.thread_id].append(sent_message_id)
 
-    def upload_failure_text(self, error: Exception) -> str:
+    def upload_failure_text(self, error: Exception, image_url: str | None) -> str:
         message = str(error).lower()
+        url_fallback = self.image_url_fallback_text(image_url)
         if "timeout" in message or "timed out" in message:
             return (
                 "Generated the image, but Facebook's image upload endpoint timed out. "
-                "Please try again in a moment."
+                f"Please try again in a moment.{url_fallback}"
             )
         return (
             "Generated the image, but Messenger failed to accept the upload. "
-            "Please try again in a moment."
+            f"Please try again in a moment.{url_fallback}"
         )
+
+    def image_url_fallback_text(self, image_url: str | None) -> str:
+        if not image_url:
+            return ""
+
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"}:
+            return ""
+
+        return f"\n\nGenerated image URL:\n{image_url}"
 
     def is_allowed_thread(self, thread_id: str) -> bool:
         return (
@@ -1414,6 +1488,7 @@ class Murmur:
         return BotResponse(
             text=f"{self.response_header(provider, model)}\n{text or 'Generated.'}",
             image_paths=tuple(image_paths),
+            image_urls=tuple(image_urls),
         )
 
     async def generate_cloudflare_image_response(

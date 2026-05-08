@@ -295,6 +295,7 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `FB_MQTT_WATCHDOG_SECONDS` | No | `15` | Restart Murmur when the Messenger realtime listener stops silently |
 | `MESSENGER_UPLOAD_RETRIES` | No | `3` | Retry Messenger image uploads when Facebook's upload endpoint is flaky |
 | `MESSENGER_UPLOAD_RETRY_SECONDS` | No | `3` | Seconds to wait between Messenger image upload retries |
+| `MESSENGER_UPLOAD_ENDPOINTS` | No | Facebook upload, Messenger upload | Comma-separated upload endpoints tried for Messenger image attachments |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
 | `RESPOND_TO_BOT_REPLIES` | No | `true` | If true, replies to direct replies on bot messages without requiring the prefix |
