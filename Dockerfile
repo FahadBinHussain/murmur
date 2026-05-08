@@ -1,13 +1,14 @@
-FROM python:3.12-slim
+FROM ghcr.io/open-webui/open-webui:main
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /app
+WORKDIR /app/murmur
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt pyproject.toml README.md ./
+COPY murmur ./murmur
+RUN pip install --no-cache-dir .
 
-COPY . .
+COPY scripts ./scripts
 
-CMD ["python", "-m", "murmur"]
+CMD ["bash", "/app/murmur/scripts/start-all.sh"]

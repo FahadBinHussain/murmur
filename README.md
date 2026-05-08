@@ -2,18 +2,20 @@
 
 Murmur is a Facebook Messenger AI bridge for Open WebUI.
 
-It listens for Messenger messages with `fbchat-muqit`, sends prompts to Open WebUI's OpenAI-compatible chat completions API, and replies back in the same Messenger thread.
+The Docker image bundles Open WebUI and Murmur together, so one deployment can run the web UI, model router, database-backed chat platform, and Messenger bridge.
 
 ```text
-Messenger thread -> Murmur -> Open WebUI -> AI reply -> Messenger thread
+Messenger thread -> Murmur -> bundled Open WebUI -> AI reply -> Messenger thread
 ```
 
 ## Status
 
 Early project. The current version is intentionally small:
 
+- Bundled Open WebUI runtime
 - Messenger listener using `fbchat-muqit`
 - Open WebUI `/api/chat/completions` backend
+- Automatic Open WebUI JWT sign-in when no API key is provided
 - Per-thread short conversation memory
 - Optional `/ai` prefix trigger
 - Optional allowed-thread allowlist
@@ -31,8 +33,7 @@ Never commit `cookies.json`, `.env`, API keys, or Facebook cookies.
 ## Requirements
 
 - Python 3.10+
-- An Open WebUI instance
-- An Open WebUI API key
+- An Open WebUI API key, or Open WebUI login credentials
 - A Facebook cookies JSON file usable by `fbchat-muqit`
 
 ## Setup
@@ -52,7 +53,7 @@ cp .env.example .env
 Fill in:
 
 ```env
-OPENWEBUI_BASE_URL=https://your-open-webui.onrender.com
+OPENWEBUI_BASE_URL=https://your-open-webui.example.com
 OPENWEBUI_API_KEY=sk-your-open-webui-api-key
 OPENWEBUI_MODEL=your-model-name
 FB_COOKIES_PATH=cookies.json
@@ -76,9 +77,9 @@ Example:
 /ai write a short reply to this conversation
 ```
 
-## Docker
+## Docker: All In One
 
-Build:
+The default Dockerfile builds an all-in-one image from the official Open WebUI image and starts both Open WebUI and Murmur.
 
 ```bash
 docker build -t murmur .
@@ -87,17 +88,65 @@ docker build -t murmur .
 Run:
 
 ```bash
-docker run --env-file .env -v ./cookies.json:/app/cookies.json:ro murmur
+docker run --env-file .env -v ./cookies.json:/app/murmur/cookies.json:ro murmur
 ```
+
+Open WebUI is served on port `8080` by default.
+
+## Render Free + Neon Free
+
+Use this repo as a Render Docker Web Service. The service starts Open WebUI first, waits for `/health`, then starts Murmur.
+
+Blueprint deploy URL:
+
+```text
+https://render.com/deploy?repo=https://github.com/FahadBinHussain/murmur
+```
+
+Required Render env vars:
+
+```env
+WEBUI_SECRET_KEY=long-random-secret
+WEBUI_ADMIN_EMAIL=your-admin-email@example.com
+WEBUI_ADMIN_PASSWORD=strong-admin-password
+
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+VECTOR_DB=pgvector
+PGVECTOR_DB_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+PGVECTOR_CREATE_EXTENSION=false
+
+OPENAI_API_BASE_URL=https://your-provider.example.com/v1
+OPENAI_API_KEY=your-provider-api-key
+OPENWEBUI_MODEL=your-model-name
+
+FB_COOKIES_JSON_B64=base64-encoded-cookies-json
+```
+
+Run this once in Neon before deploying:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Generate the cookie base64 on Windows PowerShell:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.json"))
+```
+
+You still need an AI provider key or an OpenAI-compatible provider with free quota. Murmur can bundle Open WebUI, but it cannot make paid model usage free.
 
 ## Configuration
 
 | Variable | Required | Default | Description |
 |---|---:|---|---|
-| `OPENWEBUI_BASE_URL` | Yes | | Open WebUI URL, without trailing slash |
-| `OPENWEBUI_API_KEY` | Yes | | Open WebUI API key |
+| `OPENWEBUI_BASE_URL` | No | local bundled Open WebUI | External Open WebUI URL, without trailing slash |
+| `OPENWEBUI_API_KEY` | No | | Open WebUI API key |
+| `OPENWEBUI_LOGIN_EMAIL` | No | `WEBUI_ADMIN_EMAIL` | Login email for JWT auth |
+| `OPENWEBUI_LOGIN_PASSWORD` | No | `WEBUI_ADMIN_PASSWORD` | Login password for JWT auth |
 | `OPENWEBUI_MODEL` | Yes | | Model ID from Open WebUI |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
+| `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
 | `ALLOWED_THREAD_IDS` | No | | Comma-separated Messenger thread IDs |
@@ -111,3 +160,12 @@ docker run --env-file .env -v ./cookies.json:/app/cookies.json:ro murmur
 After testing, set `ALLOWED_THREAD_IDS` so Murmur only works in threads you control.
 
 Keep `RESPOND_ONLY_ON_PREFIX=true` unless you intentionally want Murmur to answer every message it can see.
+
+For public deployments, disable signups and create an admin account through environment variables:
+
+```env
+WEBUI_ADMIN_EMAIL=admin@example.com
+WEBUI_ADMIN_PASSWORD=strong-password
+ENABLE_SIGNUP=false
+DEFAULT_USER_ROLE=pending
+```

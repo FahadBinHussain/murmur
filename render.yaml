@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: murmur
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: WEBUI_SECRET_KEY
+        generateValue: true
+      - key: WEBUI_ADMIN_EMAIL
+        sync: false
+      - key: WEBUI_ADMIN_PASSWORD
+        sync: false
+      - key: ENABLE_SIGNUP
+        value: "false"
+      - key: DEFAULT_USER_ROLE
+        value: pending
+      - key: ENV
+        value: prod
+      - key: DATABASE_URL
+        sync: false
+      - key: VECTOR_DB
+        value: pgvector
+      - key: PGVECTOR_DB_URL
+        sync: false
+      - key: PGVECTOR_CREATE_EXTENSION
+        value: "false"
+      - key: OPENAI_API_BASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENWEBUI_MODEL
+        sync: false
+      - key: FB_COOKIES_JSON_B64
+        sync: false
+      - key: BOT_PREFIX
+        value: /ai
+      - key: RESPOND_ONLY_ON_PREFIX
+        value: "true"
