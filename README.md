@@ -96,6 +96,7 @@ Open WebUI is served on port `8080` by default.
 ## Render Free + Neon Free
 
 Use this repo as a Render Docker Web Service. The service starts Open WebUI first, waits for `/health`, then starts Murmur.
+Murmur also starts a small public proxy immediately so Render sees an open port while Open WebUI performs first-boot migrations.
 
 Blueprint deploy URL:
 
