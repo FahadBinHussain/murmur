@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+cookies.json
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+*.log
