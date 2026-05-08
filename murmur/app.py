@@ -21,6 +21,7 @@ class Settings:
     fb_proxy: str | None
     bot_prefix: str
     respond_only_on_prefix: bool
+    respond_to_bot_replies: bool
     max_history_messages: int
     max_reply_chars: int
     request_timeout_seconds: int
@@ -62,6 +63,7 @@ def load_settings() -> Settings:
         fb_proxy=os.getenv("FB_PROXY") or None,
         bot_prefix=os.getenv("BOT_PREFIX", "/ai").strip(),
         respond_only_on_prefix=env_bool("RESPOND_ONLY_ON_PREFIX", True),
+        respond_to_bot_replies=env_bool("RESPOND_TO_BOT_REPLIES", True),
         max_history_messages=int(os.getenv("MAX_HISTORY_MESSAGES", "12")),
         max_reply_chars=int(os.getenv("MAX_REPLY_CHARS", "1800")),
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "120")),
@@ -79,6 +81,9 @@ class Murmur:
         self.settings = settings
         self.history: dict[str, Deque[dict[str, str]]] = defaultdict(
             lambda: deque(maxlen=settings.max_history_messages)
+        )
+        self.sent_message_ids: dict[str, Deque[str]] = defaultdict(
+            lambda: deque(maxlen=200)
         )
         self.openwebui_token: str | None = None
         self.client = Client(
@@ -102,7 +107,7 @@ class Murmur:
         if not self.is_allowed_thread(message.thread_id):
             return
 
-        prompt = self.get_prompt(message.text)
+        prompt = self.get_prompt(message)
         if not prompt:
             return
 
@@ -119,11 +124,13 @@ class Murmur:
                 pass
 
         for index, part in enumerate(self.split_reply(answer)):
-            await self.client.send_message(
+            sent_message_id = await self.client.send_message(
                 text=part,
                 thread_id=message.thread_id,
                 reply_to_message=message.id if index == 0 else None,
             )
+            if sent_message_id:
+                self.sent_message_ids[message.thread_id].append(sent_message_id)
             await asyncio.sleep(0.5)
 
     def is_allowed_thread(self, thread_id: str) -> bool:
@@ -132,20 +139,43 @@ class Murmur:
             or thread_id in self.settings.allowed_thread_ids
         )
 
-    def get_prompt(self, text: str) -> str | None:
-        text = (text or "").strip()
+    def get_prompt(self, message: Message) -> str | None:
+        text = (message.text or "").strip()
         if not text:
             return None
-
-        if not self.settings.respond_only_on_prefix:
-            return text
 
         prefix = self.settings.bot_prefix
         if prefix and text.lower().startswith(prefix.lower()):
             prompt = text[len(prefix) :].strip()
             return prompt or "Hello"
 
+        if self.settings.respond_to_bot_replies and self.is_reply_to_bot(message):
+            return self.reply_prompt(message, text)
+
+        if not self.settings.respond_only_on_prefix:
+            return text
+
         return None
+
+    def is_reply_to_bot(self, message: Message) -> bool:
+        replied_to = message.replied_to_message
+        if replied_to and replied_to.sender_id == self.client.uid:
+            return True
+
+        replied_to_id = message.replied_to_message_id
+        return bool(
+            replied_to_id and replied_to_id in self.sent_message_ids[message.thread_id]
+        )
+
+    def reply_prompt(self, message: Message, text: str) -> str:
+        replied_to = message.replied_to_message
+        if replied_to and replied_to.text:
+            return (
+                "The user replied to your previous Messenger message:\n"
+                f"{replied_to.text.strip()}\n\n"
+                f"User reply:\n{text}"
+            )
+        return text
 
     def split_reply(self, text: str) -> list[str]:
         if len(text) <= self.settings.max_reply_chars:

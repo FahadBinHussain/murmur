@@ -224,6 +224,7 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook requests |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
+| `RESPOND_TO_BOT_REPLIES` | No | `true` | If true, replies to direct replies on bot messages without requiring the prefix |
 | `ALLOWED_THREAD_IDS` | No | | Comma-separated Messenger thread IDs |
 | `MAX_HISTORY_MESSAGES` | No | `12` | Short in-memory context window per thread |
 | `MAX_REPLY_CHARS` | No | `1800` | Split replies above this size |
