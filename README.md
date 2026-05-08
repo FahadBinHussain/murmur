@@ -106,6 +106,12 @@ Model switching is per Messenger thread:
 
 `/ai models` fetches the configured provider/Open WebUI model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response.
 
+AI replies start with the provider and model that produced the answer, for example:
+
+```text
+[OpenRouter - openrouter/free]
+```
+
 Configure short aliases with `OPENWEBUI_MODEL_ALIASES` for favorites:
 
 ```env
@@ -191,6 +197,7 @@ USER_AGENT=Murmur/0.1
 ENABLE_SIGNUP=false
 DEFAULT_USER_ROLE=pending
 FB_USER_AGENT=the-browser-user-agent-that-exported-your-cookies
+FB_MQTT_WATCHDOG_SECONDS=15
 ```
 
 Free Spaces have enough RAM for Open WebUI, but the disk is ephemeral and free CPU basic Spaces sleep after inactivity. For persistence without paid Hugging Face storage, an external database would be ideal; however, Hugging Face Spaces networking may block direct Postgres connections on port `5432`, so Neon may not work from a free Space. If Neon fails to connect, remove `DATABASE_URL`, `PGVECTOR_DB_URL`, `VECTOR_DB`, and `PGSSLMODE` and use the default local SQLite storage, understanding that state may be lost on restart.
@@ -270,6 +277,8 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `OPENWEBUI_LOGIN_PASSWORD` | No | `WEBUI_ADMIN_PASSWORD` | Login password for JWT auth |
 | `OPENWEBUI_MODEL` | Yes | | Model ID from Open WebUI |
 | `OPENWEBUI_MODEL_ALIASES` | No | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` list for Messenger model switching |
+| `OPENWEBUI_WARMUP` | No | `true` | Warm Open WebUI auth/model endpoints before Messenger starts listening |
+| `OPENWEBUI_WARMUP_CHAT` | No | `true` | Send a tiny non-history chat completion at startup to reduce first real reply latency |
 | `VISION_MODEL` | No | `openrouter/free` | Provider model used for image understanding |
 | `IMAGE_PROVIDER` | No | `openrouter` | Use `cloudflare` for Cloudflare Workers AI image generation |
 | `IMAGE_MODEL` | No | `openrouter/free` | Default provider image-generation model |
@@ -283,6 +292,9 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
 | `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook requests |
 | `FB_MQTT_PROXY` | No | `FB_PROXY` | HTTP/SOCKS proxy for Messenger MQTT websocket |
+| `FB_MQTT_WATCHDOG_SECONDS` | No | `15` | Restart Murmur when the Messenger realtime listener stops silently |
+| `MESSENGER_UPLOAD_RETRIES` | No | `3` | Retry Messenger image uploads when Facebook's upload endpoint is flaky |
+| `MESSENGER_UPLOAD_RETRY_SECONDS` | No | `3` | Seconds to wait between Messenger image upload retries |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
 | `RESPOND_TO_BOT_REPLIES` | No | `true` | If true, replies to direct replies on bot messages without requiring the prefix |
@@ -291,6 +303,8 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `MAX_REPLY_CHARS` | No | `1800` | Split replies above this size |
 | `REQUEST_TIMEOUT_SECONDS` | No | `120` | Open WebUI request timeout |
 | `SYSTEM_PROMPT` | No | helpful assistant prompt | System prompt sent to Open WebUI |
+| `ENABLE_OLLAMA_API` | No | `false` | Disable unused Ollama checks in this all-in-one deployment |
+| `ENABLE_BASE_MODELS_CACHE` | No | `true` | Cache Open WebUI base model list after startup |
 
 ## Recommended Safety
 

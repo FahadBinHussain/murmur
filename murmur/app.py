@@ -36,6 +36,9 @@ class Settings:
     fb_user_agent: str | None
     fb_proxy: str | None
     fb_mqtt_proxy: str | None
+    fb_mqtt_watchdog_seconds: int
+    messenger_upload_retries: int
+    messenger_upload_retry_seconds: float
     bot_prefix: str
     respond_only_on_prefix: bool
     respond_to_bot_replies: bool
@@ -154,6 +157,11 @@ def load_settings() -> Settings:
         fb_user_agent=os.getenv("FB_USER_AGENT") or None,
         fb_proxy=os.getenv("FB_PROXY") or None,
         fb_mqtt_proxy=os.getenv("FB_MQTT_PROXY") or os.getenv("FB_PROXY") or None,
+        fb_mqtt_watchdog_seconds=int(os.getenv("FB_MQTT_WATCHDOG_SECONDS", "15")),
+        messenger_upload_retries=int(os.getenv("MESSENGER_UPLOAD_RETRIES", "3")),
+        messenger_upload_retry_seconds=float(
+            os.getenv("MESSENGER_UPLOAD_RETRY_SECONDS", "3")
+        ),
         bot_prefix=os.getenv("BOT_PREFIX", "/ai").strip(),
         respond_only_on_prefix=env_bool("RESPOND_ONLY_ON_PREFIX", True),
         respond_to_bot_replies=env_bool("RESPOND_TO_BOT_REPLIES", True),
@@ -187,6 +195,8 @@ class Murmur:
         self.thread_image_model_options: dict[str, list[ModelOption]] = {}
         self.thread_image_ratios: dict[str, str] = {}
         self.openwebui_token: str | None = None
+        self.mqtt_watchdog_task: asyncio.Task | None = None
+        self.response_tasks: set[asyncio.Task] = set()
         self.configure_mqtt_proxy()
         self.client = Client(
             cookies_file_path=settings.fb_cookies_path,
@@ -297,6 +307,31 @@ class Murmur:
 
     async def on_listening(self) -> None:
         print(f"Murmur online as {self.client.name} ({self.client.uid})")
+        if self.mqtt_watchdog_task is None or self.mqtt_watchdog_task.done():
+            self.mqtt_watchdog_task = asyncio.create_task(self.watch_mqtt_listener())
+
+    async def watch_mqtt_listener(self) -> None:
+        await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)
+        while True:
+            await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)
+            mqtt = getattr(self.client, "_mqtt", None)
+            listen_task = getattr(mqtt, "_listen_task", None) if mqtt else None
+            if listen_task is None or not listen_task.done():
+                continue
+
+            error = None
+            try:
+                error = listen_task.exception()
+            except asyncio.CancelledError:
+                error = "cancelled"
+            except Exception as exc:
+                error = exc
+
+            print(
+                "Messenger MQTT listener stopped; restarting Murmur. "
+                f"Last listener error: {error}"
+            )
+            os._exit(12)
 
     async def on_message(self, message: Message) -> None:
         if message.sender_id == self.client.uid:
@@ -309,6 +344,21 @@ class Murmur:
         if not request:
             return
 
+        task = asyncio.create_task(self.answer_message(message, request))
+        self.response_tasks.add(task)
+        task.add_done_callback(self.response_tasks.discard)
+        task.add_done_callback(self.log_response_task_error)
+
+    def log_response_task_error(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+
+        try:
+            task.result()
+        except Exception as exc:
+            print(f"Unhandled Murmur response task failed: {exc}")
+
+    async def answer_message(self, message: Message, request: PromptRequest) -> None:
         bot_response = None
         control_response = None
         prompt = request.text
@@ -361,38 +411,120 @@ class Murmur:
             except Exception:
                 pass
 
-        await self.send_bot_response(message, bot_response)
+        try:
+            await self.send_bot_response(message, bot_response)
+        except Exception as exc:
+            print(f"Failed to send response for message {message.id}: {exc}")
 
     async def send_bot_response(self, message: Message, response: BotResponse) -> None:
         replied = False
-        if response.text:
-            for index, part in enumerate(self.split_reply(response.text)):
-                sent_message_id = await self.client.send_message(
-                    text=part,
-                    thread_id=message.thread_id,
-                    reply_to_message=message.id if index == 0 else None,
-                )
-                replied = True
-                if sent_message_id:
-                    self.sent_message_ids[message.thread_id].append(sent_message_id)
+        image_errors = []
+
+        try:
+            if response.text:
+                for index, part in enumerate(self.split_reply(response.text)):
+                    sent_message_id = await self.client.send_message(
+                        text=part,
+                        thread_id=message.thread_id,
+                        reply_to_message=message.id if index == 0 else None,
+                    )
+                    replied = True
+                    if sent_message_id:
+                        self.sent_message_ids[message.thread_id].append(sent_message_id)
+                    await asyncio.sleep(0.5)
+
+            for index, path in enumerate(response.image_paths):
+                try:
+                    sent_message_id = await self.send_image_path(
+                        message,
+                        path,
+                        reply_to_message=message.id if not replied and index == 0 else None,
+                    )
+                    if sent_message_id:
+                        self.sent_message_ids[message.thread_id].append(sent_message_id)
+                    replied = True
+                except Exception as exc:
+                    image_errors.append(exc)
+                    print(f"Failed to upload image for message {message.id}: {exc}")
                 await asyncio.sleep(0.5)
 
-        for index, path in enumerate(response.image_paths):
-            sent_message_id = await self.client.send_message(
-                text=None,
-                thread_id=message.thread_id,
-                file_path=[path],
-                reply_to_message=message.id if not replied and index == 0 else None,
-            )
-            if sent_message_id:
-                self.sent_message_ids[message.thread_id].append(sent_message_id)
-            await asyncio.sleep(0.5)
+            if image_errors:
+                await self.send_upload_failure_message(
+                    message,
+                    image_errors[-1],
+                    reply_to_message=None if replied else message.id,
+                )
+        finally:
+            for path in response.image_paths:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
-        for path in response.image_paths:
+    async def send_image_path(
+        self,
+        message: Message,
+        path: str,
+        reply_to_message: str | None,
+    ) -> str | None:
+        file_ids = await self.upload_image_path(path)
+        return await self.client.send_message(
+            text=None,
+            thread_id=message.thread_id,
+            files_ids=file_ids,
+            reply_to_message=reply_to_message,
+        )
+
+    async def upload_image_path(self, path: str) -> list[int]:
+        attempts = max(1, self.settings.messenger_upload_retries)
+        last_error = None
+
+        for attempt in range(1, attempts + 1):
             try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
+                print(
+                    "Uploading Messenger image "
+                    f"{Path(path).name} (attempt {attempt}/{attempts})."
+                )
+                return await self.client.uploadFiles(
+                    file_path=[path],
+                    voice_clip=False,
+                )
+            except Exception as exc:
+                last_error = exc
+                print(
+                    "Messenger image upload "
+                    f"attempt {attempt}/{attempts} failed: {exc}"
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(self.settings.messenger_upload_retry_seconds)
+
+        raise RuntimeError("Messenger image upload failed") from last_error
+
+    async def send_upload_failure_message(
+        self,
+        message: Message,
+        error: Exception,
+        reply_to_message: str | None,
+    ) -> None:
+        sent_message_id = await self.client.send_message(
+            text=self.upload_failure_text(error),
+            thread_id=message.thread_id,
+            reply_to_message=reply_to_message,
+        )
+        if sent_message_id:
+            self.sent_message_ids[message.thread_id].append(sent_message_id)
+
+    def upload_failure_text(self, error: Exception) -> str:
+        message = str(error).lower()
+        if "timeout" in message or "timed out" in message:
+            return (
+                "Generated the image, but Facebook's image upload endpoint timed out. "
+                "Please try again in a moment."
+            )
+        return (
+            "Generated the image, but Messenger failed to accept the upload. "
+            "Please try again in a moment."
+        )
 
     def is_allowed_thread(self, thread_id: str) -> bool:
         return (
@@ -663,10 +795,19 @@ class Murmur:
         )
 
     def text_provider_label(self) -> str:
-        if self.settings.provider_base_url:
+        provider = self.text_provider_id()
+        if provider == "provider" and self.settings.provider_base_url:
             host = urlparse(self.settings.provider_base_url).netloc
             return host or self.settings.provider_base_url
+        return self.provider_label(provider)
+
+    def text_provider_id(self) -> str:
+        if self.settings.provider_base_url:
+            return self.openai_image_provider_id()
         return "openwebui"
+
+    def response_header(self, provider: str, model: str) -> str:
+        return f"[{self.provider_label(provider)} - {model}]"
 
     async def image_model_list_message(
         self,
@@ -776,6 +917,7 @@ class Murmur:
         labels = {
             "cloudflare": "Cloudflare",
             "openrouter": "OpenRouter",
+            "openwebui": "OpenWebUI",
             "provider": "Provider",
         }
         return labels.get(provider, provider)
@@ -1270,7 +1412,7 @@ class Murmur:
             image_paths.append(await self.image_url_to_temp_file(image_url))
 
         return BotResponse(
-            text=text or f"Generated with {model}.",
+            text=f"{self.response_header(provider, model)}\n{text or 'Generated.'}",
             image_paths=tuple(image_paths),
         )
 
@@ -1315,7 +1457,7 @@ class Murmur:
                         self.suffix_from_mime(content_type),
                     )
                     return BotResponse(
-                        text=f"Generated with {model}.",
+                        text=f"{self.response_header('cloudflare', model)}\nGenerated.",
                         image_paths=(image_path,),
                     )
 
@@ -1337,7 +1479,7 @@ class Murmur:
             self.suffix_from_mime("image/jpeg"),
         )
         return BotResponse(
-            text=f"Generated with {model}.",
+            text=f"{self.response_header('cloudflare', model)}\nGenerated.",
             image_paths=(image_path,),
         )
 
@@ -1450,7 +1592,7 @@ class Murmur:
             {"role": "user", "content": f"{prompt} [image attached]"}
         )
         self.history[thread_id].append({"role": "assistant", "content": answer})
-        return answer
+        return f"{self.response_header(self.text_provider_id(), self.settings.vision_model)}\n{answer}"
 
     async def request_provider_chat_completion(self, payload: dict) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -1652,7 +1794,7 @@ class Murmur:
 
         self.history[thread_id].append({"role": "user", "content": prompt})
         self.history[thread_id].append({"role": "assistant", "content": answer})
-        return answer
+        return f"{self.response_header(self.text_provider_id(), model)}\n{answer}"
 
     async def request_chat_completion(self, payload: dict) -> str:
         async with aiohttp.ClientSession(
