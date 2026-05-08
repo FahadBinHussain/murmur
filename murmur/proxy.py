@@ -1,9 +1,10 @@
 import asyncio
 import os
 from collections.abc import Iterable
+from contextlib import suppress
 
 import aiohttp
-from aiohttp import ClientConnectorError, WSMsgType, web
+from aiohttp import ClientError, WSMsgType, web
 
 
 HOP_BY_HOP_HEADERS = {
@@ -32,6 +33,9 @@ def target_url(request: web.Request) -> str:
 
 
 async def proxy_http(request: web.Request) -> web.Response:
+    if request.path == "/health":
+        return web.json_response({"status": True, "proxy": "ok"})
+
     url = target_url(request)
     headers = filtered_headers(request.headers.items())
     headers["X-Forwarded-Host"] = request.host
@@ -51,9 +55,7 @@ async def proxy_http(request: web.Request) -> web.Response:
                 status=response.status,
                 headers=filtered_headers(response.headers.items()),
             )
-    except ClientConnectorError:
-        if request.path == "/health":
-            return web.json_response({"status": True, "backend": "starting"})
+    except (ClientError, asyncio.TimeoutError):
         return web.Response(
             text="Open WebUI is still starting. Try again in a moment.",
             status=503,
@@ -68,33 +70,38 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
         "https://", "wss://", 1
     )
 
+    backend_ws = None
     try:
-        async with request.app["session"].ws_connect(
+        backend_ws = await request.app["session"].ws_connect(
             backend_url,
             headers=filtered_headers(request.headers.items()),
-        ) as backend_ws:
+        )
 
-            async def client_to_backend() -> None:
-                async for message in ws_response:
-                    if message.type == WSMsgType.TEXT:
-                        await backend_ws.send_str(message.data)
-                    elif message.type == WSMsgType.BINARY:
-                        await backend_ws.send_bytes(message.data)
-                    elif message.type == WSMsgType.CLOSE:
-                        await backend_ws.close()
+        async def client_to_backend() -> None:
+            async for message in ws_response:
+                if message.type == WSMsgType.TEXT:
+                    await backend_ws.send_str(message.data)
+                elif message.type == WSMsgType.BINARY:
+                    await backend_ws.send_bytes(message.data)
+                elif message.type == WSMsgType.CLOSE:
+                    await backend_ws.close()
 
-            async def backend_to_client() -> None:
-                async for message in backend_ws:
-                    if message.type == WSMsgType.TEXT:
-                        await ws_response.send_str(message.data)
-                    elif message.type == WSMsgType.BINARY:
-                        await ws_response.send_bytes(message.data)
-                    elif message.type == WSMsgType.CLOSE:
-                        await ws_response.close()
+        async def backend_to_client() -> None:
+            async for message in backend_ws:
+                if message.type == WSMsgType.TEXT:
+                    await ws_response.send_str(message.data)
+                elif message.type == WSMsgType.BINARY:
+                    await ws_response.send_bytes(message.data)
+                elif message.type == WSMsgType.CLOSE:
+                    await ws_response.close()
 
-            await asyncio.gather(client_to_backend(), backend_to_client())
-    except ClientConnectorError:
+        await asyncio.gather(client_to_backend(), backend_to_client())
+    except (ClientError, asyncio.TimeoutError):
         await ws_response.close(message=b"Open WebUI is still starting")
+    finally:
+        if backend_ws is not None:
+            with suppress(Exception):
+                await backend_ws.close()
 
     return ws_response
 
@@ -105,12 +112,18 @@ async def handle(request: web.Request) -> web.StreamResponse:
     return await proxy_http(request)
 
 
-async def create_app() -> web.Application:
-    app = web.Application()
-    app["target_base_url"] = os.environ["PROXY_TARGET_BASE_URL"].rstrip("/")
+async def session_context(app: web.Application):
     app["session"] = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)
     )
+    yield
+    await app["session"].close()
+
+
+def create_app() -> web.Application:
+    app = web.Application()
+    app["target_base_url"] = os.environ["PROXY_TARGET_BASE_URL"].rstrip("/")
+    app.cleanup_ctx.append(session_context)
     app.router.add_route("*", "/{path_info:.*}", handle)
     return app
 
