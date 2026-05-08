@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
   "aiohttp>=3.9.0",
   "fbchat-muqit>=1.2.2",
+  "PySocks>=1.7.1",
   "python-dotenv>=1.0.0",
 ]
 

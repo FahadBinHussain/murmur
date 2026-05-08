@@ -84,6 +84,57 @@ Example:
 /ai write a short reply to this conversation
 ```
 
+Help and status:
+
+```text
+/help
+/ai help
+/ai status
+```
+
+`/help` and `/ai help` show the full Messenger command guide. `/ai status` shows the current text model, image provider/model, image ratio, and vision model for the thread.
+
+Model switching is per Messenger thread:
+
+```text
+/ai models
+/ai model free
+/ai model 7
+/ai @free summarize this in one sentence
+/ai @7 summarize this in one sentence
+```
+
+`/ai models` fetches the configured provider/Open WebUI model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response.
+
+Configure short aliases with `OPENWEBUI_MODEL_ALIASES` for favorites:
+
+```env
+OPENWEBUI_MODEL=deepseek/deepseek-chat-v3-0324:free
+OPENWEBUI_MODEL_ALIASES=free=deepseek/deepseek-chat-v3-0324:free,fast=google/gemini-2.0-flash-exp:free
+```
+
+Image generation lists every configured image provider and remembers the selected provider/model per Messenger thread. Vision uses the configured OpenAI-compatible provider directly:
+
+```text
+/ai image models
+/ai image models all
+/ai image model 3
+/ai image ratio 16:9
+/ai image a neon cyberpunk teashop in the rain
+/ai image @3 a tiny robot drinking tea
+/ai see what is in this image?
+```
+
+`/ai image models` lists usable image models grouped by provider. Cloudflare is discovered through Workers AI model search; OpenRouter/OpenAI-compatible image models are discovered through `/models?output_modalities=image`. Generated images are uploaded back to Messenger as image attachments. `/ai see ...` analyzes an attached image or an image in the message being replied to.
+
+Current Open WebUI bridge surface:
+
+- Text chat uses Open WebUI `/api/chat/completions`.
+- Auth uses `OPENWEBUI_API_KEY` or the configured WebUI admin email/password.
+- Text model listing uses the configured provider `/models`, then Open WebUI `/api/models` as a fallback.
+- Murmur keeps short per-thread memory and sends that context to Open WebUI.
+- Image generation is handled by configured image providers directly, not by the Open WebUI image UI.
+
 ## Docker: All In One
 
 The default Dockerfile builds an all-in-one image from the official Open WebUI image and starts both Open WebUI and Murmur.
@@ -218,10 +269,20 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `OPENWEBUI_LOGIN_EMAIL` | No | `WEBUI_ADMIN_EMAIL` | Login email for JWT auth |
 | `OPENWEBUI_LOGIN_PASSWORD` | No | `WEBUI_ADMIN_PASSWORD` | Login password for JWT auth |
 | `OPENWEBUI_MODEL` | Yes | | Model ID from Open WebUI |
+| `OPENWEBUI_MODEL_ALIASES` | No | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` list for Messenger model switching |
+| `VISION_MODEL` | No | `openrouter/free` | Provider model used for image understanding |
+| `IMAGE_PROVIDER` | No | `openrouter` | Use `cloudflare` for Cloudflare Workers AI image generation |
+| `IMAGE_MODEL` | No | `openrouter/free` | Default provider image-generation model |
+| `CF_ACCOUNT_ID` | Cloudflare images | | Cloudflare account ID |
+| `CF_API_TOKEN` | Cloudflare images | | Cloudflare Workers AI token |
+| `CLOUDFLARE_IMAGE_MODEL` | No | `@cf/black-forest-labs/flux-1-schnell` | Default Cloudflare Workers AI image model |
+| `IMAGE_ASPECT_RATIO` | No | `1:1` | Default image ratio for generation |
+| `ALLOW_PAID_IMAGE_MODELS` | No | `false` | If true, Murmur will try paid/unknown image models |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
 | `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook requests |
+| `FB_MQTT_PROXY` | No | `FB_PROXY` | HTTP/SOCKS proxy for Messenger MQTT websocket |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
 | `RESPOND_TO_BOT_REPLIES` | No | `true` | If true, replies to direct replies on bot messages without requiring the prefix |
