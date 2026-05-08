@@ -19,6 +19,8 @@ services:
         value: prod
       - key: DATABASE_URL
         sync: false
+      - key: PGSSLMODE
+        value: require
       - key: VECTOR_DB
         value: pgvector
       - key: PGVECTOR_DB_URL

@@ -111,9 +111,10 @@ WEBUI_SECRET_KEY=long-random-secret
 WEBUI_ADMIN_EMAIL=your-admin-email@example.com
 WEBUI_ADMIN_PASSWORD=strong-admin-password
 
-DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB
+PGSSLMODE=require
 VECTOR_DB=pgvector
-PGVECTOR_DB_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+PGVECTOR_DB_URL=postgresql://USER:PASSWORD@HOST/DB
 PGVECTOR_CREATE_EXTENSION=false
 
 OPENAI_API_BASE_URL=https://your-provider.example.com/v1
@@ -128,6 +129,8 @@ Run this once in Neon before deploying:
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
+
+For Neon/Open WebUI v0.9, do not put `?sslmode=require` or `&channel_binding=require` in `DATABASE_URL` / `PGVECTOR_DB_URL`. Open WebUI currently has mixed psycopg2 and asyncpg startup paths, and their SSL query string handling conflicts. Use `PGSSLMODE=require` as a separate environment variable instead.
 
 Generate the cookie base64 from your local `cookies.json`:
 
