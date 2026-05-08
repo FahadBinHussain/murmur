@@ -48,10 +48,25 @@ echo "Starting Open WebUI on ${OPENWEBUI_INTERNAL_HOST}:${OPENWEBUI_INTERNAL_POR
 OPENWEBUI_PID="$!"
 
 echo "Waiting for Open WebUI health check..."
+OPENWEBUI_WAIT_SECONDS=0
 while true; do
-  if curl --silent --fail "${OPENWEBUI_BASE_URL}/health" >/dev/null; then
+  if HEALTH_BODY="$(curl --silent --show-error --max-time 5 "${OPENWEBUI_BASE_URL}/health" 2>&1)"; then
     echo "Open WebUI is ready."
     break
+  fi
+  OPENWEBUI_WAIT_SECONDS=$((OPENWEBUI_WAIT_SECONDS + 2))
+  if (( OPENWEBUI_WAIT_SECONDS % 30 == 0 )); then
+    echo "Still waiting for Open WebUI after ${OPENWEBUI_WAIT_SECONDS}s."
+    echo "Health check response: ${HEALTH_BODY}"
+    if command -v ss >/dev/null 2>&1; then
+      echo "Listening sockets:"
+      ss -ltnp || true
+    elif command -v netstat >/dev/null 2>&1; then
+      echo "Listening sockets:"
+      netstat -ltnp || true
+    fi
+    echo "Open WebUI process:"
+    ps -fp "$OPENWEBUI_PID" || true
   fi
   if ! kill -0 "$PROXY_PID" 2>/dev/null; then
     echo "Public proxy exited before Open WebUI became healthy."
