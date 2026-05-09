@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import binascii
+import hashlib
+import json
 import os
 import socket
 import tempfile
@@ -21,6 +23,10 @@ DEFAULT_FB_UPLOAD_ENDPOINTS = [
     "https://upload.facebook.com/ajax/mercury/upload.php",
     "https://upload.messenger.com/ajax/mercury/upload.php",
 ]
+
+
+class UserVisibleError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -752,6 +758,8 @@ class Murmur:
         )
 
     def user_facing_error(self, exc: Exception) -> str:
+        if isinstance(exc, UserVisibleError):
+            return str(exc)
         return "I hit an error while thinking. Check the bot logs."
 
     def help_message(self, thread_id: str) -> str:
@@ -1091,7 +1099,7 @@ class Murmur:
                 body, status = await self.post_image_generation(session, prompt)
 
             if status >= 400:
-                raise RuntimeError(f"Open WebUI image error {status}: {body}")
+                raise UserVisibleError(self.image_error_message(prompt, status, body))
 
             image_refs = self.parse_image_generation_response(body)
             if not image_refs:
@@ -1123,6 +1131,26 @@ class Murmur:
             except (aiohttp.ContentTypeError, ValueError):
                 body = await response.text()
             return body, response.status
+
+    def image_error_message(self, prompt: str, status: int, body: object) -> str:
+        raw_error = self.read_image_proxy_error(prompt)
+        if raw_error:
+            return "Image generation failed.\nRaw upstream error:\n" + raw_error
+        return f"Image generation failed.\nOpen WebUI image error {status}: {body}"
+
+    def read_image_proxy_error(self, prompt: str) -> str | None:
+        prompt_id = hashlib.sha256(
+            prompt.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        error_dir = Path(os.getenv("IMAGE_PROXY_ERROR_DIR", "/tmp/murmur-image-errors"))
+        error_path = error_dir / f"{prompt_id}.json"
+        try:
+            payload = json.loads(error_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+        message = payload.get("message") if isinstance(payload, dict) else None
+        return str(message) if message else None
 
     def parse_image_generation_response(self, body: object) -> list[dict[str, str]]:
         raw_items: list[object]

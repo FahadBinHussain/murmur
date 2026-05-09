@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import secrets
 import time
+from pathlib import Path
 from collections.abc import Iterable
 from contextlib import suppress
 
@@ -110,12 +112,36 @@ def compact_log_value(value: object, max_length: int = 2000) -> str:
 
 
 def log_image_proxy_error(prompt: str, message: str) -> None:
+    prompt_id = short_prompt_id(prompt)
     print(
         "IMAGE_PROXY_ERROR "
-        f"prompt_id={short_prompt_id(prompt)} "
+        f"prompt_id={prompt_id} "
         f"{compact_log_value(message)}",
         flush=True,
     )
+    write_image_proxy_error(prompt_id, message)
+
+
+def write_image_proxy_error(prompt_id: str, message: str) -> None:
+    error_dir = Path(os.getenv("IMAGE_PROXY_ERROR_DIR", "/tmp/murmur-image-errors"))
+    try:
+        error_dir.mkdir(parents=True, exist_ok=True)
+        (error_dir / f"{prompt_id}.json").write_text(
+            json.dumps(
+                {
+                    "prompt_id": prompt_id,
+                    "created": int(time.time()),
+                    "message": message,
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(
+            "IMAGE_PROXY_ERROR_WRITE_FAILED "
+            f"prompt_id={prompt_id} error={compact_log_value(exc)}",
+            flush=True,
+        )
 
 
 async def cloudflare_image_proxy_models(request: web.Request) -> web.Response:
