@@ -103,13 +103,14 @@ Model switching is per Messenger thread:
 /ai models
 /ai providers
 /ai provider 2
+/ai model openrouter 1
 /ai model free
 /ai model 7
 /ai @free summarize this in one sentence
 /ai @7 summarize this in one sentence
 ```
 
-`/ai models` fetches Open WebUI's model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response. `/ai providers` groups those same Open WebUI models by provider/connection and shows the free model counts. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs such as `or2.deepseek/...`.
+`/ai models` fetches Open WebUI's model endpoint and lists free models grouped by the Open WebUI connection/provider. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[OpenRouter]`. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs.
 
 AI replies start with the provider and model that produced the answer, for example:
 
