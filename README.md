@@ -114,7 +114,7 @@ Model switching is per Messenger thread:
 /ai image openrouter 2 1 a neon cyberpunk teashop in the rain
 ```
 
-`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection, including Cloudflare models configured with `CLOUDFLARE_MODEL_IDS`. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai image model openrouter 2 1` sets the current image model for the thread, and `/ai image openrouter 2 1 ...` sets that image model before generating. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs.
+`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection. Cloudflare model discovery uses Cloudflare's Workers AI `GET /accounts/{account_id}/ai/models/search` metadata endpoint, then Murmur still sends actual chat/image calls through Open WebUI. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai image model openrouter 2 1` sets the current image model for the thread, and `/ai image openrouter 2 1 ...` sets that image model before generating. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI for inference; provider switching selects Open WebUI model IDs.
 
 AI replies start with the provider and model that produced the answer, for example:
 
@@ -290,6 +290,7 @@ Future OpenAI-compatible provider families use the same shape:
 ```env
 OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,gemini,mistral
 CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
+CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS=true
 GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
 GEMINI_API_KEY_1=...
 MISTRAL_API_BASE_URL=https://your-openai-compatible-mistral-gateway/v1
@@ -318,6 +319,7 @@ MISTRAL_API_KEY_1=...
 | `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | No | | Five convenient OpenRouter key fields |
 | `CLOUDFLARE_API_BASE_URL` | No | derived from `CF_ACCOUNT_ID` | Cloudflare Workers AI OpenAI-compatible base URL |
 | `CLOUDFLARE_MODEL_IDS` | No | | Cloudflare model IDs to expose through Open WebUI Connections |
+| `CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS` | No | `true` | Hide experimental models when using Cloudflare Workers AI model search |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |

@@ -11,7 +11,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urlencode, urljoin, urlparse
 
 import aiohttp
 import fbchat_muqit.state as fb_state
@@ -82,6 +82,8 @@ class ModelOption:
     provider: str = ""
     is_free: bool = False
     pricing: dict[str, str] | None = None
+    task: str | None = None
+    capabilities: tuple[str, ...] = ()
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -1306,9 +1308,15 @@ class Murmur:
     def model_display(self, option: ModelOption) -> str:
         model_id = self.model_short_id(option.id)
         name = self.model_short_id(option.name)
+        capabilities = self.model_capability_suffix(option)
         if name and name != model_id:
-            return f"{model_id} ({name})"
-        return model_id
+            return f"{model_id}{capabilities} ({name})"
+        return f"{model_id}{capabilities}"
+
+    def model_capability_suffix(self, option: ModelOption) -> str:
+        if not option.capabilities:
+            return ""
+        return " [" + ", ".join(option.capabilities) + "]"
 
     def model_short_id(self, model_id: str) -> str:
         if "." in model_id:
@@ -1484,10 +1492,19 @@ class Murmur:
                 provider_by_url_idx,
                 configured_model_ids,
             )
+            cloudflare_url_idxs = {
+                url_idx
+                for url_idx, provider in provider_by_url_idx.items()
+                if self.provider_family(provider) == "cloudflare"
+            }
+            cloudflare_models = await self.fetch_cloudflare_models(
+                session,
+                provider_by_url_idx,
+            )
             connection_models = await self.fetch_openwebui_connection_models(
                 session,
                 provider_by_url_idx,
-                skip_url_idxs=set(configured_model_ids),
+                skip_url_idxs=set(configured_model_ids) | cloudflare_url_idxs,
             )
             api_models: list[ModelOption] = []
             for path in ("/api/models", "/api/v1/models"):
@@ -1507,7 +1524,7 @@ class Murmur:
                     break
 
         connection_models = self.dedupe_model_options(
-            configured_models + connection_models
+            cloudflare_models + configured_models + connection_models
         )
 
         if connection_models:
@@ -1542,6 +1559,99 @@ class Murmur:
                         name=model_name,
                         provider=provider,
                         is_free=self.is_free_model_id(model_id, model_name),
+                        task=self.configured_model_task(model_id),
+                        capabilities=self.configured_model_capabilities(model_id),
+                    )
+                )
+        return self.dedupe_model_options(models)
+
+    async def fetch_cloudflare_models(
+        self,
+        session: aiohttp.ClientSession,
+        provider_by_url_idx: dict[str, str],
+    ) -> list[ModelOption]:
+        cloudflare_providers = [
+            provider
+            for provider in provider_by_url_idx.values()
+            if self.provider_family(provider) == "cloudflare"
+        ]
+        if not cloudflare_providers:
+            return []
+
+        account_id = (
+            os.getenv("CLOUDFLARE_ACCOUNT_ID")
+            or os.getenv("CF_ACCOUNT_ID")
+            or ""
+        ).strip()
+        api_token = (
+            os.getenv("CLOUDFLARE_API_TOKEN")
+            or os.getenv("CLOUDFLARE_API_KEY")
+            or os.getenv("CLOUDFLARE_API_KEY_1")
+            or os.getenv("CF_API_TOKEN")
+            or ""
+        ).strip()
+        if not account_id or not api_token:
+            return []
+
+        raw_models: list[dict] = []
+        hide_experimental = os.getenv(
+            "CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS",
+            "true",
+        ).lower() not in {"0", "false", "no", "off"}
+        for page in range(1, 6):
+            params = {
+                "page": str(page),
+                "per_page": "100",
+                "hide_experimental": str(hide_experimental).lower(),
+            }
+            url = (
+                "https://api.cloudflare.com/client/v4/accounts/"
+                f"{account_id}/ai/models/search?{urlencode(params)}"
+            )
+            try:
+                async with session.get(
+                    url,
+                    headers={"Authorization": f"Bearer {api_token}"},
+                ) as response:
+                    if response.status >= 400:
+                        body = await response.text()
+                        print(
+                            "Cloudflare model search returned "
+                            f"{response.status}: {body[:500]}"
+                        )
+                        break
+                    body = await response.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                print(f"Cloudflare model search skipped: {exc}")
+                break
+
+            page_models = body.get("result") if isinstance(body, dict) else None
+            if not isinstance(page_models, list):
+                break
+            raw_models.extend(
+                model for model in page_models if isinstance(model, dict)
+            )
+            if len(page_models) < 100:
+                break
+
+        models: list[ModelOption] = []
+        for provider in sorted(set(cloudflare_providers), key=self.provider_sort_key):
+            for raw_model in raw_models:
+                name = str(raw_model.get("name") or "").strip()
+                if not name:
+                    continue
+                task = self.cloudflare_model_task(raw_model)
+                models.append(
+                    ModelOption(
+                        id=self.provider_model_id(provider, name),
+                        name=name,
+                        provider=provider,
+                        is_free=False,
+                        task=task,
+                        capabilities=self.cloudflare_model_capabilities(
+                            raw_model,
+                            task,
+                        ),
                     )
                 )
         return self.dedupe_model_options(models)
@@ -1584,6 +1694,8 @@ class Murmur:
                         provider=provider,
                         is_free=option.is_free,
                         pricing=option.pricing,
+                        task=option.task,
+                        capabilities=option.capabilities,
                     )
                 )
         return self.dedupe_model_options(models)
@@ -1702,10 +1814,130 @@ class Murmur:
                         if isinstance(raw_model.get("pricing"), dict)
                         else None
                     ),
+                    task=self.raw_model_task(raw_model),
+                    capabilities=self.raw_model_capabilities(raw_model),
                 )
             )
 
         return models
+
+    def raw_model_task(self, raw_model: dict) -> str | None:
+        task = raw_model.get("task")
+        if isinstance(task, dict):
+            name = task.get("name")
+            return str(name).strip() if name else None
+        if isinstance(task, str) and task.strip():
+            return task.strip()
+        for key in ("task_name", "type"):
+            value = raw_model.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def raw_model_capabilities(self, raw_model: dict) -> tuple[str, ...]:
+        task = self.raw_model_task(raw_model)
+        capabilities = self.capabilities_from_task(task)
+
+        raw_capabilities = raw_model.get("capabilities")
+        if isinstance(raw_capabilities, list):
+            for capability in raw_capabilities:
+                label = self.normalize_capability_label(str(capability))
+                if label:
+                    capabilities.append(label)
+
+        supported_parameters = raw_model.get("supported_parameters")
+        if isinstance(supported_parameters, list):
+            for parameter in supported_parameters:
+                label = self.capability_from_parameter(str(parameter))
+                if label:
+                    capabilities.append(label)
+
+        return tuple(dict.fromkeys(capabilities))
+
+    def cloudflare_model_task(self, raw_model: dict) -> str | None:
+        return self.raw_model_task(raw_model)
+
+    def cloudflare_model_capabilities(
+        self,
+        raw_model: dict,
+        task: str | None,
+    ) -> tuple[str, ...]:
+        capabilities = self.capabilities_from_task(task)
+        properties = raw_model.get("properties")
+        if isinstance(properties, list):
+            for prop in properties:
+                if not isinstance(prop, dict):
+                    continue
+                prop_id = str(prop.get("property_id") or "").strip().lower()
+                value = str(prop.get("value") or "").strip().lower()
+                if value not in {"true", "1", "yes"}:
+                    continue
+                label = self.normalize_capability_label(prop_id)
+                if label:
+                    capabilities.append(label)
+
+        return tuple(dict.fromkeys(capabilities))
+
+    def configured_model_task(self, model_id: str) -> str | None:
+        model_id = self.model_short_id(model_id).lower()
+        if any(part in model_id for part in ("flux", "stable-diffusion", "sdxl")):
+            return "Text-to-Image"
+        if "embedding" in model_id or "/bge-" in model_id:
+            return "Text Embeddings"
+        if "whisper" in model_id:
+            return "Automatic Speech Recognition"
+        return None
+
+    def configured_model_capabilities(self, model_id: str) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                self.capabilities_from_task(self.configured_model_task(model_id))
+            )
+        )
+
+    def capabilities_from_task(self, task: str | None) -> list[str]:
+        if not task:
+            return []
+        normalized = self.normalize_provider_key(task)
+        task_map = {
+            "textgeneration": "text",
+            "texttoimage": "image",
+            "imagetotext": "vision",
+            "textembeddings": "embeddings",
+            "automaticspeechrecognition": "speech-to-text",
+            "texttospeech": "speech",
+            "texttovideo": "video",
+            "musicgeneration": "music",
+            "summarization": "summarize",
+            "textclassification": "classify",
+            "objectdetection": "detect",
+            "translation": "translate",
+            "imageclassification": "classify-image",
+            "voiceactivitydetection": "voice-activity",
+        }
+        label = task_map.get(normalized)
+        return [label] if label else []
+
+    def capability_from_parameter(self, parameter: str) -> str | None:
+        normalized = self.normalize_provider_key(parameter)
+        if normalized in {"tools", "toolchoice", "functioncalling"}:
+            return "function-calling"
+        if normalized in {"responseformat", "structuredoutputs"}:
+            return "structured-output"
+        return None
+
+    def normalize_capability_label(self, capability: str) -> str | None:
+        normalized = self.normalize_provider_key(capability)
+        capability_map = {
+            "functioncalling": "function-calling",
+            "reasoning": "reasoning",
+            "vision": "vision",
+            "lora": "lora",
+            "batch": "batch",
+            "realtime": "real-time",
+            "asyncqueue": "async",
+        }
+        return capability_map.get(normalized)
 
     def provider_from_raw_model(
         self,

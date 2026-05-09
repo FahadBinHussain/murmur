@@ -181,6 +181,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 base_url = os.environ["OPENWEBUI_BASE_URL"].rstrip("/")
@@ -240,6 +241,63 @@ def update_config(desired_entries, preserved_entries):
     request("/openai/config/update", "POST", payload, token=token)
 
 
+def fetch_cloudflare_model_ids():
+    account_id = (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        or os.getenv("CF_ACCOUNT_ID")
+        or ""
+    ).strip()
+    api_token = next(
+        (
+            connection["key"]
+            for connection in connections
+            if connection.get("family") == "cloudflare" and connection.get("key")
+        ),
+        "",
+    )
+    if not account_id or not api_token:
+        return []
+
+    hide_experimental = (
+        os.getenv("CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS", "true").lower()
+        not in {"0", "false", "no", "off"}
+    )
+    model_ids = []
+    for page in range(1, 6):
+        params = urllib.parse.urlencode(
+            {
+                "page": page,
+                "per_page": 100,
+                "hide_experimental": str(hide_experimental).lower(),
+            }
+        )
+        req = urllib.request.Request(
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/models/search?{params}"
+        )
+        req.add_header("Authorization", f"Bearer {api_token}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            print(f"cloudflare model-id search skipped: {exc}")
+            return []
+
+        page_models = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(page_models, list):
+            break
+        for model in page_models:
+            if not isinstance(model, dict):
+                continue
+            model_id = str(model.get("name") or "").strip()
+            if model_id:
+                model_ids.append(model_id)
+        if len(page_models) < 100:
+            break
+
+    return sorted(dict.fromkeys(model_ids))
+
+
 try:
     token = request(
         "/api/v1/auths/signin",
@@ -284,6 +342,11 @@ try:
         if configured_model_ids:
             existing = model_ids_by_family.setdefault(connection["family"], [])
             existing.extend(configured_model_ids)
+
+    cloudflare_model_ids = fetch_cloudflare_model_ids()
+    if cloudflare_model_ids:
+        existing = model_ids_by_family.setdefault("cloudflare", [])
+        existing.extend(cloudflare_model_ids)
 
     for family, index in first_index_by_family.items():
         if model_ids_by_family.get(family):
