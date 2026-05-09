@@ -1442,15 +1442,37 @@ class Murmur:
         )
 
     def status_message(self, thread_id: str) -> str:
-        text_provider = self.provider_display_name(self.current_provider(thread_id))
-        text_alias = self.current_model_alias(thread_id)
+        chat_model = self.current_model(thread_id)
+        chat_provider = self.provider_for_selected_model(thread_id, chat_model)
+        chat_alias = self.current_model_alias(thread_id)
+        image_model = self.current_image_model(thread_id)
+        image_alias = self.current_image_model_alias(thread_id)
+        image_provider = (
+            self.provider_for_selected_model(thread_id, image_model)
+            if image_model
+            else "openwebui"
+        )
+        image_model_label = (
+            self.model_short_id(image_model)
+            if image_model
+            else "Open WebUI configured default"
+        )
+        image_size = self.settings.image_size or "Open WebUI configured default"
         return "\n".join(
             [
                 "Status",
-                f"Provider: {text_provider} via Open WebUI",
-                f"Chat model: {text_alias} ({self.model_short_id(self.current_model(thread_id))})",
-                f"Image model: {self.image_model_status(thread_id)}",
-                "Vision: disabled until bridged through Open WebUI",
+                "Bridge: Open WebUI",
+                "",
+                "Chat",
+                f"Provider: {self.provider_display_name(chat_provider)}",
+                f"Model: {self.model_short_id(chat_model)}",
+                f"Selection: {chat_alias}",
+                "",
+                "Image",
+                f"Provider: {self.provider_display_name(image_provider)}",
+                f"Model: {image_model_label}",
+                f"Selection: {image_alias}",
+                f"Size: {image_size}",
             ]
         )
 
