@@ -52,6 +52,9 @@ class Settings:
     fb_upload_proxy: str | None
     fb_upload_retries: int
     fb_upload_endpoints: list[str]
+    fb_log_names: bool
+    fb_log_names_keep_ids: bool
+    fb_log_name_cache_path: str
     bot_prefix: str
     respond_only_on_prefix: bool
     respond_to_bot_replies: bool
@@ -193,6 +196,10 @@ def load_settings() -> Settings:
         fb_upload_endpoints=env_csv(
             "FB_UPLOAD_ENDPOINTS", DEFAULT_FB_UPLOAD_ENDPOINTS
         ),
+        fb_log_names=env_bool("FB_LOG_NAMES", True),
+        fb_log_names_keep_ids=env_bool("FB_LOG_NAMES_KEEP_IDS", True),
+        fb_log_name_cache_path=os.getenv("FB_LOG_NAME_CACHE_PATH")
+        or str(Path(tempfile.gettempdir()) / "murmur-fb-names.json"),
         bot_prefix=os.getenv("BOT_PREFIX", "/ai").strip(),
         respond_only_on_prefix=env_bool("RESPOND_ONLY_ON_PREFIX", True),
         respond_to_bot_replies=env_bool("RESPOND_TO_BOT_REPLIES", True),
@@ -230,6 +237,12 @@ class Murmur:
         self.mqtt_watchdog_task: asyncio.Task | None = None
         self.response_tasks: set[asyncio.Task] = set()
         self.file_upload_lock = asyncio.Lock()
+        self.fb_user_names: dict[str, str] = {}
+        self.fb_thread_names: dict[str, str] = {}
+        self.fb_thread_name_tasks: dict[str, asyncio.Task] = {}
+        self.fb_user_name_tasks: dict[str, asyncio.Task] = {}
+        self.fb_name_cache_path = Path(settings.fb_log_name_cache_path)
+        self.load_facebook_name_cache()
         self.configure_facebook_http_timeout()
         self.configure_mqtt_proxy()
         self.client = Client(
@@ -237,8 +250,304 @@ class Murmur:
             userAgent=settings.fb_user_agent,
             proxy=settings.fb_proxy,
         )
+        self.patch_facebook_event_logs()
         self.client.event(EventType.LISTENING)(self.on_listening)
         self.client.event(EventType.MESSAGE)(self.on_message)
+
+    def patch_facebook_event_logs(self) -> None:
+        if not self.settings.fb_log_names:
+            return
+
+        self.client.on_listening = self.log_facebook_listening_event
+        self.client.on_message = self.log_facebook_message_event
+        self.client.on_message_seen = self.log_facebook_seen_event
+        self.client.on_message_reaction = self.log_facebook_reaction_event
+        self.client.on_message_unsent = self.log_facebook_unsent_event
+        self.client.on_message_delivered = self.log_facebook_delivered_event
+        self.client.on_mark_read = self.log_facebook_mark_read_event
+        self.client.on_typing = self.log_facebook_typing_event
+
+    def load_facebook_name_cache(self) -> None:
+        try:
+            raw = json.loads(self.fb_name_cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+
+        users = raw.get("users", {}) if isinstance(raw, dict) else {}
+        threads = raw.get("threads", {}) if isinstance(raw, dict) else {}
+        if isinstance(users, dict):
+            self.fb_user_names = {
+                str(user_id): str(name)
+                for user_id, name in users.items()
+                if user_id and name
+            }
+        if isinstance(threads, dict):
+            self.fb_thread_names = {
+                str(thread_id): str(name)
+                for thread_id, name in threads.items()
+                if thread_id and name
+            }
+
+    def write_facebook_name_cache(self) -> None:
+        if not self.settings.fb_log_names:
+            return
+
+        try:
+            self.fb_name_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "users": dict(sorted(self.fb_user_names.items())),
+                "threads": dict(sorted(self.fb_thread_names.items())),
+            }
+            temp_path = self.fb_name_cache_path.with_suffix(
+                f"{self.fb_name_cache_path.suffix}.tmp"
+            )
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(self.fb_name_cache_path)
+        except OSError as exc:
+            print(f"Messenger name cache write failed: {exc}")
+
+    @staticmethod
+    def facebook_id(value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def remember_facebook_user_name(self, user_id: object, name: object) -> bool:
+        user_id_text = self.facebook_id(user_id)
+        name_text = str(name or "").strip()
+        if not user_id_text or not name_text or name_text == user_id_text:
+            return False
+        if self.fb_user_names.get(user_id_text) == name_text:
+            return False
+        self.fb_user_names[user_id_text] = name_text
+        return True
+
+    def remember_facebook_thread_name(self, thread_id: object, name: object) -> bool:
+        thread_id_text = self.facebook_id(thread_id)
+        name_text = str(name or "").strip()
+        if not thread_id_text or not name_text or name_text == thread_id_text:
+            return False
+        if self.fb_thread_names.get(thread_id_text) == name_text:
+            return False
+        self.fb_thread_names[thread_id_text] = name_text
+        return True
+
+    def remember_self_identity(self) -> None:
+        changed = self.remember_facebook_user_name(self.client.uid, self.client.name)
+        if changed:
+            self.write_facebook_name_cache()
+
+    async def ensure_facebook_identity_context(
+        self,
+        thread_id: object = None,
+        user_ids: list[object] | tuple[object, ...] = (),
+        timeout: float = 2.5,
+    ) -> None:
+        if not self.settings.fb_log_names:
+            return
+
+        clean_thread_id = self.facebook_id(thread_id)
+        clean_user_ids = [
+            user_id
+            for user_id in (self.facebook_id(value) for value in user_ids)
+            if user_id
+        ]
+
+        if clean_thread_id and (
+            clean_thread_id not in self.fb_thread_names
+            or any(user_id not in self.fb_user_names for user_id in clean_user_ids)
+        ):
+            await self.ensure_facebook_thread_cache(clean_thread_id, timeout=timeout)
+
+        unresolved_user_ids = [
+            user_id
+            for user_id in clean_user_ids
+            if user_id not in self.fb_user_names
+        ]
+        per_user_timeout = max(0.5, min(1.5, timeout))
+        for user_id in unresolved_user_ids[:4]:
+            await self.ensure_facebook_user_cache(user_id, timeout=per_user_timeout)
+
+    async def ensure_facebook_thread_cache(
+        self,
+        thread_id: str,
+        timeout: float = 2.5,
+    ) -> None:
+        task = self.fb_thread_name_tasks.get(thread_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self.fetch_facebook_thread_names(thread_id))
+            self.fb_thread_name_tasks[thread_id] = task
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return
+
+    async def ensure_facebook_user_cache(
+        self,
+        user_id: str,
+        timeout: float = 1.5,
+    ) -> None:
+        if user_id in self.fb_user_names:
+            return
+
+        task = self.fb_user_name_tasks.get(user_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self.fetch_facebook_user_name(user_id))
+            self.fb_user_name_tasks[user_id] = task
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return
+
+    async def fetch_facebook_thread_names(self, thread_id: str) -> None:
+        try:
+            threads = await self.client.fetch_thread_info([thread_id])
+        except Exception as exc:
+            print(f"Messenger thread name lookup failed for {thread_id}: {exc}")
+            return
+
+        changed = False
+        for thread in threads:
+            changed |= self.remember_facebook_thread_name(
+                getattr(thread, "thread_id", thread_id),
+                getattr(thread, "name", ""),
+            )
+            participants = getattr(thread, "all_participants", ()) or ()
+            if not participants:
+                changed |= self.remember_facebook_user_name(
+                    getattr(thread, "thread_id", ""),
+                    getattr(thread, "name", ""),
+                )
+            for participant in participants:
+                changed |= self.remember_facebook_user_name(
+                    getattr(participant, "id", ""),
+                    getattr(participant, "name", ""),
+                )
+
+        if changed:
+            self.write_facebook_name_cache()
+
+    async def fetch_facebook_user_name(self, user_id: str) -> None:
+        try:
+            users = await self.client.fetch_user_info(user_id)
+        except Exception as exc:
+            print(f"Messenger user name lookup failed for {user_id}: {exc}")
+            return
+
+        user = users.get(user_id) if isinstance(users, dict) else None
+        changed = False
+        if user is not None:
+            changed = self.remember_facebook_user_name(
+                getattr(user, "id", user_id),
+                getattr(user, "name", ""),
+            )
+        if changed:
+            self.write_facebook_name_cache()
+
+    def facebook_user_label(self, user_id: object) -> str:
+        user_id_text = self.facebook_id(user_id)
+        if not user_id_text:
+            return "unknown user"
+        return self.facebook_label(user_id_text, self.fb_user_names.get(user_id_text))
+
+    def facebook_thread_label(self, thread_id: object) -> str:
+        thread_id_text = self.facebook_id(thread_id)
+        if not thread_id_text:
+            return "unknown thread"
+        return self.facebook_label(
+            thread_id_text,
+            self.fb_thread_names.get(thread_id_text),
+        )
+
+    def facebook_label(self, item_id: str, name: str | None) -> str:
+        if not name:
+            return item_id
+        if self.settings.fb_log_names_keep_ids:
+            return f"{name} ({item_id})"
+        return name
+
+    async def log_facebook_listening_event(self) -> None:
+        return
+
+    async def log_facebook_message_event(self, event_data) -> None:
+        await self.ensure_facebook_identity_context(
+            event_data.thread_id,
+            [event_data.sender_id],
+        )
+        self.client.logger.info(
+            f"{self.facebook_user_label(event_data.sender_id)} "
+            f"has sent a message to thread {self.facebook_thread_label(event_data.thread_id)}"
+        )
+
+    async def log_facebook_typing_event(self, event_data) -> None:
+        await self.ensure_facebook_identity_context(
+            event_data.thread_id,
+            [event_data.sender_id],
+        )
+        state = "is typing" if event_data.state else "stopped typing"
+        self.client.logger.info(
+            f"{self.facebook_user_label(event_data.sender_id)} {state} "
+            f"in thread {self.facebook_thread_label(event_data.thread_id)}"
+        )
+
+    async def log_facebook_seen_event(self, event_data) -> None:
+        await self.ensure_facebook_identity_context(
+            event_data.thread_id,
+            [event_data.user_id],
+        )
+        self.client.logger.info(
+            f"{self.facebook_user_label(event_data.user_id)} has seen messages "
+            f"in thread {self.facebook_thread_label(event_data.thread_id)}"
+        )
+
+    async def log_facebook_reaction_event(self, event_data) -> None:
+        await self.ensure_facebook_identity_context(
+            event_data.thread_id,
+            [event_data.reactor, event_data.reacted_message_sender],
+        )
+        if getattr(event_data.reaction_type, "value", 0):
+            action = f"removed reaction {event_data.reaction or ''} from"
+        else:
+            action = f"reacted with {event_data.reaction or ''} to"
+        self.client.logger.info(
+            f"{self.facebook_user_label(event_data.reactor)} {action} "
+            f"the message {event_data.id} in thread {self.facebook_thread_label(event_data.thread_id)}"
+        )
+
+    async def log_facebook_unsent_event(self, event_data) -> None:
+        await self.ensure_facebook_identity_context(
+            event_data.thread_id,
+            [event_data.sender_id],
+        )
+        self.client.logger.info(
+            f"{self.facebook_user_label(event_data.sender_id)} unsent the message "
+            f"{event_data.id} in thread {self.facebook_thread_label(event_data.thread_id)}"
+        )
+
+    async def log_facebook_delivered_event(self, event_data) -> None:
+        await self.ensure_facebook_identity_context(
+            event_data.thread_id,
+            [event_data.user_id],
+        )
+        self.client.logger.info(
+            f"The message {event_data.message_id} is delivered to "
+            f"{self.facebook_user_label(event_data.user_id)} in thread "
+            f"{self.facebook_thread_label(event_data.thread_id)}"
+        )
+
+    async def log_facebook_mark_read_event(self, event_data) -> None:
+        for thread_id in event_data.thread_ids:
+            await self.ensure_facebook_identity_context(thread_id)
+        threads = [
+            self.facebook_thread_label(thread_id)
+            for thread_id in event_data.thread_ids
+        ]
+        self.client.logger.info(f"The Thread {threads} marked as Read.")
 
     def run(self) -> None:
         if self.settings.openwebui_warmup:
@@ -393,6 +702,7 @@ class Murmur:
         return {key: value for key, value in args.items() if value is not None}
 
     async def on_listening(self) -> None:
+        self.remember_self_identity()
         print(f"Murmur online as {self.client.name} ({self.client.uid})")
         if self.mqtt_watchdog_task is None or self.mqtt_watchdog_task.done():
             self.mqtt_watchdog_task = asyncio.create_task(self.watch_mqtt_listener())
