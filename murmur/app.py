@@ -4,6 +4,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import socket
 import tempfile
 from collections import defaultdict, deque
@@ -678,6 +679,10 @@ class Murmur:
             prompt = text[len(prefix) :].strip()
             return PromptRequest(prompt or "Hello", is_prefixed=True)
 
+        inline_prompt = self.inline_prefix_prompt(text, prefix)
+        if inline_prompt is not None:
+            return PromptRequest(inline_prompt, is_prefixed=True)
+
         if text.lower() in {"/help", "help"}:
             return PromptRequest("help", is_prefixed=True)
 
@@ -691,6 +696,30 @@ class Murmur:
             return PromptRequest(text, is_prefixed=False)
 
         return None
+
+    def inline_prefix_prompt(self, text: str, prefix: str) -> str | None:
+        if not prefix:
+            return None
+
+        lower_text = text.lower()
+        lower_prefix = prefix.lower()
+        start = 0
+
+        while True:
+            index = lower_text.find(lower_prefix, start)
+            if index < 0:
+                return None
+
+            end = index + len(prefix)
+            before_ok = index == 0 or text[index - 1].isspace()
+            after_ok = end == len(text) or text[end].isspace() or text[end] in ",.!?:;"
+            if before_ok and after_ok:
+                before = text[:index].strip()
+                after = text[end:].strip(" \t\r\n,.!?:;")
+                prompt = re.sub(r"\s+", " ", f"{before} {after}".strip())
+                return prompt or "Hello"
+
+            start = end
 
     async def handle_control_command(self, thread_id: str, prompt: str) -> str | None:
         parts = prompt.split()
