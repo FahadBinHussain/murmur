@@ -110,10 +110,11 @@ Model switching is per Messenger thread:
 /ai model 7
 /ai @free summarize this in one sentence
 /ai @7 summarize this in one sentence
+/ai image model openrouter 2 1
 /ai image openrouter 2 1 a neon cyberpunk teashop in the rain
 ```
 
-`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection, including Cloudflare models configured with `CLOUDFLARE_MODEL_IDS`. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs.
+`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection, including Cloudflare models configured with `CLOUDFLARE_MODEL_IDS`. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai image model openrouter 2 1` sets the current image model for the thread, and `/ai image openrouter 2 1 ...` sets that image model before generating. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs.
 
 AI replies start with the provider and model that produced the answer, for example:
 
@@ -185,7 +186,7 @@ FB_COOKIES_JSON_B64=base64-encoded-cookies-json
 
 CF_ACCOUNT_ID=your-cloudflare-account-id
 CF_API_TOKEN=your-cloudflare-workers-ai-token
-CLOUDFLARE_IMAGE_MODEL=@cf/black-forest-labs/flux-1-schnell
+IMAGE_GENERATION_MODEL=@cf/black-forest-labs/flux-1-schnell
 IMAGE_PROXY_API_KEY=random-local-image-proxy-key
 ```
 
@@ -339,12 +340,11 @@ MISTRAL_API_KEY_1=...
 | `ENABLE_BASE_MODELS_CACHE` | No | `true` | Cache Open WebUI base model list after startup |
 | `CF_ACCOUNT_ID` | No | | Cloudflare account ID for the optional image bridge |
 | `CF_API_TOKEN` | No | | Cloudflare Workers AI token for the optional image bridge |
-| `CLOUDFLARE_IMAGE_MODEL` | No | | Cloudflare text-to-image model, e.g. `@cf/black-forest-labs/flux-1-schnell` |
 | `IMAGE_PROXY_API_KEY` | No | `IMAGES_OPENAI_API_KEY` or `CF_API_TOKEN` | Bearer token Open WebUI uses to call Murmur's local image proxy |
 | `IMAGE_PROXY_BASE_PATH` | No | `/murmur-image-openai/v1` | Internal OpenAI-compatible image proxy path served by Murmur's public proxy |
-| `ENABLE_IMAGE_GENERATION` | No | `true` when Cloudflare image vars exist | Open WebUI image generation toggle |
-| `IMAGE_GENERATION_ENGINE` | No | `openai` when Cloudflare image vars exist | Open WebUI image engine |
-| `IMAGE_GENERATION_MODEL` | No | `CLOUDFLARE_IMAGE_MODEL` | Image model sent through Open WebUI |
+| `ENABLE_IMAGE_GENERATION` | No | `true` when Cloudflare image proxy vars exist | Open WebUI image generation toggle |
+| `IMAGE_GENERATION_ENGINE` | No | `openai` when Cloudflare image proxy vars exist | Open WebUI image engine |
+| `IMAGE_GENERATION_MODEL` | No | | Default image model sent through Open WebUI |
 | `IMAGES_OPENAI_API_BASE_URL` | No | local Murmur image proxy | Open WebUI image API base URL |
 | `IMAGES_OPENAI_API_KEY` | No | `IMAGE_PROXY_API_KEY` | Open WebUI image API bearer token |
 | `IMAGE_SIZE` | No | `1024x1024` | Open WebUI image size value |

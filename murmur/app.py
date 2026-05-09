@@ -211,6 +211,8 @@ class Murmur:
         )
         self.thread_models: dict[str, str] = {}
         self.thread_model_aliases: dict[str, str] = {}
+        self.thread_image_models: dict[str, str] = {}
+        self.thread_image_model_aliases: dict[str, str] = {}
         self.thread_model_options: dict[str, list[ModelOption]] = {}
         self.thread_providers: dict[str, str] = {}
         self.thread_provider_options: dict[str, list[str]] = {}
@@ -823,17 +825,38 @@ class Murmur:
                 return BotResponse(
                     text=(
                         f"Usage: {self.settings.bot_prefix} image <prompt>\n"
-                        f"Or: {self.settings.bot_prefix} image openrouter 2 1 <prompt>"
+                        f"Or: {self.settings.bot_prefix} image openrouter 2 1 <prompt>\n"
+                        f"Set image model: {self.settings.bot_prefix} image model openrouter 2 1"
                     )
                 )
-            image_prompt, image_model = await self.extract_image_request(
+            image_args = parts[1].strip()
+            image_arg_parts = image_args.split(maxsplit=1)
+            if image_arg_parts and image_arg_parts[0].lower() in {"model", "use"}:
+                if len(image_arg_parts) == 1:
+                    return BotResponse(text=self.current_image_model_message(message.thread_id))
+                return BotResponse(
+                    text=await self.set_thread_image_model(
+                        message.thread_id,
+                        image_arg_parts[1],
+                    )
+                )
+
+            image_prompt, image_model, image_selector = await self.extract_image_request(
                 message.thread_id,
-                parts[1].strip(),
+                image_args,
             )
+            if image_model:
+                self.set_thread_image_model_value(
+                    message.thread_id,
+                    image_model,
+                    image_selector or image_model,
+                )
+                if not image_prompt:
+                    return BotResponse(text=self.current_image_model_message(message.thread_id))
+
             return await self.generate_image_response(
                 message.thread_id,
                 image_prompt,
-                image_model,
             )
 
         if command in {"see", "vision", "look"}:
@@ -880,8 +903,9 @@ class Murmur:
                 f"- {prefix} @<number|alias> message: one-shot chat model.",
                 "",
                 "Image generation",
-                f"- {prefix} image ...: generate an image.",
-                f"- {prefix} image <provider> [connection] <number> ...: try a model for image generation.",
+                f"- {prefix} image ...: generate using this thread's image model.",
+                f"- {prefix} image model <provider> [connection] <number>: set this thread's image model.",
+                f"- {prefix} image <provider> [connection] <number> ...: set image model and generate.",
                 "",
                 f"Use {prefix} status for current settings.",
             ]
@@ -895,14 +919,16 @@ class Murmur:
                 "Status",
                 f"Provider: {text_provider} via Open WebUI",
                 f"Chat model: {text_alias} ({self.model_short_id(self.current_model(thread_id))})",
-                f"Image default: {self.image_model_status()}",
+                f"Image model: {self.image_model_status(thread_id)}",
                 "Vision: disabled until bridged through Open WebUI",
             ]
         )
 
-    def image_model_status(self) -> str:
-        model = self.image_model_label()
-        provider = self.provider_for_model(model)
+    def image_model_status(self, thread_id: str) -> str:
+        model = self.current_image_model(thread_id)
+        if not model:
+            return "Open WebUI configured default"
+        provider = self.provider_for_selected_model(thread_id, model)
         size = f", {self.settings.image_size}" if self.settings.image_size else ""
         header = self.response_header(provider, model)
         return f"{header[:-1]}{size}]" if size else header
@@ -933,11 +959,11 @@ class Murmur:
         self,
         thread_id: str,
         prompt: str,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, str | None]:
         prompt = prompt.strip()
         parts = prompt.split()
-        if len(parts) < 3:
-            return prompt, None
+        if len(parts) < 2:
+            return prompt, None, None
 
         options = await self.fetch_model_options(include_all=True)
         if options:
@@ -949,6 +975,10 @@ class Murmur:
                 key=self.provider_sort_key,
             )
 
+        full_selector_model = self.resolve_provider_model(thread_id, prompt)
+        if full_selector_model:
+            return "", full_selector_model, prompt
+
         max_selector_parts = min(len(parts) - 1, 5)
         for selector_length in range(max_selector_parts, 1, -1):
             selector = " ".join(parts[:selector_length])
@@ -956,15 +986,37 @@ class Murmur:
             if model:
                 image_prompt = " ".join(parts[selector_length:]).strip()
                 if image_prompt:
-                    return image_prompt, model
+                    return image_prompt, model, selector
 
-        return prompt, None
+        return prompt, None, None
 
     def current_model(self, thread_id: str) -> str:
         return self.thread_models.get(thread_id, self.settings.openwebui_model)
 
     def current_model_alias(self, thread_id: str) -> str:
         return self.thread_model_aliases.get(thread_id, "default")
+
+    def current_image_model(self, thread_id: str) -> str | None:
+        return self.thread_image_models.get(
+            thread_id,
+            self.settings.image_generation_model,
+        )
+
+    def current_image_model_alias(self, thread_id: str) -> str:
+        return self.thread_image_model_aliases.get(thread_id, "default")
+
+    def current_image_model_message(self, thread_id: str) -> str:
+        alias = self.current_image_model_alias(thread_id)
+        model = self.current_image_model(thread_id)
+        if not model:
+            return (
+                "Current image model: Open WebUI configured default\n"
+                f"Use {self.settings.bot_prefix} image model <provider> [connection] <number>."
+            )
+        return (
+            f"Current image model: {alias} ({self.model_short_id(model)})\n"
+            f"Use {self.settings.bot_prefix} image model <provider> [connection] <number>."
+        )
 
     def current_provider(self, thread_id: str) -> str:
         return self.thread_providers.get(
@@ -1056,6 +1108,49 @@ class Murmur:
             thread_id, model
         )
         return f"Model set to {alias} ({self.model_short_id(model)}) for this thread."
+
+    async def set_thread_image_model(self, thread_id: str, name: str) -> str:
+        alias = name.strip().lower().lstrip("@")
+        if len(alias.split()) >= 2 and not self.thread_provider_model_options.get(
+            thread_id
+        ):
+            options = await self.fetch_model_options(include_all=True)
+            self.thread_model_options[thread_id] = options
+            groups = self.group_model_options(options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+
+        model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
+            alias, thread_id
+        )
+        if model is None:
+            return (
+                f"Unknown image model: {name}\n"
+                f"Use {self.settings.bot_prefix} models to see available models.\n"
+                f"Image model syntax: {self.settings.bot_prefix} image model openrouter 2 1"
+            )
+
+        self.set_thread_image_model_value(thread_id, model, alias)
+        return (
+            f"Image model set to {alias} ({self.model_short_id(model)}) "
+            "for this thread."
+        )
+
+    def set_thread_image_model_value(
+        self,
+        thread_id: str,
+        model: str,
+        requested: str,
+    ) -> None:
+        self.thread_image_models[thread_id] = model
+        self.thread_image_model_aliases[thread_id] = self.model_label(
+            thread_id,
+            requested.strip().lower().lstrip("@"),
+            model,
+        )
 
     def resolve_provider_model(self, thread_id: str, name: str) -> str | None:
         parts = name.split()
@@ -1160,6 +1255,7 @@ class Murmur:
         free_only: bool = False,
     ) -> str:
         current_model = self.current_model(thread_id)
+        current_image_model = self.current_image_model(thread_id)
         if include_all:
             title = "All models"
         elif free_only:
@@ -1178,7 +1274,12 @@ class Murmur:
             lines.append("")
             lines.append(f"[{self.provider_display_name(provider)}]")
             for index, option in enumerate(provider_options, start=1):
-                current = " (current)" if option.id == current_model else ""
+                current_labels = []
+                if option.id == current_model:
+                    current_labels.append("chat current")
+                if current_image_model and option.id == current_image_model:
+                    current_labels.append("image current")
+                current = f" ({', '.join(current_labels)})" if current_labels else ""
                 lines.append(f"{index}. {self.model_display(option)}{current}")
 
         lines.append("")
@@ -1782,9 +1883,8 @@ class Murmur:
         self,
         thread_id: str,
         prompt: str,
-        model: str | None = None,
     ) -> BotResponse:
-        model = model or self.settings.image_generation_model
+        model = self.current_image_model(thread_id)
         paths = await self.request_image_generation(prompt, model)
         model_label = model or self.image_model_label()
         provider = self.provider_for_selected_model(thread_id, model_label)

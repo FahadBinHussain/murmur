@@ -69,9 +69,11 @@ def image_proxy_auth_error(request: web.Request) -> web.Response | None:
 def image_proxy_config_error() -> web.Response | None:
     missing = [
         name
-        for name in ("CF_ACCOUNT_ID", "CF_API_TOKEN", "CLOUDFLARE_IMAGE_MODEL")
+        for name in ("CF_ACCOUNT_ID", "CF_API_TOKEN")
         if not os.getenv(name)
     ]
+    if not cloudflare_image_model():
+        missing.append("IMAGE_GENERATION_MODEL")
     if missing:
         return web.json_response(
             {
@@ -82,6 +84,14 @@ def image_proxy_config_error() -> web.Response | None:
             status=503,
         )
     return None
+
+
+def cloudflare_image_model() -> str:
+    return (
+        os.getenv("IMAGE_GENERATION_MODEL")
+        or os.getenv("CLOUDFLARE_IMAGE_MODEL")
+        or ""
+    ).strip()
 
 
 def parse_positive_int(value: object, default: int, maximum: int | None = None) -> int:
@@ -153,7 +163,7 @@ async def cloudflare_image_proxy_models(request: web.Request) -> web.Response:
     if config_error is not None:
         return config_error
 
-    model = os.environ["CLOUDFLARE_IMAGE_MODEL"]
+    model = cloudflare_image_model()
     return web.json_response(
         {
             "object": "list",
@@ -212,7 +222,7 @@ async def generate_cloudflare_image(
 ) -> str | web.Response:
     account_id = os.environ["CF_ACCOUNT_ID"]
     api_token = os.environ["CF_API_TOKEN"]
-    model = os.environ["CLOUDFLARE_IMAGE_MODEL"]
+    model = cloudflare_image_model()
     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
     try:

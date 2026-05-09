@@ -16,14 +16,15 @@ export ENABLE_OLLAMA_API="${ENABLE_OLLAMA_API:-false}"
 export ENABLE_BASE_MODELS_CACHE="${ENABLE_BASE_MODELS_CACHE:-true}"
 export OPENWEBUI_ACCESS_LOG="${OPENWEBUI_ACCESS_LOG:-false}"
 
-if [[ -n "${CF_ACCOUNT_ID:-}" && -n "${CF_API_TOKEN:-}" && -n "${CLOUDFLARE_IMAGE_MODEL:-}" ]]; then
+image_generation_model="${IMAGE_GENERATION_MODEL:-${CLOUDFLARE_IMAGE_MODEL:-}}"
+if [[ -n "${CF_ACCOUNT_ID:-}" && -n "${CF_API_TOKEN:-}" && "$image_generation_model" == @cf/* ]]; then
   export IMAGE_PROXY_BASE_PATH="${IMAGE_PROXY_BASE_PATH:-/murmur-image-openai/v1}"
   export IMAGE_PROXY_API_KEY="${IMAGE_PROXY_API_KEY:-${IMAGES_OPENAI_API_KEY:-${CF_API_TOKEN}}}"
   export IMAGES_OPENAI_API_KEY="${IMAGES_OPENAI_API_KEY:-${IMAGE_PROXY_API_KEY}}"
   export IMAGES_OPENAI_API_BASE_URL="${IMAGES_OPENAI_API_BASE_URL:-http://127.0.0.1:${PUBLIC_PORT}${IMAGE_PROXY_BASE_PATH}}"
   export ENABLE_IMAGE_GENERATION="${ENABLE_IMAGE_GENERATION:-true}"
   export IMAGE_GENERATION_ENGINE="${IMAGE_GENERATION_ENGINE:-openai}"
-  export IMAGE_GENERATION_MODEL="${IMAGE_GENERATION_MODEL:-${CLOUDFLARE_IMAGE_MODEL}}"
+  export IMAGE_GENERATION_MODEL="$image_generation_model"
   export IMAGE_SIZE="${IMAGE_SIZE:-1024x1024}"
   export IMAGE_STEPS="${IMAGE_STEPS:-4}"
   echo "Configured Open WebUI image generation through Murmur Cloudflare bridge."
