@@ -808,7 +808,7 @@ class Murmur:
                 "Status",
                 f"Text provider: {text_provider}",
                 f"Text model: {text_alias} ({self.current_model(thread_id)})",
-                f"Image generation: OpenWebUI ({self.image_model_label()})",
+                f"Image generation: API provider ({self.image_model_label()})",
                 "Vision: disabled until bridged through Open WebUI",
             ]
         )
@@ -1084,7 +1084,7 @@ class Murmur:
         model = self.image_model_label()
         size = f", {self.settings.image_size}" if self.settings.image_size else ""
         return BotResponse(
-            text=f"[OpenWebUI image - {model}{size}]\n{prompt}",
+            text=f"[API PROVIDER - {model}{size}]\n{prompt}",
             file_paths=paths,
             cleanup_paths=paths,
         )
