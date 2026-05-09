@@ -1385,16 +1385,16 @@ class Murmur:
                 lines.append(f"{index}. {self.model_display(option)}{current}")
 
         lines.append("")
-        lines.append(f"Providers: {self.settings.bot_prefix} providers")
         lines.append(
-            f"Switch: {self.settings.bot_prefix} model <provider> [connection] <number>"
+            f"Chat: {self.settings.bot_prefix} model <provider> [connection] <number>"
         )
-        lines.append(f"Example: {self.settings.bot_prefix} model openrouter 1")
-        lines.append(f"Example: {self.settings.bot_prefix} model openrouter 2 1")
-        if not include_all:
-            lines.append(f"All models: {self.settings.bot_prefix} models all")
-        if not free_only:
-            lines.append(f"Free-only: {self.settings.bot_prefix} models free")
+        lines.append(
+            f"Image: {self.settings.bot_prefix} image model <provider> [connection] <number>"
+        )
+        lines.append(
+            f"Filter: {self.settings.bot_prefix} models <provider> [connection]"
+        )
+        lines.append(f"Status: {self.settings.bot_prefix} status")
         return "\n".join(lines)
 
     def group_model_options(

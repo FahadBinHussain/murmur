@@ -178,6 +178,8 @@ OPENWEBUI_MODEL=openrouter/free
 
 FB_COOKIES_JSON_B64=base64-encoded-cookies-json
 
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+OPENROUTER_API_KEY_1=your-openrouter-api-key
 CF_ACCOUNT_ID=your-cloudflare-account-id
 CF_API_TOKEN=your-cloudflare-workers-ai-token
 IMAGE_GENERATION_MODEL=@cf/black-forest-labs/flux-1-schnell
@@ -264,17 +266,25 @@ Direct PowerShell one-liner:
 
 Open WebUI still needs an AI provider key or an OpenAI-compatible provider with free quota. Murmur only bridges Messenger to Open WebUI; it cannot make paid model usage free.
 
-Provider keys are synced into Open WebUI Connections at startup. Murmur stays bridge-only. OpenRouter can use five numbered keys out of the box:
+Provider keys are synced into Open WebUI Connections at startup. Murmur stays bridge-only. Every provider family uses the same shape:
 
 ```env
 OPENWEBUI_PROVIDER_SYNC=true
-OPENWEBUI_PROVIDER_FAMILIES=openrouter
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+
+# Provider: OpenRouter
 OPENROUTER_API_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY_1=sk-or-v1-...
 OPENROUTER_API_KEY_2=sk-or-v1-...
 OPENROUTER_API_KEY_3=sk-or-v1-...
 OPENROUTER_API_KEY_4=sk-or-v1-...
 OPENROUTER_API_KEY_5=sk-or-v1-...
+
+# Provider: Cloudflare Workers AI
+CF_ACCOUNT_ID=your-cloudflare-account-id
+CF_API_TOKEN=your-cloudflare-workers-ai-token
+CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
+CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS=true
 ```
 
 Startup maps them into Open WebUI as separate OpenAI-compatible connections with prefixes `openrouter_1`, `openrouter_2`, and so on. Messenger users switch consistently with `/ai providers`, `/ai models openrouter 2`, and `/ai model openrouter 2 1`.
@@ -283,8 +293,6 @@ Future OpenAI-compatible provider families use the same shape:
 
 ```env
 OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,gemini,mistral
-CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
-CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS=true
 GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
 GEMINI_API_KEY_1=...
 MISTRAL_API_BASE_URL=https://your-openai-compatible-mistral-gateway/v1
