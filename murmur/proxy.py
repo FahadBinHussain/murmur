@@ -23,6 +23,7 @@ from .admin_state import (
     thread_registry_path,
     write_thread_allowlist,
 )
+from .runtime_state import persist_cookie_state
 
 
 HOP_BY_HOP_HEADERS = {
@@ -641,10 +642,12 @@ async def admin_post(request: web.Request) -> web.Response:
 
         cookies, summary = validate_cookie_payload(raw_text)
         path = write_cookie_file(cookies)
+        state_sync_message = await asyncio.to_thread(persist_cookie_state, cookies)
         restart_message = " " + restart_murmur_listener()
-        message = f"Saved {summary} to {path}.{restart_message}"
+        message = f"Saved {summary} to {path}. {state_sync_message}{restart_message}"
         print(
             f"MURMUR_ADMIN_COOKIE_UPLOAD {summary} path={path} "
+            f"state_sync={compact_log_value(state_sync_message)} "
             f"restart={compact_log_value(restart_message.strip())}",
             flush=True,
         )

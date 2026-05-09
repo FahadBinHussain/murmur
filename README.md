@@ -260,6 +260,11 @@ ALLOWED_THREAD_IDS=
 MURMUR_THREAD_REGISTRY_PATH=/tmp/murmur-threads.json
 MURMUR_THREAD_ALLOWLIST_PATH=/tmp/murmur-thread-allowlist.json
 MURMUR_THREAD_FETCH_LIMIT=100
+MURMUR_PERSIST_COOKIES_TO_DB=true
+MURMUR_STATE_DATABASE_URL=
+MURMUR_STATE_TABLE=murmur_runtime_state
+MURMUR_COOKIE_STATE_ENCRYPT=true
+MURMUR_COOKIE_STATE_SECRET=
 
 FB_COOKIES_PATH=cookies.json
 FB_COOKIES_JSON_B64=
@@ -305,12 +310,12 @@ MURMUR_ADMIN_PASSWORD=strong-admin-password
 The console has two runtime tools:
 
 - Thread Access shows the Messenger threads Murmur has discovered and lets you choose exactly where the bot may answer.
-- Facebook Cookies uploads a fresh Facebook cookie JSON file, writes it to `FB_COOKIES_PATH`, and restarts only the Murmur Messenger listener.
+- Facebook Cookies uploads a fresh Facebook cookie JSON file, writes it to `FB_COOKIES_PATH`, syncs the latest encrypted cookie state to PostgreSQL when configured, and restarts only the Murmur Messenger listener.
 - Runtime Status shows listener paths and includes a manual Messenger listener restart button.
 
 Thread access changes are stored in `MURMUR_THREAD_ALLOWLIST_PATH` and are picked up by the listener on the next message. The thread list is stored in `MURMUR_THREAD_REGISTRY_PATH`; it is filled from recent inbox refreshes and from threads that send messages while Murmur is online. Open WebUI does not restart for admin console changes.
 
-For ephemeral hosts such as free Hugging Face Spaces, this updates the running container. Update the hosted `FB_COOKIES_JSON_B64` secret as well if you need the new cookies to survive a full Space rebuild or restart.
+For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads survive rebuilds without changing Space secrets on every upload, configure PostgreSQL with `DATABASE_URL` or `MURMUR_STATE_DATABASE_URL`. The admin console writes encrypted cookie state to `MURMUR_STATE_TABLE`, and startup reads it before falling back to `FB_COOKIES_JSON_B64`.
 
 ## Hugging Face Spaces
 
@@ -340,8 +345,11 @@ OPENROUTER_API_KEY_1=sk-or-v1-...
 CF_ACCOUNT_ID=your-cloudflare-account-id
 CF_API_TOKEN=your-cloudflare-workers-ai-token
 
-FB_COOKIES_JSON_B64=base64-encoded-cookies-json
+FB_COOKIES_JSON_B64=optional-bootstrap-base64-cookies-json
 FB_USER_AGENT=browser-user-agent-used-for-cookie-export
+MURMUR_PERSIST_COOKIES_TO_DB=true
+MURMUR_STATE_TABLE=murmur_runtime_state
+MURMUR_COOKIE_STATE_ENCRYPT=true
 ```
 
 Optional persistence can be configured with PostgreSQL:
@@ -454,8 +462,13 @@ Direct PowerShell one-liner:
 | `MURMUR_THREAD_REGISTRY_PATH` | `/tmp/murmur-threads.json` | Runtime registry of discovered Messenger threads for the admin console. |
 | `MURMUR_THREAD_ALLOWLIST_PATH` | `/tmp/murmur-thread-allowlist.json` | Runtime thread allowlist written by the admin console. |
 | `MURMUR_THREAD_FETCH_LIMIT` | `100` | Recent Messenger threads to fetch after login for the admin console registry. |
+| `MURMUR_PERSIST_COOKIES_TO_DB` | `true` | Sync uploaded admin cookies to PostgreSQL runtime state when configured. |
+| `MURMUR_STATE_DATABASE_URL` | `DATABASE_URL` | Optional separate PostgreSQL URL for Murmur runtime state. |
+| `MURMUR_STATE_TABLE` | `murmur_runtime_state` | PostgreSQL table for Murmur runtime state. Created automatically. |
+| `MURMUR_COOKIE_STATE_ENCRYPT` | `true` | Encrypt stored cookie JSON before writing it to PostgreSQL. |
+| `MURMUR_COOKIE_STATE_SECRET` | `WEBUI_SECRET_KEY` | Optional separate encryption secret for cookie state. |
 | `FB_COOKIES_PATH` | `cookies.json` | Path to Facebook cookies JSON. |
-| `FB_COOKIES_JSON_B64` | empty | Base64 cookies JSON for hosted deployments. |
+| `FB_COOKIES_JSON_B64` | empty | Optional bootstrap base64 cookies JSON for hosted deployments. |
 | `FB_USER_AGENT` | library default | Browser user-agent paired with exported cookies. |
 | `FB_PROXY` | empty | Proxy for Facebook HTTP/login requests. |
 | `FB_UPLOAD_PROXY` | empty | Proxy for Messenger attachment uploads. |

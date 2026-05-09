@@ -442,7 +442,18 @@ sleep_before_murmur_restart() {
   done
 }
 
-if [[ -n "${FB_COOKIES_JSON_B64:-}" ]]; then
+write_cookies_from_db_state() {
+  local python_bin="${PYTHON_BIN:-/app/murmur/.venv/bin/python}"
+  if [[ ! -x "$python_bin" ]]; then
+    python_bin="python"
+  fi
+
+  "$python_bin" -m murmur.runtime_state write-cookies
+}
+
+if write_cookies_from_db_state; then
+  :
+elif [[ -n "${FB_COOKIES_JSON_B64:-}" ]]; then
   echo "Writing Messenger cookies from FB_COOKIES_JSON_B64."
   printf '%s' "$FB_COOKIES_JSON_B64" | base64 -d > "$FB_COOKIES_PATH"
 elif [[ -n "${FB_COOKIES_JSON:-}" ]]; then
