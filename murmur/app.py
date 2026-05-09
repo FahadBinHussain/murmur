@@ -214,6 +214,8 @@ class Murmur:
         self.thread_models: dict[str, str] = {}
         self.thread_model_aliases: dict[str, str] = {}
         self.thread_model_options: dict[str, list[ModelOption]] = {}
+        self.thread_providers: dict[str, str] = {}
+        self.thread_provider_options: dict[str, list[str]] = {}
         self.openwebui_token: str | None = None
         self.mqtt_watchdog_task: asyncio.Task | None = None
         self.response_tasks: set[asyncio.Task] = set()
@@ -756,6 +758,19 @@ class Murmur:
             include_all = len(parts) > 1 and parts[1].lower() == "all"
             return await self.model_list_message(thread_id, include_all=include_all)
 
+        if command == "providers":
+            include_all = len(parts) > 1 and parts[1].lower() == "all"
+            return await self.provider_list_message(thread_id, include_all=include_all)
+
+        if command == "provider":
+            if len(parts) == 1:
+                provider = self.current_provider(thread_id)
+                return (
+                    f"Current provider: {self.provider_display_name(provider)}\n"
+                    f"Use {self.settings.bot_prefix} providers to see options."
+                )
+            return await self.set_thread_provider(thread_id, parts[1])
+
         if command in {"model", "use"}:
             if len(parts) == 1:
                 alias = self.current_model_alias(thread_id)
@@ -829,6 +844,8 @@ class Murmur:
                 f"- {prefix} status shows current models/providers.",
                 "",
                 "Text chat",
+                f"- {prefix} providers: list providers and free model counts.",
+                f"- {prefix} provider <number|name>: switch provider for this thread.",
                 f"- {prefix} models: list models.",
                 f"- {prefix} models all: list all models.",
                 f"- {prefix} model: show selected text model.",
@@ -843,12 +860,12 @@ class Murmur:
         )
 
     def status_message(self, thread_id: str) -> str:
-        text_provider = self.text_provider_label()
+        text_provider = self.provider_display_name(self.current_provider(thread_id))
         text_alias = self.current_model_alias(thread_id)
         return "\n".join(
             [
                 "Status",
-                f"Text provider: {text_provider}",
+                f"Text provider: {text_provider} via Open WebUI",
                 f"Text model: {text_alias} ({self.current_model(thread_id)})",
                 f"Image generation: {self.image_provider_label()} ({self.image_model_label()})",
                 "Vision: disabled until bridged through Open WebUI",
@@ -866,14 +883,8 @@ class Murmur:
     def image_model_label(self) -> str:
         return self.settings.image_generation_model or "Open WebUI configured default"
 
-    def text_provider_label(self) -> str:
-        return "OpenWebUI"
-
-    def text_provider_id(self) -> str:
-        return "openwebui"
-
     def response_header(self, provider: str, model: str) -> str:
-        return f"[OpenWebUI - {model}]"
+        return f"[{self.provider_display_name(provider)} via Open WebUI - {model}]"
 
     def extract_one_shot_model(
         self,
@@ -897,6 +908,12 @@ class Murmur:
     def current_model_alias(self, thread_id: str) -> str:
         return self.thread_model_aliases.get(thread_id, "default")
 
+    def current_provider(self, thread_id: str) -> str:
+        return self.thread_providers.get(
+            thread_id,
+            self.provider_for_model(self.current_model(thread_id)),
+        )
+
     def resolve_model(self, name: str, thread_id: str | None = None) -> str | None:
         key = name.strip().lower().lstrip("@")
         if thread_id and key.isdigit():
@@ -918,6 +935,7 @@ class Murmur:
 
         self.thread_models[thread_id] = model
         self.thread_model_aliases[thread_id] = self.model_label(thread_id, alias, model)
+        self.thread_providers[thread_id] = self.provider_for_model(model)
         return f"Model set to {alias} ({model}) for this thread."
 
     def model_label(self, thread_id: str, requested: str, model: str) -> str:
@@ -957,16 +975,111 @@ class Murmur:
 
         for index, option in enumerate(options, start=1):
             marker = "*" if option.id == current_model else "-"
+            provider = self.provider_display_name(self.option_provider(option))
             if option.name and option.name != option.id:
-                lines.append(f"{marker} {index}. {option.id} ({option.name})")
+                lines.append(
+                    f"{marker} {index}. [{provider}] {option.id} ({option.name})"
+                )
             else:
-                lines.append(f"{marker} {index}. {option.id}")
+                lines.append(f"{marker} {index}. [{provider}] {option.id}")
 
         lines.append("")
+        lines.append(f"Providers: {self.settings.bot_prefix} providers")
         lines.append(f"Switch: {self.settings.bot_prefix} model <number>")
         lines.append(f"One-shot alias: {self.settings.bot_prefix} @free your message")
         lines.append(f"All models: {self.settings.bot_prefix} models all")
         return "\n".join(lines)
+
+    async def provider_list_message(
+        self, thread_id: str, include_all: bool = False
+    ) -> str:
+        options = await self.fetch_model_options(include_all=include_all)
+        if not options:
+            return (
+                "No providers returned from the Open WebUI model API.\n"
+                "Exact source: Open WebUI /api/models returned no usable models."
+            )
+
+        self.thread_model_options[thread_id] = options
+        grouped: dict[str, list[ModelOption]] = defaultdict(list)
+        for option in options:
+            grouped[self.option_provider(option)].append(option)
+
+        provider_keys = sorted(grouped)
+        self.thread_provider_options[thread_id] = provider_keys
+        current_provider = self.current_provider(thread_id)
+        title = "All providers from Open WebUI model API" if include_all else (
+            "Free providers from Open WebUI model API"
+        )
+        lines = [f"{title} ({len(provider_keys)}):"]
+        for index, provider in enumerate(provider_keys, start=1):
+            models = sorted(grouped[provider], key=lambda model: model.id)
+            marker = "*" if provider == current_provider else "-"
+            sample = ", ".join(model.id for model in models[:3])
+            suffix = f": {sample}" if sample else ""
+            lines.append(
+                f"{marker} {index}. {self.provider_display_name(provider)} "
+                f"- OK, {len(models)} model(s){suffix}"
+            )
+
+        lines.append("")
+        lines.append(f"Switch provider: {self.settings.bot_prefix} provider <number|name>")
+        lines.append(f"Models: {self.settings.bot_prefix} models")
+        lines.append(f"All providers/models: {self.settings.bot_prefix} providers all")
+        return "\n".join(lines)
+
+    async def set_thread_provider(self, thread_id: str, name: str) -> str:
+        options = self.thread_model_options.get(thread_id)
+        providers = self.thread_provider_options.get(thread_id)
+        if not options or not providers:
+            options = await self.fetch_model_options(include_all=False)
+            grouped: dict[str, list[ModelOption]] = defaultdict(list)
+            for option in options:
+                grouped[self.option_provider(option)].append(option)
+            providers = sorted(grouped)
+            self.thread_model_options[thread_id] = options
+            self.thread_provider_options[thread_id] = providers
+
+        provider = self.resolve_provider(name, providers)
+        if provider is None:
+            return (
+                f"Unknown provider: {name}\n"
+                f"Use {self.settings.bot_prefix} providers to see available providers."
+            )
+
+        provider_models = [
+            option for option in options if self.option_provider(option) == provider
+        ]
+        if not provider_models:
+            return (
+                f"No models found for provider {self.provider_display_name(provider)}.\n"
+                f"Use {self.settings.bot_prefix} providers all to refresh provider data."
+            )
+
+        model = sorted(provider_models, key=lambda option: option.id)[0]
+        self.thread_providers[thread_id] = provider
+        self.thread_models[thread_id] = model.id
+        self.thread_model_aliases[thread_id] = self.provider_display_name(provider)
+        return (
+            f"Provider set to {self.provider_display_name(provider)} for this thread.\n"
+            f"Model set to {model.id}."
+        )
+
+    def resolve_provider(self, name: str, providers: list[str]) -> str | None:
+        key = name.strip().lower()
+        if key.isdigit():
+            index = int(key) - 1
+            if 0 <= index < len(providers):
+                return providers[index]
+
+        normalized = self.normalize_provider_key(key)
+        for provider in providers:
+            if normalized in {
+                self.normalize_provider_key(provider),
+                self.normalize_provider_key(self.provider_display_name(provider)),
+            }:
+                return provider
+        return None
 
     async def fetch_model_options(self, include_all: bool = False) -> list[ModelOption]:
         models = await self.fetch_openwebui_models()
@@ -1013,6 +1126,7 @@ class Murmur:
                     ModelOption(
                         id=raw_model,
                         name=raw_model,
+                        provider=self.provider_for_model(raw_model),
                         is_free=self.is_free_model_id(raw_model, raw_model),
                     )
                 )
@@ -1035,6 +1149,7 @@ class Murmur:
                 ModelOption(
                     id=str(model_id),
                     name=str(name),
+                    provider=self.provider_from_raw_model(raw_model, str(model_id)),
                     is_free=self.is_free_raw_model(raw_model, str(model_id), str(name)),
                     pricing=(
                         raw_model.get("pricing")
@@ -1045,6 +1160,35 @@ class Murmur:
             )
 
         return models
+
+    def provider_from_raw_model(self, raw_model: dict, model_id: str) -> str:
+        provider = raw_model.get("provider") or raw_model.get("source")
+        if isinstance(provider, str) and provider.strip():
+            return provider.strip().lower()
+
+        return self.provider_for_model(model_id)
+
+    def provider_for_model(self, model_id: str) -> str:
+        model_id = model_id.strip()
+        if "." in model_id:
+            prefix = model_id.split(".", 1)[0].strip().lower()
+            if re.fullmatch(r"or\d+", prefix):
+                return prefix
+        return "openwebui"
+
+    def option_provider(self, option: ModelOption) -> str:
+        return option.provider or self.provider_for_model(option.id)
+
+    def provider_display_name(self, provider: str) -> str:
+        provider = provider.strip().lower() or "openwebui"
+        if provider.startswith("or") and provider[2:].isdigit():
+            return f"OpenRouter {provider[2:]}"
+        if provider == "openwebui":
+            return "Open WebUI"
+        return provider
+
+    def normalize_provider_key(self, provider: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", provider.lower())
 
     def is_free_model(self, model: ModelOption) -> bool:
         return model.is_free or self.is_free_model_id(model.id, model.name)
@@ -1127,7 +1271,7 @@ class Murmur:
 
         self.history[thread_id].append({"role": "user", "content": prompt})
         self.history[thread_id].append({"role": "assistant", "content": answer})
-        return f"{self.response_header(self.text_provider_id(), model)}\n{answer}"
+        return f"{self.response_header(self.provider_for_model(model), model)}\n{answer}"
 
     async def generate_image_response(self, prompt: str) -> BotResponse:
         paths = await self.request_image_generation(prompt)
@@ -1308,22 +1452,54 @@ class Murmur:
                 body, status = await self.post_chat_completion(session, payload)
 
         if status >= 400:
-            raise UserVisibleError(f"Open WebUI error {status}: {body}")
+            raise UserVisibleError(self.openwebui_error_message(status, body))
 
         try:
+            if not isinstance(body, dict):
+                raise TypeError("Open WebUI returned a non-JSON object")
             return body["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Unexpected Open WebUI response: {body}") from exc
 
     async def post_chat_completion(
         self, session: aiohttp.ClientSession, payload: dict
-    ) -> tuple[dict, int]:
+    ) -> tuple[object, int]:
         async with session.post(
             f"{self.settings.openwebui_base_url}/api/chat/completions",
             headers=await self.openwebui_headers(session),
             json=payload,
         ) as response:
-            return await response.json(content_type=None), response.status
+            return await self.read_response_body(response), response.status
+
+    async def read_response_body(self, response: aiohttp.ClientResponse) -> object:
+        try:
+            return await response.json(content_type=None)
+        except Exception:
+            return await response.text()
+
+    def openwebui_error_message(self, status: int, body: object) -> str:
+        message = f"Open WebUI error {status}: {body}"
+        if self.is_rate_limit_error(body):
+            message += (
+                "\n\nRate limit hit. Try another provider/model: "
+                f"{self.settings.bot_prefix} providers, then "
+                f"{self.settings.bot_prefix} provider <number> or "
+                f"{self.settings.bot_prefix} model <number>."
+            )
+        return message
+
+    def is_rate_limit_error(self, body: object) -> bool:
+        text = str(body).lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "rate limit",
+                "rate_limit",
+                "free-models-per-day",
+                "quota",
+                "too many requests",
+            )
+        )
 
     async def openwebui_headers(self, session: aiohttp.ClientSession) -> dict[str, str]:
         token = self.settings.openwebui_api_key or await self.openwebui_jwt(session)

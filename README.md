@@ -101,18 +101,20 @@ Model switching is per Messenger thread:
 
 ```text
 /ai models
+/ai providers
+/ai provider 2
 /ai model free
 /ai model 7
 /ai @free summarize this in one sentence
 /ai @7 summarize this in one sentence
 ```
 
-`/ai models` fetches Open WebUI's model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response.
+`/ai models` fetches Open WebUI's model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response. `/ai providers` groups those same Open WebUI models by provider/connection and shows the free model counts. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs such as `or2.deepseek/...`.
 
 AI replies start with the provider and model that produced the answer, for example:
 
 ```text
-[OpenWebUI - openrouter/free]
+[OpenRouter 2 via Open WebUI - or2.deepseek/deepseek-chat-v3-0324:free]
 ```
 
 Configure short aliases with `OPENWEBUI_MODEL_ALIASES` for favorites:
@@ -273,6 +275,18 @@ Direct PowerShell one-liner:
 
 Open WebUI still needs an AI provider key or an OpenAI-compatible provider with free quota. Murmur only bridges Messenger to Open WebUI; it cannot make paid model usage free.
 
+For OpenRouter, you can provide up to five keys without touching Open WebUI manually:
+
+```env
+OPENROUTER_API_KEY_1=sk-or-v1-...
+OPENROUTER_API_KEY_2=sk-or-v1-...
+OPENROUTER_API_KEY_3=sk-or-v1-...
+OPENROUTER_API_KEY_4=sk-or-v1-...
+OPENROUTER_API_KEY_5=sk-or-v1-...
+```
+
+Startup maps them into Open WebUI as separate OpenAI-compatible connections with prefixes `or1`, `or2`, `or3`, `or4`, and `or5`. That keeps Murmur bridge-only while letting Messenger users switch with `/ai providers` and `/ai provider <number>`.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -285,6 +299,10 @@ Open WebUI still needs an AI provider key or an OpenAI-compatible provider with 
 | `OPENWEBUI_MODEL_ALIASES` | No | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` list for Messenger model switching |
 | `OPENWEBUI_WARMUP` | No | `true` | Warm Open WebUI auth/model endpoints before Messenger starts listening |
 | `OPENWEBUI_WARMUP_CHAT` | No | `true` | Send a tiny non-history chat completion at startup to reduce first real reply latency |
+| `OPENWEBUI_ACCESS_LOG` | No | `false` | Enable Open WebUI Uvicorn access logs; disabled by default to hide noisy signed HF log-viewer URLs |
+| `OPENROUTER_API_BASE_URL` | No | `https://openrouter.ai/api/v1` | OpenRouter OpenAI-compatible base URL used when numbered OpenRouter keys are set |
+| `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | No | | Up to five OpenRouter keys mapped into Open WebUI as `or1.*` ... `or5.*` model prefixes |
+| `OPENROUTER_SYNC_OPENWEBUI_CONFIG` | No | `true` | Sync numbered OpenRouter keys into Open WebUI Connections at startup |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
