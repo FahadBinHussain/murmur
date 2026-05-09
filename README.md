@@ -312,6 +312,7 @@ Open WebUI still needs an AI provider key or an OpenAI-compatible provider with 
 | `IMAGE_PROXY_BASE_PATH` | No | `/murmur-image-openai/v1` | Internal OpenAI-compatible image proxy path served by Murmur's public proxy |
 | `ENABLE_IMAGE_GENERATION` | No | `true` when Cloudflare image vars exist | Open WebUI image generation toggle |
 | `IMAGE_GENERATION_ENGINE` | No | `openai` when Cloudflare image vars exist | Open WebUI image engine |
+| `IMAGE_PROVIDER_LABEL` | No | derived from model | Provider label shown in Messenger image captions |
 | `IMAGE_GENERATION_MODEL` | No | `CLOUDFLARE_IMAGE_MODEL` | Image model sent through Open WebUI |
 | `IMAGES_OPENAI_API_BASE_URL` | No | local Murmur image proxy | Open WebUI image API base URL |
 | `IMAGES_OPENAI_API_KEY` | No | `IMAGE_PROXY_API_KEY` | Open WebUI image API bearer token |

@@ -39,6 +39,7 @@ class Settings:
     openwebui_model_aliases: dict[str, str]
     openwebui_warmup: bool
     openwebui_warmup_chat: bool
+    image_provider_label: str | None
     image_generation_model: str | None
     image_size: str | None
     image_steps: int | None
@@ -168,6 +169,7 @@ def load_settings() -> Settings:
         openwebui_model_aliases=parse_model_aliases(openwebui_model),
         openwebui_warmup=env_bool("OPENWEBUI_WARMUP", True),
         openwebui_warmup_chat=env_bool("OPENWEBUI_WARMUP_CHAT", True),
+        image_provider_label=os.getenv("IMAGE_PROVIDER_LABEL") or None,
         image_generation_model=os.getenv("IMAGE_GENERATION_MODEL")
         or os.getenv("CLOUDFLARE_IMAGE_MODEL")
         or None,
@@ -808,10 +810,18 @@ class Murmur:
                 "Status",
                 f"Text provider: {text_provider}",
                 f"Text model: {text_alias} ({self.current_model(thread_id)})",
-                f"Image generation: API provider ({self.image_model_label()})",
+                f"Image generation: {self.image_provider_label()} ({self.image_model_label()})",
                 "Vision: disabled until bridged through Open WebUI",
             ]
         )
+
+    def image_provider_label(self) -> str:
+        if self.settings.image_provider_label:
+            return self.settings.image_provider_label
+        model = self.settings.image_generation_model
+        if model and model.startswith("@cf/"):
+            return "Cloudflare"
+        return "API"
 
     def image_model_label(self) -> str:
         return self.settings.image_generation_model or "Open WebUI configured default"
@@ -1084,7 +1094,7 @@ class Murmur:
         model = self.image_model_label()
         size = f", {self.settings.image_size}" if self.settings.image_size else ""
         return BotResponse(
-            text=f"[API PROVIDER - {model}{size}]\n{prompt}",
+            text=f"[{self.image_provider_label()} - {model}{size}]",
             file_paths=paths,
             cleanup_paths=paths,
         )
