@@ -95,12 +95,13 @@ Help and status:
 /ai status
 ```
 
-`/help` and `/ai help` show the full Messenger command guide. `/ai status` shows the current Open WebUI text model for the thread.
+`/help` and `/ai help` show the full Messenger command guide. `/ai status` shows the current Open WebUI model for the thread.
 
 Model switching is per Messenger thread:
 
 ```text
 /ai models
+/ai models free
 /ai providers
 /ai provider openrouter 2
 /ai model openrouter 1
@@ -109,9 +110,10 @@ Model switching is per Messenger thread:
 /ai model 7
 /ai @free summarize this in one sentence
 /ai @7 summarize this in one sentence
+/ai image openrouter 2 1 a neon cyberpunk teashop in the rain
 ```
 
-`/ai models` fetches Open WebUI's model endpoints and lists free models grouped by provider connection. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs.
+`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection, including Cloudflare models configured with `CLOUDFLARE_MODEL_IDS`. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI; provider switching selects Open WebUI model IDs.
 
 AI replies start with the provider and model that produced the answer, for example:
 
@@ -126,24 +128,14 @@ OPENWEBUI_MODEL=deepseek/deepseek-chat-v3-0324:free
 OPENWEBUI_MODEL_ALIASES=free=deepseek/deepseek-chat-v3-0324:free,fast=google/gemini-2.0-flash-exp:free
 ```
 
-Murmur is bridge-only for Messenger commands: text goes through Open WebUI chat completions, and image prompts go through Open WebUI image generation:
+Murmur is bridge-only for Messenger commands: chat goes through Open WebUI chat completions, and image prompts go through Open WebUI image generation. Providers are not split into "text providers" and "image providers"; Murmur treats provider connections as model sources and lets Open WebUI/upstream return the exact error if a model cannot handle the requested job.
 
 ```text
 /ai image a neon cyberpunk teashop in the rain
 /ai see what is in this image?
 ```
 
-Vision commands still reply with a bridge-only disabled message until they can be wired through Open WebUI. For Cloudflare Workers AI image models, the bundled public proxy exposes a local OpenAI-compatible image endpoint that Open WebUI can use as its image backend.
-
-Current Open WebUI bridge surface:
-
-- Text chat uses Open WebUI `/api/chat/completions`.
-- Image generation uses Open WebUI `/api/v1/images/generations`.
-- Auth uses `OPENWEBUI_API_KEY` or the configured WebUI admin email/password.
-- Text model listing uses Open WebUI `/api/models` or `/api/v1/models`.
-- Murmur keeps short per-thread memory and sends that context to Open WebUI.
-- Cloudflare image generation is exposed to Open WebUI as an OpenAI-compatible local endpoint.
-- Vision is disabled until Murmur can bridge it through Open WebUI.
+Vision commands still reply with a bridge-only disabled message until they can be wired through Open WebUI. For Cloudflare Workers AI image models, the bundled public proxy exposes a local OpenAI-compatible image endpoint that Open WebUI can use as its image backend. Cloudflare Workers AI also exposes OpenAI-compatible chat endpoints, so it can be added as a normal provider family when `cloudflare` is listed in `OPENWEBUI_PROVIDER_FAMILIES`.
 
 ## Docker: All In One
 
@@ -295,7 +287,8 @@ Startup maps them into Open WebUI as separate OpenAI-compatible connections with
 Future OpenAI-compatible provider families use the same shape:
 
 ```env
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,gemini,mistral
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,gemini,mistral
+CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
 GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
 GEMINI_API_KEY_1=...
 MISTRAL_API_BASE_URL=https://your-openai-compatible-mistral-gateway/v1
@@ -316,11 +309,14 @@ MISTRAL_API_KEY_1=...
 | `OPENWEBUI_WARMUP_CHAT` | No | `true` | Send a tiny non-history chat completion at startup to reduce first real reply latency |
 | `OPENWEBUI_ACCESS_LOG` | No | `false` | Enable Open WebUI Uvicorn access logs; disabled by default to hide noisy signed HF log-viewer URLs |
 | `OPENWEBUI_PROVIDER_SYNC` | No | `true` | Sync numbered provider keys into Open WebUI Connections at startup |
-| `OPENWEBUI_PROVIDER_FAMILIES` | No | `openrouter` when OpenRouter keys exist | Comma-separated provider families to sync, such as `openrouter,gemini,mistral` |
+| `OPENWEBUI_PROVIDER_FAMILIES` | No | `openrouter` when OpenRouter keys exist | Comma-separated provider families to sync, such as `openrouter,cloudflare,gemini,mistral` |
 | `<PROVIDER>_API_BASE_URL` | Yes for non-default families | | OpenAI-compatible base URL for a provider family, e.g. `GEMINI_API_BASE_URL` |
 | `<PROVIDER>_API_KEY_1` ... `<PROVIDER>_API_KEY_20` | No | | Numbered keys mapped into Open WebUI as `<provider>_1.*`, `<provider>_2.*`, etc. |
+| `<PROVIDER>_MODEL_IDS` | No | | Optional comma/semicolon list of models to expose when the provider does not list models itself |
 | `OPENROUTER_API_BASE_URL` | No | `https://openrouter.ai/api/v1` | OpenRouter OpenAI-compatible base URL |
 | `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | No | | Five convenient OpenRouter key fields |
+| `CLOUDFLARE_API_BASE_URL` | No | derived from `CF_ACCOUNT_ID` | Cloudflare Workers AI OpenAI-compatible base URL |
+| `CLOUDFLARE_MODEL_IDS` | No | | Cloudflare model IDs to expose through Open WebUI Connections |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
@@ -348,7 +344,6 @@ MISTRAL_API_KEY_1=...
 | `IMAGE_PROXY_BASE_PATH` | No | `/murmur-image-openai/v1` | Internal OpenAI-compatible image proxy path served by Murmur's public proxy |
 | `ENABLE_IMAGE_GENERATION` | No | `true` when Cloudflare image vars exist | Open WebUI image generation toggle |
 | `IMAGE_GENERATION_ENGINE` | No | `openai` when Cloudflare image vars exist | Open WebUI image engine |
-| `IMAGE_PROVIDER_LABEL` | No | derived from model | Provider label shown in Messenger image captions |
 | `IMAGE_GENERATION_MODEL` | No | `CLOUDFLARE_IMAGE_MODEL` | Image model sent through Open WebUI |
 | `IMAGES_OPENAI_API_BASE_URL` | No | local Murmur image proxy | Open WebUI image API base URL |
 | `IMAGES_OPENAI_API_KEY` | No | `IMAGE_PROXY_API_KEY` | Open WebUI image API bearer token |

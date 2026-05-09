@@ -66,7 +66,17 @@ def provider_keys(prefix):
         item = (os.getenv(f"{prefix}_API_KEY_{index}") or "").strip()
         if item:
             keys.append(item)
+    if prefix == "CLOUDFLARE":
+        for name in ("CLOUDFLARE_API_KEY", "CF_API_TOKEN"):
+            item = (os.getenv(name) or "").strip()
+            if item:
+                keys.append(item)
     return list(dict.fromkeys(keys))
+
+
+def provider_model_ids(prefix):
+    raw = os.getenv(f"{prefix}_MODEL_IDS") or os.getenv(f"{prefix}_MODELS") or ""
+    return split_items(raw.replace("\n", ";"))
 
 
 families = [canonical_family(item) for item in split_items(os.getenv("OPENWEBUI_PROVIDER_FAMILIES", ""))]
@@ -77,12 +87,18 @@ if not families and provider_keys("OPENROUTER"):
 default_base_urls = {
     "openrouter": "https://openrouter.ai/api/v1",
 }
+cloudflare_account_id = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or os.getenv("CF_ACCOUNT_ID") or "").strip()
+if cloudflare_account_id:
+    default_base_urls["cloudflare"] = (
+        f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1"
+    )
 
 connections = []
 for family in families:
     prefix = env_prefix(family)
     base_url = (os.getenv(f"{prefix}_API_BASE_URL") or default_base_urls.get(family, "")).strip().rstrip("/")
     keys = provider_keys(prefix)
+    model_ids = provider_model_ids(prefix)
     if not keys:
         print(f"Skipping {family}: no {prefix}_API_KEY_N values configured.", file=sys.stderr)
         continue
@@ -98,6 +114,7 @@ for family in families:
                 "base_url": base_url,
                 "key": key,
                 "prefix_id": f"{family}_{index}",
+                "model_ids": model_ids,
             }
         )
 
@@ -117,6 +134,7 @@ configs = {
         "enable": True,
         "connection_type": "external",
         "prefix_id": connection["prefix_id"],
+        **({"model_ids": connection["model_ids"]} if connection.get("model_ids") else {}),
     }
     for index, connection in enumerate(connections)
 }
@@ -190,23 +208,22 @@ def request(path, method="GET", body=None, token=None):
 
 def desired_entries(model_ids_by_family=None):
     model_ids_by_family = model_ids_by_family or {}
-    return [
-        (
-            connection["base_url"].rstrip("/"),
-            connection["key"],
-            {
-                "enable": True,
-                "connection_type": "external",
-                "prefix_id": connection["prefix_id"],
-                **(
-                    {"model_ids": model_ids_by_family[connection["family"]]}
-                    if model_ids_by_family.get(connection["family"])
-                    else {}
-                ),
-            },
+    entries = []
+    for connection in connections:
+        model_ids = list(
+            dict.fromkeys(
+                list(connection.get("model_ids") or [])
+                + list(model_ids_by_family.get(connection["family"], []))
+            )
         )
-        for connection in connections
-    ]
+        config = {
+            "enable": True,
+            "connection_type": "external",
+            "prefix_id": connection["prefix_id"],
+            **({"model_ids": model_ids} if model_ids else {}),
+        }
+        entries.append((connection["base_url"].rstrip("/"), connection["key"], config))
+    return entries
 
 
 def update_config(desired_entries, preserved_entries):
@@ -261,7 +278,15 @@ try:
         first_index_by_family.setdefault(connection["family"], index)
 
     model_ids_by_family = {}
+    for connection in connections:
+        configured_model_ids = connection.get("model_ids") or []
+        if configured_model_ids:
+            existing = model_ids_by_family.setdefault(connection["family"], [])
+            existing.extend(configured_model_ids)
+
     for family, index in first_index_by_family.items():
+        if model_ids_by_family.get(family):
+            continue
         model_ids = []
         try:
             model_response = request(f"/openai/models/{index}", token=token)
@@ -276,7 +301,13 @@ try:
         except Exception as exc:
             print(f"{family} model-id sync skipped: {exc}")
         if model_ids:
-            model_ids_by_family[family] = model_ids
+            existing = model_ids_by_family.setdefault(family, [])
+            existing.extend(model_ids)
+
+    model_ids_by_family = {
+        family: sorted(dict.fromkeys(model_ids))
+        for family, model_ids in model_ids_by_family.items()
+    }
 
     if model_ids_by_family:
         update_config(desired_entries(model_ids_by_family), preserved)

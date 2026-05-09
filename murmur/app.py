@@ -40,7 +40,6 @@ class Settings:
     openwebui_model_aliases: dict[str, str]
     openwebui_warmup: bool
     openwebui_warmup_chat: bool
-    image_provider_label: str | None
     image_generation_model: str | None
     image_size: str | None
     image_steps: int | None
@@ -170,7 +169,6 @@ def load_settings() -> Settings:
         openwebui_model_aliases=parse_model_aliases(openwebui_model),
         openwebui_warmup=env_bool("OPENWEBUI_WARMUP", True),
         openwebui_warmup_chat=env_bool("OPENWEBUI_WARMUP_CHAT", True),
-        image_provider_label=os.getenv("IMAGE_PROVIDER_LABEL") or None,
         image_generation_model=os.getenv("IMAGE_GENERATION_MODEL")
         or os.getenv("CLOUDFLARE_IMAGE_MODEL")
         or None,
@@ -761,11 +759,16 @@ class Murmur:
             return self.status_message(thread_id)
 
         if command == "models":
-            include_all = len(parts) > 1 and parts[1].lower() == "all"
-            provider_filter = " ".join(parts[2:] if include_all else parts[1:])
+            mode = parts[1].lower() if len(parts) > 1 else ""
+            include_all = mode == "all"
+            free_only = mode == "free"
+            provider_filter = " ".join(
+                parts[2:] if mode in {"all", "free"} else parts[1:]
+            )
             return await self.model_list_message(
                 thread_id,
                 include_all=include_all,
+                free_only=free_only,
                 provider_filter=provider_filter,
             )
 
@@ -806,7 +809,7 @@ class Murmur:
 
     async def handle_media_command(
         self,
-        _message: Message,
+        message: Message,
         prompt: str,
     ) -> BotResponse | None:
         parts = prompt.split(maxsplit=1)
@@ -818,9 +821,20 @@ class Murmur:
         if command in {"image", "img", "draw"}:
             if len(parts) == 1 or not parts[1].strip():
                 return BotResponse(
-                    text=f"Usage: {self.settings.bot_prefix} image <prompt>"
+                    text=(
+                        f"Usage: {self.settings.bot_prefix} image <prompt>\n"
+                        f"Or: {self.settings.bot_prefix} image openrouter 2 1 <prompt>"
+                    )
                 )
-            return await self.generate_image_response(parts[1].strip())
+            image_prompt, image_model = await self.extract_image_request(
+                message.thread_id,
+                parts[1].strip(),
+            )
+            return await self.generate_image_response(
+                message.thread_id,
+                image_prompt,
+                image_model,
+            )
 
         if command in {"see", "vision", "look"}:
             return BotResponse(text=self.openwebui_only_message("vision"))
@@ -854,19 +868,20 @@ class Murmur:
                 f"- /help or {prefix} help shows this guide.",
                 f"- {prefix} status shows current models/providers.",
                 "",
-                "Text chat",
-                f"- {prefix} providers: list provider connections and free model counts.",
+                "Chat",
+                f"- {prefix} providers: list provider connections and model counts.",
                 f"- {prefix} provider <provider> [connection]: switch provider for this thread.",
-                f"- {prefix} models: list free models grouped by provider.",
+                f"- {prefix} models: list models grouped by provider.",
                 f"- {prefix} models <provider> [connection]: list one provider.",
-                f"- {prefix} models all: list all models grouped by provider.",
-                f"- {prefix} model: show selected text model.",
-                f"- {prefix} model <provider> [connection] <number>: set text model for this thread.",
+                f"- {prefix} models free: list free models grouped by provider.",
+                f"- {prefix} model: show selected chat model.",
+                f"- {prefix} model <provider> [connection] <number>: set chat model for this thread.",
                 f"- {prefix} model <number|alias>: also works after {prefix} models.",
-                f"- {prefix} @<number|alias> message: one-shot text model.",
+                f"- {prefix} @<number|alias> message: one-shot chat model.",
                 "",
                 "Image generation",
                 f"- {prefix} image ...: generate an image.",
+                f"- {prefix} image <provider> [connection] <number> ...: try a model for image generation.",
                 "",
                 f"Use {prefix} status for current settings.",
             ]
@@ -878,20 +893,19 @@ class Murmur:
         return "\n".join(
             [
                 "Status",
-                f"Text provider: {text_provider} via Open WebUI",
-                f"Text model: {text_alias} ({self.model_short_id(self.current_model(thread_id))})",
-                f"Image generation: {self.image_provider_label()} ({self.image_model_label()})",
+                f"Provider: {text_provider} via Open WebUI",
+                f"Chat model: {text_alias} ({self.model_short_id(self.current_model(thread_id))})",
+                f"Image default: {self.image_model_status()}",
                 "Vision: disabled until bridged through Open WebUI",
             ]
         )
 
-    def image_provider_label(self) -> str:
-        if self.settings.image_provider_label:
-            return self.settings.image_provider_label
-        model = self.settings.image_generation_model
-        if model and model.startswith("@cf/"):
-            return "Cloudflare"
-        return "API"
+    def image_model_status(self) -> str:
+        model = self.image_model_label()
+        provider = self.provider_for_model(model)
+        size = f", {self.settings.image_size}" if self.settings.image_size else ""
+        header = self.response_header(provider, model)
+        return f"{header[:-1]}{size}]" if size else header
 
     def image_model_label(self) -> str:
         return self.settings.image_generation_model or "Open WebUI configured default"
@@ -914,6 +928,37 @@ class Murmur:
 
         one_shot_prompt = parts[1].strip() if len(parts) > 1 else "Hello"
         return one_shot_prompt, model
+
+    async def extract_image_request(
+        self,
+        thread_id: str,
+        prompt: str,
+    ) -> tuple[str, str | None]:
+        prompt = prompt.strip()
+        parts = prompt.split()
+        if len(parts) < 3:
+            return prompt, None
+
+        options = await self.fetch_model_options(include_all=True)
+        if options:
+            self.thread_model_options[thread_id] = options
+            groups = self.group_model_options(options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+
+        max_selector_parts = min(len(parts) - 1, 5)
+        for selector_length in range(max_selector_parts, 1, -1):
+            selector = " ".join(parts[:selector_length])
+            model = self.resolve_provider_model(thread_id, selector)
+            if model:
+                image_prompt = " ".join(parts[selector_length:]).strip()
+                if image_prompt:
+                    return image_prompt, model
+
+        return prompt, None
 
     def current_model(self, thread_id: str) -> str:
         return self.thread_models.get(thread_id, self.settings.openwebui_model)
@@ -986,7 +1031,7 @@ class Murmur:
         if len(alias.split()) >= 2 and not self.thread_provider_model_options.get(
             thread_id
         ):
-            options = await self.fetch_model_options(include_all=False)
+            options = await self.fetch_model_options(include_all=True)
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
             self.thread_provider_model_options[thread_id] = groups
@@ -1020,7 +1065,7 @@ class Murmur:
         provider_text = " ".join(parts[:-1])
         model_text = parts[-1]
         groups = self.thread_provider_model_options.get(thread_id, {})
-        providers = sorted(groups)
+        providers = sorted(groups, key=self.provider_sort_key)
         provider = self.resolve_provider(provider_text, providers)
         if provider is None:
             return None
@@ -1064,9 +1109,13 @@ class Murmur:
         self,
         thread_id: str,
         include_all: bool = False,
+        free_only: bool = False,
         provider_filter: str = "",
     ) -> str:
-        options = await self.fetch_model_options(include_all=include_all)
+        options = await self.fetch_model_options(
+            include_all=include_all,
+            strict_free=free_only,
+        )
         if options:
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
@@ -1085,7 +1134,12 @@ class Murmur:
                     for provider in matching_providers
                     for option in groups.get(provider, [])
                 ]
-            return self.dynamic_model_list_message(thread_id, options, include_all)
+            return self.dynamic_model_list_message(
+                thread_id,
+                options,
+                include_all,
+                free_only,
+            )
 
         current_alias = self.current_model_alias(thread_id)
         lines = ["Available models:"]
@@ -1103,9 +1157,15 @@ class Murmur:
         thread_id: str,
         options: list[ModelOption],
         include_all: bool,
+        free_only: bool = False,
     ) -> str:
         current_model = self.current_model(thread_id)
-        title = "All models" if include_all else "Free models"
+        if include_all:
+            title = "All models"
+        elif free_only:
+            title = "Free models"
+        else:
+            title = "Models"
         groups = self.group_model_options(options)
         self.thread_provider_model_options[thread_id] = groups
         self.thread_provider_options[thread_id] = sorted(
@@ -1128,7 +1188,10 @@ class Murmur:
         )
         lines.append(f"Example: {self.settings.bot_prefix} model openrouter 1")
         lines.append(f"Example: {self.settings.bot_prefix} model openrouter 2 1")
-        lines.append(f"All models: {self.settings.bot_prefix} models all")
+        if not include_all:
+            lines.append(f"All models: {self.settings.bot_prefix} models all")
+        if not free_only:
+            lines.append(f"Free-only: {self.settings.bot_prefix} models free")
         return "\n".join(lines)
 
     def group_model_options(
@@ -1156,30 +1219,39 @@ class Murmur:
     async def provider_list_message(
         self, thread_id: str, include_all: bool = False
     ) -> str:
-        options = await self.fetch_model_options(include_all=include_all)
-        if not options:
+        all_options = await self.fetch_model_options(include_all=True)
+        if not all_options:
             return (
                 "No providers returned from the Open WebUI model API.\n"
                 "Exact source: Open WebUI /api/models returned no usable models."
             )
 
-        self.thread_model_options[thread_id] = options
-        grouped = self.group_model_options(options)
+        free_options = [option for option in all_options if self.is_free_model(option)]
+        grouped = self.group_model_options(all_options)
+        all_grouped = self.group_model_options(all_options)
+        free_grouped = self.group_model_options(free_options)
+        self.thread_model_options[thread_id] = all_options
 
-        provider_keys = sorted(grouped, key=self.provider_sort_key)
+        provider_keys = sorted(all_grouped, key=self.provider_sort_key)
         self.thread_provider_options[thread_id] = provider_keys
-        self.thread_provider_model_options[thread_id] = grouped
+        self.thread_provider_model_options[thread_id] = all_grouped
         current_provider = self.current_provider(thread_id)
-        title = "All providers" if include_all else "Free providers"
+        title = "Providers" if not include_all else "Providers (all models)"
         lines = [f"{title} ({len(provider_keys)}):"]
         for index, provider in enumerate(provider_keys, start=1):
-            models = grouped[provider]
+            models = all_grouped.get(provider, [])
+            free_models = free_grouped.get(provider, [])
             marker = " (current)" if provider == current_provider else ""
             sample = ", ".join(self.model_short_id(model.id) for model in models[:3])
             suffix = f" - {sample}" if sample else ""
+            count = (
+                f"{len(models)} model(s)"
+                if include_all
+                else f"{len(free_models)} free / {len(models)} total model(s)"
+            )
             lines.append(
                 f"{index}. {self.provider_display_name(provider)}"
-                f" - {len(models)} model(s){marker}{suffix}"
+                f" - {count}{marker}{suffix}"
             )
 
         lines.append("")
@@ -1197,7 +1269,7 @@ class Murmur:
         options = self.thread_model_options.get(thread_id)
         providers = self.thread_provider_options.get(thread_id)
         if not options or not providers:
-            options = await self.fetch_model_options(include_all=False)
+            options = await self.fetch_model_options(include_all=True)
             grouped = self.group_model_options(options)
             providers = sorted(grouped, key=self.provider_sort_key)
             self.thread_model_options[thread_id] = options
@@ -1277,22 +1349,44 @@ class Murmur:
             return family_matches
         return [provider] if provider else []
 
-    async def fetch_model_options(self, include_all: bool = False) -> list[ModelOption]:
+    async def fetch_model_options(
+        self,
+        include_all: bool = False,
+        strict_free: bool = False,
+    ) -> list[ModelOption]:
         models = await self.fetch_openwebui_models()
 
-        if not include_all:
-            models = [model for model in models if self.is_free_model(model)]
+        if include_all:
+            return sorted(models, key=lambda model: model.id)
 
-        return sorted(models, key=lambda model: model.id)
+        free_models = [model for model in models if self.is_free_model(model)]
+        if strict_free:
+            return sorted(free_models, key=lambda model: model.id)
+
+        models_by_provider = self.group_model_options(models)
+        free_by_provider = self.group_model_options(free_models)
+        visible_models = []
+        for provider, provider_models in models_by_provider.items():
+            visible_models.extend(free_by_provider.get(provider) or provider_models)
+
+        return self.dedupe_model_options(visible_models)
 
     async def fetch_openwebui_models(self) -> list[ModelOption]:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         ) as session:
-            provider_by_url_idx = await self.fetch_openwebui_provider_map(session)
+            (
+                provider_by_url_idx,
+                configured_model_ids,
+            ) = await self.fetch_openwebui_provider_metadata(session)
+            configured_models = self.configured_connection_models(
+                provider_by_url_idx,
+                configured_model_ids,
+            )
             connection_models = await self.fetch_openwebui_connection_models(
                 session,
                 provider_by_url_idx,
+                skip_url_idxs=set(configured_model_ids),
             )
             api_models: list[ModelOption] = []
             for path in ("/api/models", "/api/v1/models"):
@@ -1311,6 +1405,10 @@ class Murmur:
                 if api_models:
                     break
 
+        connection_models = self.dedupe_model_options(
+            configured_models + connection_models
+        )
+
         if connection_models:
             connection_families = {
                 self.provider_family(option.provider) for option in connection_models
@@ -1325,16 +1423,42 @@ class Murmur:
 
         return self.dedupe_model_options(api_models)
 
+    def configured_connection_models(
+        self,
+        provider_by_url_idx: dict[str, str],
+        configured_model_ids: dict[str, list[str]],
+    ) -> list[ModelOption]:
+        models: list[ModelOption] = []
+        for url_idx, model_ids in configured_model_ids.items():
+            provider = provider_by_url_idx.get(url_idx)
+            if not provider:
+                continue
+            for model_id in model_ids:
+                model_name = self.model_short_id(model_id)
+                models.append(
+                    ModelOption(
+                        id=self.provider_model_id(provider, model_id),
+                        name=model_name,
+                        provider=provider,
+                        is_free=self.is_free_model_id(model_id, model_name),
+                    )
+                )
+        return self.dedupe_model_options(models)
+
     async def fetch_openwebui_connection_models(
         self,
         session: aiohttp.ClientSession,
         provider_by_url_idx: dict[str, str],
+        skip_url_idxs: set[str] | None = None,
     ) -> list[ModelOption]:
+        skip_url_idxs = skip_url_idxs or set()
         models: list[ModelOption] = []
         for url_idx, provider in sorted(
             provider_by_url_idx.items(),
             key=lambda item: int(item[0]) if item[0].isdigit() else item[0],
         ):
+            if url_idx in skip_url_idxs:
+                continue
             try:
                 async with session.get(
                     f"{self.settings.openwebui_base_url}/openai/models/{url_idx}",
@@ -1372,26 +1496,33 @@ class Murmur:
     async def fetch_openwebui_provider_map(
         self, session: aiohttp.ClientSession
     ) -> dict[str, str]:
+        provider_by_url_idx, _ = await self.fetch_openwebui_provider_metadata(session)
+        return provider_by_url_idx
+
+    async def fetch_openwebui_provider_metadata(
+        self, session: aiohttp.ClientSession
+    ) -> tuple[dict[str, str], dict[str, list[str]]]:
         try:
             async with session.get(
                 f"{self.settings.openwebui_base_url}/openai/config",
                 headers=await self.openwebui_headers(session),
             ) as response:
                 if response.status >= 400:
-                    return {}
+                    return {}, {}
                 body = await response.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError, TypeError):
-            return {}
+            return {}, {}
 
         if not isinstance(body, dict):
-            return {}
+            return {}, {}
 
         urls = body.get("OPENAI_API_BASE_URLS") or []
         configs = body.get("OPENAI_API_CONFIGS") or {}
         if not isinstance(urls, list) or not isinstance(configs, dict):
-            return {}
+            return {}, {}
 
         provider_by_url_idx: dict[str, str] = {}
+        configured_model_ids: dict[str, list[str]] = {}
         for index, url in enumerate(urls):
             url_text = str(url)
             config = configs.get(str(index), configs.get(url_text, {}))
@@ -1401,11 +1532,18 @@ class Murmur:
             prefix_id = config.get("prefix_id")
             if isinstance(prefix_id, str) and prefix_id.strip():
                 provider_by_url_idx[str(index)] = self.canonical_provider_id(prefix_id)
-                continue
+            else:
+                provider_by_url_idx[str(index)] = self.provider_for_base_url(url_text)
 
-            provider_by_url_idx[str(index)] = self.provider_for_base_url(url_text)
+            model_ids = config.get("model_ids")
+            if isinstance(model_ids, list):
+                configured_model_ids[str(index)] = [
+                    str(model_id).strip()
+                    for model_id in model_ids
+                    if str(model_id).strip()
+                ]
 
-        return provider_by_url_idx
+        return provider_by_url_idx, configured_model_ids
 
     def parse_models_response(
         self,
@@ -1497,6 +1635,8 @@ class Murmur:
 
     def provider_for_model(self, model_id: str) -> str:
         model_id = model_id.strip()
+        if model_id.startswith("@cf/"):
+            return "cloudflare"
         if model_id.startswith("openrouter/"):
             return "openrouter"
         if "." in model_id:
@@ -1638,24 +1778,38 @@ class Murmur:
         provider = self.provider_for_selected_model(thread_id, model)
         return f"{self.response_header(provider, model)}\n{answer}"
 
-    async def generate_image_response(self, prompt: str) -> BotResponse:
-        paths = await self.request_image_generation(prompt)
-        model = self.image_model_label()
+    async def generate_image_response(
+        self,
+        thread_id: str,
+        prompt: str,
+        model: str | None = None,
+    ) -> BotResponse:
+        model = model or self.settings.image_generation_model
+        paths = await self.request_image_generation(prompt, model)
+        model_label = model or self.image_model_label()
+        provider = self.provider_for_selected_model(thread_id, model_label)
         size = f", {self.settings.image_size}" if self.settings.image_size else ""
+        header = self.response_header(provider, model_label)
+        if size:
+            header = f"{header[:-1]}{size}]"
         return BotResponse(
-            text=f"[{self.image_provider_label()} - {model}{size}]",
+            text=header,
             file_paths=paths,
             cleanup_paths=paths,
         )
 
-    async def request_image_generation(self, prompt: str) -> list[str]:
+    async def request_image_generation(
+        self,
+        prompt: str,
+        model: str | None = None,
+    ) -> list[str]:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         ) as session:
-            body, status = await self.post_image_generation(session, prompt)
+            body, status = await self.post_image_generation(session, prompt, model)
             if status == 401 and not self.settings.openwebui_api_key:
                 self.openwebui_token = None
-                body, status = await self.post_image_generation(session, prompt)
+                body, status = await self.post_image_generation(session, prompt, model)
 
             if status >= 400:
                 raise UserVisibleError(self.image_error_message(prompt, status, body))
@@ -1670,11 +1824,15 @@ class Murmur:
             return paths
 
     async def post_image_generation(
-        self, session: aiohttp.ClientSession, prompt: str
+        self,
+        session: aiohttp.ClientSession,
+        prompt: str,
+        model: str | None = None,
     ) -> tuple[object, int]:
         payload: dict[str, object] = {"prompt": prompt, "n": 1}
-        if self.settings.image_generation_model:
-            payload["model"] = self.settings.image_generation_model
+        model = model or self.settings.image_generation_model
+        if model:
+            payload["model"] = self.model_short_id(model)
         if self.settings.image_size:
             payload["size"] = self.settings.image_size
         if self.settings.image_steps is not None:
