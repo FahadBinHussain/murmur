@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import os
 import secrets
 import time
@@ -97,6 +98,26 @@ def openai_error(message: str, status: int = 502) -> web.Response:
     )
 
 
+def short_prompt_id(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def compact_log_value(value: object, max_length: int = 2000) -> str:
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length]}...<truncated>"
+
+
+def log_image_proxy_error(prompt: str, message: str) -> None:
+    print(
+        "IMAGE_PROXY_ERROR "
+        f"prompt_id={short_prompt_id(prompt)} "
+        f"{compact_log_value(message)}",
+        flush=True,
+    )
+
+
 async def cloudflare_image_proxy_models(request: web.Request) -> web.Response:
     auth_error = image_proxy_auth_error(request)
     if auth_error is not None:
@@ -180,9 +201,14 @@ async def generate_cloudflare_image(
             content_type = response.headers.get("Content-Type", "")
             if response.status >= 400:
                 body = await response.text()
+                log_image_proxy_error(
+                    prompt,
+                    "cloudflare_status="
+                    f"{response.status} content_type={content_type} body={body}",
+                )
                 return openai_error(
                     f"Cloudflare image generation failed ({response.status}): {body}",
-                    status=502,
+                    status=response.status if response.status < 500 else 502,
                 )
 
             if content_type.startswith("image/"):
@@ -190,8 +216,10 @@ async def generate_cloudflare_image(
 
             body = await response.json(content_type=None)
     except (ClientError, asyncio.TimeoutError) as exc:
+        log_image_proxy_error(prompt, f"request_failed={exc}")
         return openai_error(f"Cloudflare image generation request failed: {exc}")
     except ValueError as exc:
+        log_image_proxy_error(prompt, f"invalid_json={exc}")
         return openai_error(f"Cloudflare returned an invalid JSON response: {exc}")
 
     result = body.get("result", body) if isinstance(body, dict) else {}
@@ -200,6 +228,10 @@ async def generate_cloudflare_image(
         return image
 
     errors = body.get("errors") if isinstance(body, dict) else None
+    log_image_proxy_error(
+        prompt,
+        f"missing_image errors={errors or body}",
+    )
     return openai_error(f"Cloudflare response did not include an image: {errors or body}")
 
 
