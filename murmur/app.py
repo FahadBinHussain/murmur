@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import os
+import socket
 import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -10,8 +11,16 @@ from typing import Deque
 from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
+import fbchat_muqit.state as fb_state
+import fbchat_muqit.utils.stateHelper as fb_state_helper
 from dotenv import load_dotenv
 from fbchat_muqit import Client, EventType, Message
+
+
+DEFAULT_FB_UPLOAD_ENDPOINTS = [
+    "https://upload.facebook.com/ajax/mercury/upload.php",
+    "https://upload.messenger.com/ajax/mercury/upload.php",
+]
 
 
 @dataclass(frozen=True)
@@ -32,6 +41,10 @@ class Settings:
     fb_proxy: str | None
     fb_mqtt_proxy: str | None
     fb_mqtt_watchdog_seconds: int
+    fb_http_timeout_seconds: int
+    fb_upload_proxy: str | None
+    fb_upload_retries: int
+    fb_upload_endpoints: list[str]
     bot_prefix: str
     respond_only_on_prefix: bool
     respond_to_bot_replies: bool
@@ -105,6 +118,24 @@ def env_int(name: str) -> int | None:
     return int(value)
 
 
+def env_csv(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return list(default)
+    items = [item.strip() for item in value.replace("\n", ",").split(",")]
+    return [item for item in items if item]
+
+
+def env_proxy(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if "://" not in value:
+        value = f"http://{value}"
+    return value
+
+
 def load_settings() -> Settings:
     load_dotenv()
 
@@ -141,6 +172,12 @@ def load_settings() -> Settings:
         fb_proxy=os.getenv("FB_PROXY") or None,
         fb_mqtt_proxy=os.getenv("FB_MQTT_PROXY") or os.getenv("FB_PROXY") or None,
         fb_mqtt_watchdog_seconds=int(os.getenv("FB_MQTT_WATCHDOG_SECONDS", "15")),
+        fb_http_timeout_seconds=int(os.getenv("FB_HTTP_TIMEOUT_SECONDS", "120")),
+        fb_upload_proxy=env_proxy("FB_UPLOAD_PROXY"),
+        fb_upload_retries=int(os.getenv("FB_UPLOAD_RETRIES", "3")),
+        fb_upload_endpoints=env_csv(
+            "FB_UPLOAD_ENDPOINTS", DEFAULT_FB_UPLOAD_ENDPOINTS
+        ),
         bot_prefix=os.getenv("BOT_PREFIX", "/ai").strip(),
         respond_only_on_prefix=env_bool("RESPOND_ONLY_ON_PREFIX", True),
         respond_to_bot_replies=env_bool("RESPOND_TO_BOT_REPLIES", True),
@@ -171,6 +208,8 @@ class Murmur:
         self.openwebui_token: str | None = None
         self.mqtt_watchdog_task: asyncio.Task | None = None
         self.response_tasks: set[asyncio.Task] = set()
+        self.file_upload_lock = asyncio.Lock()
+        self.configure_facebook_http_timeout()
         self.configure_mqtt_proxy()
         self.client = Client(
             cookies_file_path=settings.fb_cookies_path,
@@ -187,6 +226,36 @@ class Murmur:
             except Exception as exc:
                 print(f"Open WebUI warmup failed: {exc}")
         self.client.run()
+
+    def configure_facebook_http_timeout(self) -> None:
+        timeout_seconds = max(30, self.settings.fb_http_timeout_seconds)
+        timeout = aiohttp.ClientTimeout(
+            total=timeout_seconds,
+            connect=timeout_seconds,
+            sock_connect=timeout_seconds,
+            sock_read=timeout_seconds,
+        )
+
+        def get_session(cookie_jar=None, proxy=None):
+            if proxy:
+                from aiohttp_socks import ProxyConnector
+
+                connector = ProxyConnector.from_url(proxy)
+            else:
+                connector = aiohttp.TCPConnector(
+                    family=socket.AF_INET,
+                    ttl_dns_cache=300,
+                    enable_cleanup_closed=True,
+                )
+
+            return aiohttp.ClientSession(
+                cookie_jar=cookie_jar,
+                connector=connector,
+                timeout=timeout,
+            )
+
+        fb_state.get_session = get_session
+        fb_state_helper.get_session = get_session
 
     async def warmup_openwebui(self) -> None:
         print("Warming Open WebUI before Messenger listener starts...")
@@ -389,11 +458,11 @@ class Murmur:
         parts = self.split_reply(response.text) if response.text else []
         try:
             if response.file_paths:
-                sent_message_id = await self.client.send_message(
+                sent_message_id = await self.send_message_with_files(
                     text=parts[0] if parts else None,
                     thread_id=message.thread_id,
-                    file_path=response.file_paths,
                     reply_to_message=message.id,
+                    file_paths=response.file_paths,
                 )
                 if sent_message_id:
                     self.sent_message_ids[message.thread_id].append(sent_message_id)
@@ -419,6 +488,171 @@ class Murmur:
                     Path(path).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    async def send_message_with_files(
+        self,
+        text: str | None,
+        thread_id: str,
+        reply_to_message: str | None,
+        file_paths: list[str],
+    ) -> str | None:
+        file_ids = await self.upload_files_with_retries(file_paths)
+        return await self.client.send_message(
+            text=text,
+            thread_id=thread_id,
+            files_ids=file_ids,
+            reply_to_message=reply_to_message,
+        )
+
+    async def upload_files_with_retries(self, file_paths: list[str]) -> list[str]:
+        attempts = max(1, self.settings.fb_upload_retries)
+        last_error: Exception | None = None
+
+        async with self.file_upload_lock:
+            for attempt in range(1, attempts + 1):
+                for endpoint in self.settings.fb_upload_endpoints:
+                    try:
+                        print(
+                            "Messenger file upload attempt "
+                            f"{attempt}/{attempts} via {urlparse(endpoint).netloc}"
+                        )
+                        return await self.upload_files_to_endpoint(
+                            file_paths, endpoint
+                        )
+                    except Exception as exc:
+                        if last_error is None or not self.is_upload_auth_error(exc):
+                            last_error = exc
+                        print(
+                            "Messenger file upload failed via "
+                            f"{urlparse(endpoint).netloc} "
+                            f"({attempt}/{attempts}): {exc}"
+                        )
+
+                if attempt >= attempts:
+                    break
+
+                delay = min(2 * attempt, 10)
+                print(
+                    "Messenger file upload endpoints failed; "
+                    f"retrying in {delay}s ({attempt}/{attempts})"
+                )
+                await asyncio.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Messenger file upload failed without an exception")
+
+    async def upload_files_to_endpoint(
+        self, file_paths: list[str], endpoint: str
+    ) -> list[str]:
+        state = self.client._state
+        if state is None:
+            raise RuntimeError("Messenger state is not initialized")
+
+        async with state.get_files_from_paths(file_paths) as files:
+            file_dict = {
+                f"upload_{index}": file_data
+                for index, file_data in enumerate(files)
+            }
+            if self.settings.fb_upload_proxy:
+                json_response = await self.post_upload_with_proxy(
+                    endpoint,
+                    data={"voice_clip": "false"},
+                    files=file_dict,
+                )
+            else:
+                json_response = await state._post(
+                    endpoint,
+                    data={"voice_clip": "false"},
+                    files=file_dict,
+                )
+
+        payload = json_response["payload"]
+        metadata = payload["metadata"]
+        entries = list(metadata.values()) if isinstance(metadata, dict) else metadata
+
+        if len(entries) != len(file_paths):
+            raise RuntimeError(
+                "Some files could not be uploaded to Messenger "
+                f"via {urlparse(endpoint).netloc}"
+            )
+
+        ids: list[str] = []
+        for entry in entries:
+            for key in ("image_id", "gif_id", "video_id", "audio_id", "file_id"):
+                if key in entry:
+                    ids.append(entry[key])
+                    break
+            else:
+                raise RuntimeError(
+                    "Messenger upload response did not include a file id"
+                )
+
+        return ids
+
+    async def post_upload_with_proxy(
+        self,
+        endpoint: str,
+        data: dict[str, str],
+        files: dict[str, tuple[str, object, str]],
+    ) -> dict:
+        state = self.client._state
+        if state is None:
+            raise RuntimeError("Messenger state is not initialized")
+
+        form_data = aiohttp.FormData()
+        upload_data = dict(data)
+        upload_data.update(state.get_params())
+        for key, value in upload_data.items():
+            form_data.add_field(key, str(value))
+        for key, (filename, file_obj, content_type) in files.items():
+            form_data.add_field(
+                key,
+                file_obj,
+                filename=filename,
+                content_type=content_type,
+            )
+
+        headers = state.build_headers(endpoint, "upload")
+        proxy_url = self.settings.fb_upload_proxy
+        timeout = aiohttp.ClientTimeout(total=self.settings.fb_http_timeout_seconds)
+        connector = None
+        proxy_arg = None
+
+        if proxy_url:
+            scheme = urlparse(proxy_url).scheme.lower()
+            if scheme in {"http", "https"}:
+                proxy_arg = proxy_url
+                connector = aiohttp.TCPConnector(
+                    family=socket.AF_INET,
+                    ttl_dns_cache=300,
+                    enable_cleanup_closed=True,
+                )
+            else:
+                from aiohttp_socks import ProxyConnector
+
+                connector = ProxyConnector.from_url(proxy_url)
+
+        async with aiohttp.ClientSession(
+            cookie_jar=state._jar,
+            connector=connector,
+            timeout=timeout,
+        ) as session:
+            async with session.post(
+                endpoint,
+                data=form_data,
+                headers=headers,
+                proxy=proxy_arg,
+            ) as response:
+                content = await state._check_request(response)
+
+        result = state._graphql.process_normal_response(content)
+        state._graphql.handle_payload_error(result)
+        return result
+
+    @staticmethod
+    def is_upload_auth_error(exc: Exception) -> bool:
+        return "1357001" in str(exc) or "Not logged in" in str(exc)
 
     def is_allowed_thread(self, thread_id: str) -> bool:
         return (
