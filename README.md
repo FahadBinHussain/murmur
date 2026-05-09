@@ -7,46 +7,123 @@ suggested_hardware: cpu-basic
 
 # Murmur
 
-Murmur is a Facebook Messenger AI bridge for Open WebUI.
+Murmur is a Facebook Messenger bridge for [Open WebUI](https://github.com/open-webui/open-webui), using [fbchat-muqit](https://github.com/togashigreat/fbchat-muqit) for Messenger transport.
 
-The Docker image bundles Open WebUI and Murmur together, so one deployment can run the web UI, model router, database-backed chat platform, and Messenger bridge.
+It lets a Messenger thread talk to the same model router, provider connections, image generation settings, authentication, and persistence that Open WebUI already manages.
 
 ```text
-Messenger thread -> Murmur -> bundled Open WebUI -> AI reply -> Messenger thread
+Facebook Messenger
+  -> fbchat-muqit
+  -> Murmur
+  -> Open WebUI
+  -> Murmur
+  -> fbchat-muqit
+  -> Facebook Messenger
 ```
 
-## Status
+## Project Boundary
 
-Early project. The current version is intentionally small:
+Murmur is designed to be a bridge, not a second AI platform.
 
-- Bundled Open WebUI runtime
-- Messenger listener using `fbchat-muqit`
-- Open WebUI `/api/chat/completions` backend
-- Open WebUI `/api/v1/images/generations` image bridge
-- Automatic Open WebUI JWT sign-in when no API key is provided
-- Per-thread short conversation memory
-- Optional `/ai` prefix trigger
+- Messenger transport belongs to `fbchat-muqit`.
+- AI chat and image entry points belong to Open WebUI.
+- Provider keys are synced into Open WebUI Connections.
+- Per-thread model selection stores Open WebUI model IDs.
+- Raw upstream errors are surfaced back through Messenger when possible.
+
+There is one intentional adapter exception: Cloudflare Workers AI image generation. Open WebUI expects an OpenAI-compatible image endpoint, while Cloudflare image models use Cloudflare's `/ai/run/{model}` API. Murmur can expose a small local OpenAI-compatible image adapter so Open WebUI can call Cloudflare image models. Chat still goes through Open WebUI.
+
+## Features
+
+- Messenger listener and sender through `fbchat-muqit`
+- Open WebUI chat bridge through `/api/chat/completions`
+- Open WebUI image bridge through `/api/v1/images/generations`
+- Bundled all-in-one Docker image based on the official Open WebUI image
+- External Open WebUI mode for separate deployments
+- Open WebUI JWT sign-in fallback when no API key is configured
+- Provider connection sync for OpenAI-compatible providers
+- Symmetric per-thread chat and image model selection
+- Short per-thread memory before sending messages to Open WebUI
+- Long Messenger replies split into deliverable chunks
 - Optional allowed-thread allowlist
-- Long-reply splitting
-- Docker-ready runtime
+- Optional Facebook HTTP, MQTT, and upload proxies
+- Name-aware Messenger event logs
 
-## Important Messenger Limitation
+## Command Reference
 
-`fbchat-muqit` is an unofficial Facebook Messenger API. Use a dedicated account and expect platform risk.
+The canonical Messenger command prefix is `/ai`.
 
-Messenger one-to-one user messages may be limited by end-to-end encryption. Murmur is best tested in group chats, room chats, or page contexts where `fbchat-muqit` can receive messages.
+```text
+Chat
+/ai <message>
+/ai model <provider> [connection] <number>
 
-Never commit `cookies.json`, `.env`, API keys, or Facebook cookies.
+Image
+/ai image <prompt>
+/ai image model <provider> [connection] <number>
 
-If a hosted deployment cannot reach or authenticate with Facebook, always test Murmur locally with the same cookies before rotating them. If local login also fails, treat the cookie as expired or invalid. If local login works, treat the hosted deployment as a host/IP/networking problem.
+Models
+/ai models
+/ai models <provider> [connection]
+/ai status
+```
+
+`/help` and `/ai help` return the same short command reference inside Messenger.
+
+Examples:
+
+```text
+/ai explain this in one sentence
+/ai models
+/ai models openrouter 2
+/ai model openrouter 2 1
+/ai image a brutalist library in heavy rain
+/ai image model cloudflare 1 12
+/ai status
+```
+
+Model choices are remembered per Messenger thread. Chat model selection and image model selection are separate, but they use the same provider/connection/number syntax.
+
+Responses include the selected provider and model:
+
+```text
+[openrouter 2 - deepseek/deepseek-chat-v3-0324:free]
+```
+
+## Architecture
+
+The all-in-one Docker deployment starts three processes:
+
+- Open WebUI on an internal port
+- Murmur's public proxy on the public port
+- Murmur's Messenger listener
+
+The public proxy forwards normal web traffic to Open WebUI and also hosts the optional local Cloudflare image adapter.
+
+```text
+Browser / HF Space URL
+  -> Murmur public proxy
+  -> Open WebUI
+
+Messenger event
+  -> fbchat-muqit
+  -> Murmur listener
+  -> Open WebUI API
+  -> fbchat-muqit
+```
 
 ## Requirements
 
 - Python 3.10+
-- An Open WebUI API key, or Open WebUI login credentials
-- A Facebook cookies JSON file usable by `fbchat-muqit`
+- Facebook cookies usable by `fbchat-muqit`
+- Open WebUI API key or Open WebUI admin email/password
+- At least one model/provider configured in Open WebUI
 
-## Setup
+For hosted deployments, use a dedicated Facebook account. `fbchat-muqit` is unofficial, and Facebook can change or restrict behavior without notice.
+
+Logging out of Facebook, clearing browser sessions, or using "log out of all devices" can expire the cookies Murmur depends on. Export fresh cookies after any logout.
+
+## Local Setup
 
 Install dependencies:
 
@@ -54,110 +131,152 @@ Install dependencies:
 python -m pip install -r requirements.txt
 ```
 
-Copy the env template:
+Create a local environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in:
+Minimal external Open WebUI configuration:
 
 ```env
-OPENWEBUI_BASE_URL=https://your-open-webui.example.com
-OPENWEBUI_API_KEY=sk-your-open-webui-api-key
-OPENWEBUI_MODEL=your-model-name
+OPENWEBUI_BASE_URL=https://your-openwebui.example.com
+OPENWEBUI_API_KEY=your-openwebui-api-key
+OPENWEBUI_MODEL=your-model-id
 FB_COOKIES_PATH=cookies.json
 ```
 
-Run:
+Run Murmur:
 
 ```bash
 python -m murmur
 ```
 
-By default, Murmur only answers messages that start with:
+## Docker
 
-```text
-/ai
-```
-
-Example:
-
-```text
-/ai write a short reply to this conversation
-```
-
-Help and status:
-
-```text
-/help
-/ai help
-/ai status
-```
-
-`/help` and `/ai help` show the full Messenger command guide. `/ai status` shows the current Open WebUI model for the thread.
-
-Model switching is per Messenger thread:
-
-```text
-/ai models
-/ai models openrouter 2
-/ai model openrouter 2 1
-/ai image model openrouter 2 1
-/ai image openrouter 2 1 a neon cyberpunk teashop in the rain
-/ai status
-```
-
-`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection. Cloudflare model discovery uses Cloudflare's Workers AI `GET /accounts/{account_id}/ai/models/search` metadata endpoint, then Murmur still sends actual chat/image calls through Open WebUI. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai chat model openrouter 2 1` selects item 1 under `[openrouter 2]` for chat, and `/ai image model openrouter 2 1` selects it for image. `/ai image openrouter 2 1 ...` sets that image model before generating. Older shortcuts like `/ai model openrouter 2 1` and `/ai model 7` still work for chat. Murmur still only calls Open WebUI for inference; provider switching selects Open WebUI model IDs.
-
-AI replies start with the provider and model that produced the answer, for example:
-
-```text
-[openrouter 2 - deepseek/deepseek-chat-v3-0324:free]
-```
-
-Configure short aliases with `OPENWEBUI_MODEL_ALIASES` for favorites:
-
-```env
-OPENWEBUI_MODEL=deepseek/deepseek-chat-v3-0324:free
-OPENWEBUI_MODEL_ALIASES=free=deepseek/deepseek-chat-v3-0324:free,fast=google/gemini-2.0-flash-exp:free
-```
-
-Murmur is bridge-only for Messenger commands: chat goes through Open WebUI chat completions, and image prompts go through Open WebUI image generation. Providers are not split into "text providers" and "image providers"; Murmur treats provider connections as model sources and lets Open WebUI/upstream return the exact error if a model cannot handle the requested job.
-
-```text
-/ai image a neon cyberpunk teashop in the rain
-/ai see what is in this image?
-```
-
-Vision commands still reply with a bridge-only disabled message until they can be wired through Open WebUI. For Cloudflare Workers AI image models, the bundled public proxy exposes a local OpenAI-compatible image endpoint that Open WebUI can use as its image backend. Cloudflare Workers AI also exposes OpenAI-compatible chat endpoints, so it can be added as a normal provider family when `cloudflare` is listed in `OPENWEBUI_PROVIDER_FAMILIES`.
-
-## Docker: All In One
-
-The default Dockerfile builds an all-in-one image from the official Open WebUI image and starts both Open WebUI and Murmur.
+Build the all-in-one image:
 
 ```bash
 docker build -t murmur .
 ```
 
-Run:
+Run it:
 
 ```bash
 docker run --env-file .env -p 7860:7860 -v ./cookies.json:/app/murmur/cookies.json:ro murmur
 ```
 
-Open WebUI is served on port `7860` by default for Hugging Face Spaces compatibility.
+Open WebUI is exposed on port `7860`.
+
+## Provider Connections
+
+Murmur syncs provider keys into Open WebUI Connections at startup. The provider shape is consistent:
+
+```env
+OPENWEBUI_PROVIDER_SYNC=true
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+
+OPENROUTER_API_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY_1=sk-or-v1-...
+OPENROUTER_API_KEY_2=sk-or-v1-...
+OPENROUTER_API_KEY_3=sk-or-v1-...
+OPENROUTER_API_KEY_4=sk-or-v1-...
+OPENROUTER_API_KEY_5=sk-or-v1-...
+
+CF_ACCOUNT_ID=your-cloudflare-account-id
+CF_API_TOKEN=your-cloudflare-workers-ai-token
+CLOUDFLARE_API_BASE_URL=
+CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
+CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS=true
+```
+
+At runtime these become separate Open WebUI connections:
+
+```text
+openrouter 1
+openrouter 2
+openrouter 3
+openrouter 4
+openrouter 5
+cloudflare 1
+```
+
+Future OpenAI-compatible providers use the same pattern:
+
+```env
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,gemini,mistral
+
+GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
+GEMINI_API_KEY_1=...
+
+MISTRAL_API_BASE_URL=https://your-openai-compatible-mistral-gateway/v1
+MISTRAL_API_KEY_1=...
+```
+
+## Image Generation
+
+Open WebUI is the image-generation entry point:
+
+```text
+Murmur
+  -> Open WebUI /api/v1/images/generations
+```
+
+For providers that expose an OpenAI-compatible image API, point Open WebUI image settings at that provider.
+
+For Cloudflare Workers AI image models, Murmur can expose a local adapter:
+
+```env
+IMAGE_PROXY_API_KEY=random-local-image-proxy-key
+IMAGE_PROXY_BASE_PATH=/murmur-image-openai/v1
+ENABLE_IMAGE_GENERATION=true
+IMAGE_GENERATION_ENGINE=openai
+IMAGE_GENERATION_MODEL=@cf/black-forest-labs/flux-1-schnell
+IMAGE_SIZE=1024x1024
+IMAGE_STEPS=4
+```
+
+That route is:
+
+```text
+Murmur
+  -> Open WebUI image endpoint
+  -> Murmur local image adapter
+  -> Cloudflare Workers AI
+```
+
+This adapter exists only because Open WebUI does not natively speak Cloudflare's image generation API shape.
+
+## Messenger Configuration
+
+Core Messenger settings:
+
+```env
+BOT_PREFIX=/ai
+RESPOND_ONLY_ON_PREFIX=true
+RESPOND_TO_BOT_REPLIES=true
+ALLOWED_THREAD_IDS=
+
+FB_COOKIES_PATH=cookies.json
+FB_COOKIES_JSON_B64=
+FB_USER_AGENT=
+FB_PROXY=
+FB_UPLOAD_PROXY=
+FB_MQTT_PROXY=
+FB_HTTP_TIMEOUT_SECONDS=120
+FB_MQTT_WATCHDOG_SECONDS=15
+FB_UPLOAD_RETRIES=3
+```
+
+Use `ALLOWED_THREAD_IDS` in production so Murmur only answers in threads you control.
+
+Messenger one-to-one user messages may be limited by end-to-end encryption. Group chats, room chats, and pages are usually better test targets for `fbchat-muqit`.
+
+Logging out of Facebook can invalidate the cookies in `cookies.json` or `FB_COOKIES_JSON_B64`. If Murmur suddenly cannot log in after a logout, export a fresh cookie file.
 
 ## Hugging Face Spaces
 
-Create a new Hugging Face Space with:
-
-```text
-SDK: Docker
-Hardware: CPU basic
-```
-
-This repository is already configured for Docker Spaces through the README front matter:
+The repository is ready for Docker Spaces:
 
 ```yaml
 sdk: docker
@@ -165,97 +284,70 @@ app_port: 7860
 suggested_hardware: cpu-basic
 ```
 
-Required Hugging Face Space secrets:
+Recommended Space variables/secrets:
 
 ```env
 WEBUI_SECRET_KEY=long-random-secret
-WEBUI_ADMIN_EMAIL=your-admin-email@example.com
+WEBUI_ADMIN_EMAIL=admin@example.com
 WEBUI_ADMIN_PASSWORD=strong-admin-password
-
-OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
-OPENAI_API_KEY=your-openrouter-api-key
-OPENWEBUI_MODEL=openrouter/free
-
-FB_COOKIES_JSON_B64=base64-encoded-cookies-json
-
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
-OPENROUTER_API_KEY_1=your-openrouter-api-key
-CF_ACCOUNT_ID=your-cloudflare-account-id
-CF_API_TOKEN=your-cloudflare-workers-ai-token
-IMAGE_GENERATION_MODEL=@cf/black-forest-labs/flux-1-schnell
-IMAGE_PROXY_API_KEY=random-local-image-proxy-key
-```
-
-Optional but recommended:
-
-```env
-WEBUI_URL=https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space
-CORS_ALLOW_ORIGIN=https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space
-USER_AGENT=Murmur/0.1
 ENABLE_SIGNUP=false
 DEFAULT_USER_ROLE=pending
-FB_USER_AGENT=the-browser-user-agent-that-exported-your-cookies
-FB_MQTT_WATCHDOG_SECONDS=15
-IMAGE_STEPS=4
+
+OPENWEBUI_MODEL=openrouter/free
+OPENWEBUI_MODEL_ALIASES=free=openrouter/free
+
+OPENWEBUI_PROVIDER_SYNC=true
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+OPENROUTER_API_KEY_1=sk-or-v1-...
+CF_ACCOUNT_ID=your-cloudflare-account-id
+CF_API_TOKEN=your-cloudflare-workers-ai-token
+
+FB_COOKIES_JSON_B64=base64-encoded-cookies-json
+FB_USER_AGENT=browser-user-agent-used-for-cookie-export
 ```
 
-Free Spaces have enough RAM for Open WebUI, but the disk is ephemeral and free CPU basic Spaces sleep after inactivity. For persistence without paid Hugging Face storage, an external database would be ideal; however, Hugging Face Spaces networking may block direct Postgres connections on port `5432`, so Neon may not work from a free Space. If Neon fails to connect, remove `DATABASE_URL`, `PGVECTOR_DB_URL`, `VECTOR_DB`, and `PGSSLMODE` and use the default local SQLite storage, understanding that state may be lost on restart.
-
-## Render Free + Neon Free
-
-Use this repo as a Render Docker Web Service. The service starts Open WebUI first, waits for `/health`, then starts Murmur.
-Murmur also starts a small public proxy immediately so Render sees an open port while Open WebUI performs first-boot migrations.
-
-Blueprint deploy URL:
-
-```text
-https://render.com/deploy?repo=https://github.com/FahadBinHussain/murmur
-```
-
-Required Render env vars:
+Optional persistence can be configured with PostgreSQL:
 
 ```env
-WEBUI_SECRET_KEY=long-random-secret
-WEBUI_ADMIN_EMAIL=your-admin-email@example.com
-WEBUI_ADMIN_PASSWORD=strong-admin-password
-
 DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB
 PGSSLMODE=require
 VECTOR_DB=pgvector
 PGVECTOR_DB_URL=postgresql://USER:PASSWORD@HOST/DB
 PGVECTOR_CREATE_EXTENSION=false
-
-OPENAI_API_BASE_URL=https://your-provider.example.com/v1
-OPENAI_API_KEY=your-provider-api-key
-OPENWEBUI_MODEL=your-model-name
-
-FB_COOKIES_JSON_B64=base64-encoded-cookies-json
 ```
 
-Run this once in Neon before deploying:
+If hosted Facebook login fails, test the same cookies locally first. If local login works, the hosted issue is likely network, IP, or proxy related. If local login fails too, rotate the cookies.
+
+## Render
+
+Use this repository as a Docker Web Service. The service starts a public proxy immediately, waits for Open WebUI health, syncs provider connections, then starts the Messenger listener.
+
+Render environment variables follow the same shape as Hugging Face Spaces. If using Neon PostgreSQL, create the vector extension once:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-For Neon/Open WebUI v0.9, do not put `?sslmode=require` or `&channel_binding=require` in `DATABASE_URL` / `PGVECTOR_DB_URL`. Open WebUI currently has mixed psycopg2 and asyncpg startup paths, and their SSL query string handling conflicts. Use `PGSSLMODE=require` as a separate environment variable instead.
+For Neon/Open WebUI v0.9, prefer `PGSSLMODE=require` as a separate variable. Do not add `?sslmode=require` or `&channel_binding=require` to the database URLs.
 
-Generate the cookie base64 from your local `cookies.json`:
+## Cookie Utilities
+
+Generate a base64 cookie payload from `cookies.json`:
 
 ```powershell
 .\scripts\cookies-b64.ps1
 ```
 
-Or use the CMD wrapper if PowerShell script execution is blocked:
-
-```cmd
-.\scripts\cookies-b64.cmd
-```
-
-To copy it straight to your clipboard:
+Copy it directly to the clipboard:
 
 ```powershell
 .\scripts\cookies-b64.ps1 -Copy
+```
+
+CMD wrapper:
+
+```cmd
+.\scripts\cookies-b64.cmd
 ```
 
 Direct PowerShell one-liner:
@@ -264,107 +356,137 @@ Direct PowerShell one-liner:
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.json"))
 ```
 
-Open WebUI still needs an AI provider key or an OpenAI-compatible provider with free quota. Murmur only bridges Messenger to Open WebUI; it cannot make paid model usage free.
+## Configuration Reference
 
-Provider keys are synced into Open WebUI Connections at startup. Murmur stays bridge-only. Every provider family uses the same shape:
+### Open WebUI
 
-```env
-OPENWEBUI_PROVIDER_SYNC=true
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+| Variable | Default | Description |
+|---|---|---|
+| `OPENWEBUI_BASE_URL` | bundled Open WebUI | External Open WebUI URL. Leave empty in all-in-one Docker. |
+| `OPENWEBUI_API_KEY` | empty | Open WebUI API key. |
+| `OPENWEBUI_LOGIN_EMAIL` | `WEBUI_ADMIN_EMAIL` | Login email for JWT auth fallback. |
+| `OPENWEBUI_LOGIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | Login password for JWT auth fallback. |
+| `OPENWEBUI_MODEL` | required | Default chat model ID from Open WebUI. |
+| `OPENWEBUI_MODEL_ALIASES` | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` values. |
+| `OPENWEBUI_WARMUP` | `true` | Warm Open WebUI before Messenger starts. |
+| `OPENWEBUI_WARMUP_CHAT` | `true` | Send a tiny startup chat request. |
+| `OPENWEBUI_ACCESS_LOG` | `false` | Enable Uvicorn access logs for Open WebUI. |
 
-# Provider: OpenRouter
-OPENROUTER_API_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_API_KEY_1=sk-or-v1-...
-OPENROUTER_API_KEY_2=sk-or-v1-...
-OPENROUTER_API_KEY_3=sk-or-v1-...
-OPENROUTER_API_KEY_4=sk-or-v1-...
-OPENROUTER_API_KEY_5=sk-or-v1-...
+### Bundled Open WebUI
 
-# Provider: Cloudflare Workers AI
-CF_ACCOUNT_ID=your-cloudflare-account-id
-CF_API_TOKEN=your-cloudflare-workers-ai-token
-CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
-CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS=true
+| Variable | Default | Description |
+|---|---|---|
+| `WEBUI_SECRET_KEY` | required for hosted deployments | Open WebUI secret key. |
+| `WEBUI_ADMIN_EMAIL` | empty | Admin account email used by Open WebUI and Murmur JWT fallback. |
+| `WEBUI_ADMIN_PASSWORD` | empty | Admin account password used by Open WebUI and Murmur JWT fallback. |
+| `ENABLE_SIGNUP` | `false` recommended | Open WebUI signup toggle. |
+| `DEFAULT_USER_ROLE` | `pending` recommended | Default role for new Open WebUI users. |
+| `ENABLE_OLLAMA_API` | `false` | Disable unused Ollama checks in this all-in-one deployment. |
+| `ENABLE_BASE_MODELS_CACHE` | `true` | Cache Open WebUI base model list after startup. |
+| `ENV` | `prod` | Open WebUI runtime environment. |
+| `USER_AGENT` | `Murmur/0.1` | User-agent for outbound Open WebUI/provider requests. |
+| `WEBUI_URL` | empty | Public Open WebUI URL for hosted deployments. |
+| `CORS_ALLOW_ORIGIN` | empty | Allowed CORS origin for hosted deployments. |
+
+### Providers
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENWEBUI_PROVIDER_SYNC` | `true` | Sync provider keys into Open WebUI Connections. |
+| `OPENWEBUI_PROVIDER_FAMILIES` | `openrouter` when OpenRouter keys exist | Comma-separated provider families. |
+| `<PROVIDER>_API_BASE_URL` | provider-specific | OpenAI-compatible provider base URL. |
+| `<PROVIDER>_API_KEY_1` ... `<PROVIDER>_API_KEY_20` | empty | Numbered provider keys. |
+| `<PROVIDER>_MODEL_IDS` | empty | Optional explicit model allowlist. |
+| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL. |
+| `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | empty | OpenRouter key slots. |
+| `CF_ACCOUNT_ID` | empty | Cloudflare account ID. |
+| `CF_API_TOKEN` | empty | Cloudflare Workers AI token. |
+| `CLOUDFLARE_API_BASE_URL` | derived from `CF_ACCOUNT_ID` | Cloudflare OpenAI-compatible chat base URL. |
+| `CLOUDFLARE_MODEL_IDS` | empty | Explicit Cloudflare models to expose. |
+| `CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS` | `true` | Hide experimental models during Cloudflare metadata lookup. |
+
+### Messenger
+
+| Variable | Default | Description |
+|---|---|---|
+| `BOT_PREFIX` | `/ai` | Messenger command prefix. |
+| `RESPOND_ONLY_ON_PREFIX` | `true` | Only respond to prefixed messages. |
+| `RESPOND_TO_BOT_REPLIES` | `true` | Respond to replies on bot messages without prefix. |
+| `ALLOWED_THREAD_IDS` | empty | Comma-separated Messenger thread allowlist. |
+| `FB_COOKIES_PATH` | `cookies.json` | Path to Facebook cookies JSON. |
+| `FB_COOKIES_JSON_B64` | empty | Base64 cookies JSON for hosted deployments. |
+| `FB_USER_AGENT` | library default | Browser user-agent paired with exported cookies. |
+| `FB_PROXY` | empty | Proxy for Facebook HTTP/login requests. |
+| `FB_UPLOAD_PROXY` | empty | Proxy for Messenger attachment uploads. |
+| `FB_MQTT_PROXY` | empty | Proxy for Messenger realtime MQTT. |
+| `FB_HTTP_TIMEOUT_SECONDS` | `120` | Facebook HTTP timeout. |
+| `FB_MQTT_WATCHDOG_SECONDS` | `15` | Restart listener if MQTT stops silently. |
+| `FB_UPLOAD_RETRIES` | `3` | Attachment upload retry count. |
+| `FB_UPLOAD_ENDPOINTS` | Facebook and Messenger upload hosts | Upload endpoints tried in order. |
+| `FB_LOG_NAMES` | `true` | Resolve Messenger IDs to names in logs. |
+| `FB_LOG_NAMES_KEEP_IDS` | `true` | Keep IDs beside resolved names. |
+| `FB_LOG_NAME_CACHE_PATH` | temp file | JSON cache for resolved Messenger names. |
+
+### Runtime
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_HISTORY_MESSAGES` | `12` | Short per-thread memory window. |
+| `MAX_REPLY_CHARS` | `1800` | Split Messenger replies above this size. |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Open WebUI request timeout. |
+| `SYSTEM_PROMPT` | helpful assistant prompt | System message sent to Open WebUI. |
+| `MURMUR_RESTART_SECONDS` | `60` | Delay before restarting the Messenger listener. |
+
+### Images
+
+| Variable | Default | Description |
+|---|---|---|
+| `IMAGE_PROXY_API_KEY` | `IMAGES_OPENAI_API_KEY` or `CF_API_TOKEN` | Bearer token Open WebUI uses for the local image adapter. |
+| `IMAGE_PROXY_BASE_PATH` | `/murmur-image-openai/v1` | Local adapter path. |
+| `ENABLE_IMAGE_GENERATION` | auto-enabled for Cloudflare adapter | Open WebUI image generation toggle. |
+| `IMAGE_GENERATION_ENGINE` | `openai` | Open WebUI image engine. |
+| `IMAGE_GENERATION_MODEL` | empty | Default image model. |
+| `IMAGES_OPENAI_API_BASE_URL` | local adapter when enabled | OpenAI-compatible image API base URL used by Open WebUI. |
+| `IMAGES_OPENAI_API_KEY` | `IMAGE_PROXY_API_KEY` | OpenAI-compatible image API key used by Open WebUI. |
+| `IMAGE_SIZE` | `1024x1024` | Image size. |
+| `IMAGE_STEPS` | `4` | Cloudflare image diffusion steps. |
+
+### Persistence
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | Open WebUI default SQLite | PostgreSQL URL for Open WebUI persistence. |
+| `PGSSLMODE` | empty | PostgreSQL SSL mode, for example `require`. |
+| `VECTOR_DB` | Open WebUI default | Vector database backend, for example `pgvector`. |
+| `PGVECTOR_DB_URL` | empty | PostgreSQL URL for pgvector storage. |
+| `PGVECTOR_CREATE_EXTENSION` | `true` upstream default | Whether Open WebUI should create the pgvector extension. |
+
+## Security Notes
+
+- Never commit `.env`, `cookies.json`, API keys, or Facebook cookies.
+- Use a dedicated Facebook account.
+- Do not log out of the Facebook session that produced the cookies unless you are ready to export new cookies.
+- Keep `RESPOND_ONLY_ON_PREFIX=true` unless you want automatic replies.
+- Set `ALLOWED_THREAD_IDS` for production.
+- Disable Open WebUI signup on public deployments.
+- Treat hosted Facebook failures as network/proxy issues only after local cookie login succeeds.
+
+## Development
+
+Run a syntax check:
+
+```bash
+python -m compileall murmur
 ```
 
-Startup maps them into Open WebUI as separate OpenAI-compatible connections with prefixes `openrouter_1`, `openrouter_2`, and so on. Messenger users switch consistently with `/ai providers`, `/ai models openrouter 2`, and `/ai model openrouter 2 1`.
+Run Murmur locally:
 
-Future OpenAI-compatible provider families use the same shape:
-
-```env
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,gemini,mistral
-GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
-GEMINI_API_KEY_1=...
-MISTRAL_API_BASE_URL=https://your-openai-compatible-mistral-gateway/v1
-MISTRAL_API_KEY_1=...
+```bash
+python -m murmur
 ```
 
-## Configuration
+The project intentionally keeps most application logic in `murmur/app.py`, the public proxy and image adapter in `murmur/proxy.py`, startup orchestration in `scripts/start-all.sh`, and log cleanup in `murmur/log_filter.py`.
 
-| Variable | Required | Default | Description |
-|---|---:|---|---|
-| `OPENWEBUI_BASE_URL` | No | local bundled Open WebUI | External Open WebUI URL, without trailing slash |
-| `OPENWEBUI_API_KEY` | No | | Open WebUI API key |
-| `OPENWEBUI_LOGIN_EMAIL` | No | `WEBUI_ADMIN_EMAIL` | Login email for JWT auth |
-| `OPENWEBUI_LOGIN_PASSWORD` | No | `WEBUI_ADMIN_PASSWORD` | Login password for JWT auth |
-| `OPENWEBUI_MODEL` | Yes | | Model ID from Open WebUI |
-| `OPENWEBUI_MODEL_ALIASES` | No | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` list for Messenger model switching |
-| `OPENWEBUI_WARMUP` | No | `true` | Warm Open WebUI auth/model endpoints before Messenger starts listening |
-| `OPENWEBUI_WARMUP_CHAT` | No | `true` | Send a tiny non-history chat completion at startup to reduce first real reply latency |
-| `OPENWEBUI_ACCESS_LOG` | No | `false` | Enable Open WebUI Uvicorn access logs; disabled by default to hide noisy signed HF log-viewer URLs |
-| `OPENWEBUI_PROVIDER_SYNC` | No | `true` | Sync numbered provider keys into Open WebUI Connections at startup |
-| `OPENWEBUI_PROVIDER_FAMILIES` | No | `openrouter` when OpenRouter keys exist | Comma-separated provider families to sync, such as `openrouter,cloudflare,gemini,mistral` |
-| `<PROVIDER>_API_BASE_URL` | Yes for non-default families | | OpenAI-compatible base URL for a provider family, e.g. `GEMINI_API_BASE_URL` |
-| `<PROVIDER>_API_KEY_1` ... `<PROVIDER>_API_KEY_20` | No | | Numbered keys mapped into Open WebUI as `<provider>_1.*`, `<provider>_2.*`, etc. |
-| `<PROVIDER>_MODEL_IDS` | No | | Optional comma/semicolon list of models to expose when the provider does not list models itself |
-| `OPENROUTER_API_BASE_URL` | No | `https://openrouter.ai/api/v1` | OpenRouter OpenAI-compatible base URL |
-| `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | No | | Five convenient OpenRouter key fields |
-| `CLOUDFLARE_API_BASE_URL` | No | derived from `CF_ACCOUNT_ID` | Cloudflare Workers AI OpenAI-compatible base URL |
-| `CLOUDFLARE_MODEL_IDS` | No | | Cloudflare model IDs to expose through Open WebUI Connections |
-| `CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS` | No | `true` | Hide experimental models when using Cloudflare Workers AI model search |
-| `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
-| `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
-| `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
-| `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook web/login requests |
-| `FB_HTTP_TIMEOUT_SECONDS` | No | `120` | Timeout for Facebook web login/session extraction and attachment uploads |
-| `FB_UPLOAD_PROXY` | No | | HTTP/SOCKS proxy used only for Messenger attachment upload POSTs |
-| `FB_MQTT_PROXY` | No | | HTTP/SOCKS proxy for Messenger MQTT websocket; leave empty to keep realtime direct |
-| `FB_MQTT_WATCHDOG_SECONDS` | No | `15` | Restart Murmur when the Messenger realtime listener stops silently |
-| `FB_UPLOAD_RETRIES` | No | `3` | Retry Messenger attachment uploads when Facebook's upload host times out |
-| `FB_UPLOAD_ENDPOINTS` | No | `upload.facebook.com`, `upload.messenger.com` | Comma-separated Messenger Web upload endpoints to try in order |
-| `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
-| `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
-| `RESPOND_TO_BOT_REPLIES` | No | `true` | If true, replies to direct replies on bot messages without requiring the prefix |
-| `ALLOWED_THREAD_IDS` | No | | Comma-separated Messenger thread IDs |
-| `MAX_HISTORY_MESSAGES` | No | `12` | Short in-memory context window per thread |
-| `MAX_REPLY_CHARS` | No | `1800` | Split replies above this size |
-| `REQUEST_TIMEOUT_SECONDS` | No | `120` | Open WebUI request timeout |
-| `SYSTEM_PROMPT` | No | helpful assistant prompt | System prompt sent to Open WebUI |
-| `ENABLE_OLLAMA_API` | No | `false` | Disable unused Ollama checks in this all-in-one deployment |
-| `ENABLE_BASE_MODELS_CACHE` | No | `true` | Cache Open WebUI base model list after startup |
-| `CF_ACCOUNT_ID` | No | | Cloudflare account ID for the optional image bridge |
-| `CF_API_TOKEN` | No | | Cloudflare Workers AI token for the optional image bridge |
-| `IMAGE_PROXY_API_KEY` | No | `IMAGES_OPENAI_API_KEY` or `CF_API_TOKEN` | Bearer token Open WebUI uses to call Murmur's local image proxy |
-| `IMAGE_PROXY_BASE_PATH` | No | `/murmur-image-openai/v1` | Internal OpenAI-compatible image proxy path served by Murmur's public proxy |
-| `ENABLE_IMAGE_GENERATION` | No | `true` when Cloudflare image proxy vars exist | Open WebUI image generation toggle |
-| `IMAGE_GENERATION_ENGINE` | No | `openai` when Cloudflare image proxy vars exist | Open WebUI image engine |
-| `IMAGE_GENERATION_MODEL` | No | | Default image model sent through Open WebUI |
-| `IMAGES_OPENAI_API_BASE_URL` | No | local Murmur image proxy | Open WebUI image API base URL |
-| `IMAGES_OPENAI_API_KEY` | No | `IMAGE_PROXY_API_KEY` | Open WebUI image API bearer token |
-| `IMAGE_SIZE` | No | `1024x1024` | Open WebUI image size value |
-| `IMAGE_STEPS` | No | `4` | Cloudflare image diffusion steps, max `8` |
+## License
 
-## Recommended Safety
-
-After testing, set `ALLOWED_THREAD_IDS` so Murmur only works in threads you control.
-
-Keep `RESPOND_ONLY_ON_PREFIX=true` unless you intentionally want Murmur to answer every message it can see.
-
-For public deployments, disable signups and create an admin account through environment variables:
-
-```env
-WEBUI_ADMIN_EMAIL=admin@example.com
-WEBUI_ADMIN_PASSWORD=strong-password
-ENABLE_SIGNUP=false
-DEFAULT_USER_ROLE=pending
-```
+This repository depends on upstream projects with their own licenses. Review the licenses for Open WebUI and fbchat-muqit before redistribution.
