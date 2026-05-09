@@ -178,8 +178,8 @@ def load_settings() -> Settings:
         image_steps=env_int("IMAGE_STEPS"),
         fb_cookies_path=os.getenv("FB_COOKIES_PATH", "cookies.json"),
         fb_user_agent=os.getenv("FB_USER_AGENT") or None,
-        fb_proxy=os.getenv("FB_PROXY") or None,
-        fb_mqtt_proxy=os.getenv("FB_MQTT_PROXY") or os.getenv("FB_PROXY") or None,
+        fb_proxy=env_proxy("FB_PROXY"),
+        fb_mqtt_proxy=env_proxy("FB_MQTT_PROXY"),
         fb_mqtt_watchdog_seconds=int(os.getenv("FB_MQTT_WATCHDOG_SECONDS", "15")),
         fb_http_timeout_seconds=int(os.getenv("FB_HTTP_TIMEOUT_SECONDS", "120")),
         fb_upload_proxy=env_proxy("FB_UPLOAD_PROXY"),
@@ -246,10 +246,20 @@ class Murmur:
         )
 
         def get_session(cookie_jar=None, proxy=None):
+            proxy_arg = None
             if proxy:
-                from aiohttp_socks import ProxyConnector
+                scheme = urlparse(proxy).scheme.lower()
+                if scheme in {"http", "https"}:
+                    proxy_arg = proxy
+                    connector = aiohttp.TCPConnector(
+                        family=socket.AF_INET,
+                        ttl_dns_cache=300,
+                        enable_cleanup_closed=True,
+                    )
+                else:
+                    from aiohttp_socks import ProxyConnector
 
-                connector = ProxyConnector.from_url(proxy)
+                    connector = ProxyConnector.from_url(proxy)
             else:
                 connector = aiohttp.TCPConnector(
                     family=socket.AF_INET,
@@ -257,11 +267,20 @@ class Murmur:
                     enable_cleanup_closed=True,
                 )
 
-            return aiohttp.ClientSession(
+            session = aiohttp.ClientSession(
                 cookie_jar=cookie_jar,
                 connector=connector,
                 timeout=timeout,
             )
+            if proxy_arg:
+                original_request = session._request
+
+                async def proxied_request(method, url, **kwargs):
+                    kwargs.setdefault("proxy", proxy_arg)
+                    return await original_request(method, url, **kwargs)
+
+                session._request = proxied_request
+            return session
 
         fb_state.get_session = get_session
         fb_state_helper.get_session = get_session
@@ -791,6 +810,9 @@ class Murmur:
     def user_facing_error(self, exc: Exception) -> str:
         if isinstance(exc, UserVisibleError):
             return str(exc)
+        message = str(exc).strip()
+        if message.startswith("Open WebUI "):
+            return message
         return "I hit an error while thinking. Check the bot logs."
 
     def help_message(self, thread_id: str) -> str:
@@ -1286,7 +1308,7 @@ class Murmur:
                 body, status = await self.post_chat_completion(session, payload)
 
         if status >= 400:
-            raise RuntimeError(f"Open WebUI error {status}: {body}")
+            raise UserVisibleError(f"Open WebUI error {status}: {body}")
 
         try:
             return body["choices"][0]["message"]["content"].strip()
@@ -1332,7 +1354,9 @@ class Murmur:
         ) as response:
             body = await response.json(content_type=None)
             if response.status >= 400:
-                raise RuntimeError(f"Open WebUI sign-in error {response.status}: {body}")
+                raise UserVisibleError(
+                    f"Open WebUI sign-in error {response.status}: {body}"
+                )
 
         try:
             self.openwebui_token = body["token"]

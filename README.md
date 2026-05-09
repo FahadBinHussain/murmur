@@ -288,10 +288,10 @@ Open WebUI still needs an AI provider key or an OpenAI-compatible provider with 
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
-| `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook requests |
+| `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook web/login requests |
 | `FB_HTTP_TIMEOUT_SECONDS` | No | `120` | Timeout for Facebook web login/session extraction and attachment uploads |
 | `FB_UPLOAD_PROXY` | No | | HTTP/SOCKS proxy used only for Messenger attachment upload POSTs |
-| `FB_MQTT_PROXY` | No | `FB_PROXY` | HTTP/SOCKS proxy for Messenger MQTT websocket |
+| `FB_MQTT_PROXY` | No | | HTTP/SOCKS proxy for Messenger MQTT websocket; leave empty to keep realtime direct |
 | `FB_MQTT_WATCHDOG_SECONDS` | No | `15` | Restart Murmur when the Messenger realtime listener stops silently |
 | `FB_UPLOAD_RETRIES` | No | `3` | Retry Messenger attachment uploads when Facebook's upload host times out |
 | `FB_UPLOAD_ENDPOINTS` | No | `upload.facebook.com`, `upload.messenger.com` | Comma-separated Messenger Web upload endpoints to try in order |
