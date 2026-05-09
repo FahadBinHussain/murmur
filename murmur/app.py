@@ -1,9 +1,13 @@
 import asyncio
+import base64
+import binascii
 import os
+import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Deque
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 from dotenv import load_dotenv
@@ -20,6 +24,9 @@ class Settings:
     openwebui_model_aliases: dict[str, str]
     openwebui_warmup: bool
     openwebui_warmup_chat: bool
+    image_generation_model: str | None
+    image_size: str | None
+    image_steps: int | None
     fb_cookies_path: str
     fb_user_agent: str | None
     fb_proxy: str | None
@@ -44,6 +51,8 @@ class PromptRequest:
 @dataclass(frozen=True)
 class BotResponse:
     text: str | None = None
+    file_paths: list[str] | None = None
+    cleanup_paths: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,13 @@ def parse_model_aliases(default_model: str) -> dict[str, str]:
     return aliases
 
 
+def env_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return int(value)
+
+
 def load_settings() -> Settings:
     load_dotenv()
 
@@ -115,6 +131,11 @@ def load_settings() -> Settings:
         openwebui_model_aliases=parse_model_aliases(openwebui_model),
         openwebui_warmup=env_bool("OPENWEBUI_WARMUP", True),
         openwebui_warmup_chat=env_bool("OPENWEBUI_WARMUP_CHAT", True),
+        image_generation_model=os.getenv("IMAGE_GENERATION_MODEL")
+        or os.getenv("CLOUDFLARE_IMAGE_MODEL")
+        or None,
+        image_size=os.getenv("IMAGE_SIZE") or None,
+        image_steps=env_int("IMAGE_STEPS"),
         fb_cookies_path=os.getenv("FB_COOKIES_PATH", "cookies.json"),
         fb_user_agent=os.getenv("FB_USER_AGENT") or None,
         fb_proxy=os.getenv("FB_PROXY") or None,
@@ -362,18 +383,42 @@ class Murmur:
             print(f"Failed to send response for message {message.id}: {exc}")
 
     async def send_bot_response(self, message: Message, response: BotResponse) -> None:
-        if not response.text:
+        if not response.text and not response.file_paths:
             return
 
-        for index, part in enumerate(self.split_reply(response.text)):
-            sent_message_id = await self.client.send_message(
-                text=part,
-                thread_id=message.thread_id,
-                reply_to_message=message.id if index == 0 else None,
-            )
-            if sent_message_id:
-                self.sent_message_ids[message.thread_id].append(sent_message_id)
-            await asyncio.sleep(0.5)
+        parts = self.split_reply(response.text) if response.text else []
+        try:
+            if response.file_paths:
+                sent_message_id = await self.client.send_message(
+                    text=parts[0] if parts else None,
+                    thread_id=message.thread_id,
+                    file_path=response.file_paths,
+                    reply_to_message=message.id,
+                )
+                if sent_message_id:
+                    self.sent_message_ids[message.thread_id].append(sent_message_id)
+                await asyncio.sleep(0.5)
+                parts = parts[1:]
+
+            for index, part in enumerate(parts):
+                sent_message_id = await self.client.send_message(
+                    text=part,
+                    thread_id=message.thread_id,
+                    reply_to_message=(
+                        message.id
+                        if index == 0 and not response.file_paths
+                        else None
+                    ),
+                )
+                if sent_message_id:
+                    self.sent_message_ids[message.thread_id].append(sent_message_id)
+                await asyncio.sleep(0.5)
+        finally:
+            for path in response.cleanup_paths or []:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def is_allowed_thread(self, thread_id: str) -> bool:
         return (
@@ -455,7 +500,11 @@ class Murmur:
         command = parts[0].lower()
 
         if command in {"image", "img", "draw"}:
-            return BotResponse(text=self.openwebui_only_message("image generation"))
+            if len(parts) == 1 or not parts[1].strip():
+                return BotResponse(
+                    text=f"Usage: {self.settings.bot_prefix} image <prompt>"
+                )
+            return await self.generate_image_response(parts[1].strip())
 
         if command in {"see", "vision", "look"}:
             return BotResponse(text=self.openwebui_only_message("vision"))
@@ -490,12 +539,15 @@ class Murmur:
                 f"- {prefix} model <number|alias>: set text model for this thread.",
                 f"- {prefix} @<number|alias> message: one-shot text model.",
                 "",
+                "Image generation",
+                f"- {prefix} image ...: generate an image through Open WebUI.",
+                "",
                 "Disabled until Open WebUI bridge endpoints are wired",
-                f"- {prefix} image ...",
                 f"- {prefix} see ...",
                 "",
                 "Open WebUI bridge features",
                 "- Text chat uses Open WebUI /api/chat/completions.",
+                "- Image generation uses Open WebUI /api/v1/images/generations.",
                 "- Auth uses OPENWEBUI_API_KEY or WebUI admin email/password.",
                 "- Text model listing uses Open WebUI /api/models.",
                 "- Per-thread short memory is kept in Murmur before sending to Open WebUI.",
@@ -514,10 +566,13 @@ class Murmur:
                 "Status",
                 f"Text provider: {text_provider}",
                 f"Text model: {text_alias} ({self.current_model(thread_id)})",
-                "Image generation: disabled until bridged through Open WebUI",
+                f"Image generation: OpenWebUI ({self.image_model_label()})",
                 "Vision: disabled until bridged through Open WebUI",
             ]
         )
+
+    def image_model_label(self) -> str:
+        return self.settings.image_generation_model or "Open WebUI configured default"
 
     def text_provider_label(self) -> str:
         return "OpenWebUI"
@@ -781,6 +836,155 @@ class Murmur:
         self.history[thread_id].append({"role": "user", "content": prompt})
         self.history[thread_id].append({"role": "assistant", "content": answer})
         return f"{self.response_header(self.text_provider_id(), model)}\n{answer}"
+
+    async def generate_image_response(self, prompt: str) -> BotResponse:
+        paths = await self.request_image_generation(prompt)
+        model = self.image_model_label()
+        size = f", {self.settings.image_size}" if self.settings.image_size else ""
+        return BotResponse(
+            text=f"[OpenWebUI image - {model}{size}]\n{prompt}",
+            file_paths=paths,
+            cleanup_paths=paths,
+        )
+
+    async def request_image_generation(self, prompt: str) -> list[str]:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
+        ) as session:
+            body, status = await self.post_image_generation(session, prompt)
+            if status == 401 and not self.settings.openwebui_api_key:
+                self.openwebui_token = None
+                body, status = await self.post_image_generation(session, prompt)
+
+            if status >= 400:
+                raise RuntimeError(f"Open WebUI image error {status}: {body}")
+
+            image_refs = self.parse_image_generation_response(body)
+            if not image_refs:
+                raise RuntimeError(f"Unexpected Open WebUI image response: {body}")
+
+            paths = []
+            for image_ref in image_refs:
+                paths.append(await self.materialize_generated_image(session, image_ref))
+            return paths
+
+    async def post_image_generation(
+        self, session: aiohttp.ClientSession, prompt: str
+    ) -> tuple[object, int]:
+        payload: dict[str, object] = {"prompt": prompt, "n": 1}
+        if self.settings.image_generation_model:
+            payload["model"] = self.settings.image_generation_model
+        if self.settings.image_size:
+            payload["size"] = self.settings.image_size
+        if self.settings.image_steps is not None:
+            payload["steps"] = self.settings.image_steps
+
+        async with session.post(
+            f"{self.settings.openwebui_base_url}/api/v1/images/generations",
+            headers=await self.openwebui_headers(session),
+            json=payload,
+        ) as response:
+            try:
+                body: object = await response.json(content_type=None)
+            except (aiohttp.ContentTypeError, ValueError):
+                body = await response.text()
+            return body, response.status
+
+    def parse_image_generation_response(self, body: object) -> list[dict[str, str]]:
+        raw_items: list[object]
+        if isinstance(body, dict):
+            raw = body.get("data") or body.get("images") or body.get("image") or body
+            raw_items = raw if isinstance(raw, list) else [raw]
+        elif isinstance(body, list):
+            raw_items = body
+        else:
+            raw_items = [body]
+
+        refs: list[dict[str, str]] = []
+        for item in raw_items:
+            ref = self.parse_image_item(item)
+            if ref:
+                refs.append(ref)
+        return refs
+
+    def parse_image_item(self, item: object) -> dict[str, str] | None:
+        if isinstance(item, str):
+            value = item.strip()
+            if value.startswith(("http://", "https://", "/")):
+                return {"type": "url", "value": value}
+            if value.startswith("data:image/"):
+                return {"type": "data_url", "value": value}
+            if self.looks_like_base64(value):
+                return {"type": "base64", "value": value}
+            return None
+
+        if not isinstance(item, dict):
+            return None
+
+        for key in ("url", "image_url", "path"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return {"type": "url", "value": value}
+
+        for key in ("b64_json", "base64", "image"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return self.parse_image_item(value)
+
+        nested = item.get("data")
+        if nested is not None and nested is not item:
+            return self.parse_image_item(nested)
+
+        return None
+
+    def looks_like_base64(self, value: str) -> bool:
+        if len(value) < 64:
+            return False
+        try:
+            base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            return False
+        return True
+
+    async def materialize_generated_image(
+        self, session: aiohttp.ClientSession, image_ref: dict[str, str]
+    ) -> str:
+        ref_type = image_ref["type"]
+        value = image_ref["value"]
+
+        if ref_type == "url":
+            return await self.download_generated_image(session, value)
+
+        if ref_type == "data_url":
+            header, data = value.split(",", 1)
+            content_type = header.split(";", 1)[0].removeprefix("data:")
+            return self.write_generated_image(
+                base64.b64decode(data), content_type or "image/png"
+            )
+
+        return self.write_generated_image(base64.b64decode(value), "image/png")
+
+    async def download_generated_image(
+        self, session: aiohttp.ClientSession, image_url: str
+    ) -> str:
+        url = urljoin(f"{self.settings.openwebui_base_url}/", image_url)
+        async with session.get(
+            url,
+            headers=await self.openwebui_headers(session),
+        ) as response:
+            if response.status >= 400:
+                body = await response.text()
+                raise RuntimeError(f"Open WebUI image download {response.status}: {body}")
+            content_type = response.headers.get("Content-Type", "image/png")
+            return self.write_generated_image(await response.read(), content_type)
+
+    def write_generated_image(self, content: bytes, content_type: str) -> str:
+        suffix = ".jpg" if "jpeg" in content_type.lower() else ".png"
+        with tempfile.NamedTemporaryFile(
+            prefix="murmur-image-", suffix=suffix, delete=False
+        ) as image_file:
+            image_file.write(content)
+            return image_file.name
 
     async def request_chat_completion(self, payload: dict) -> str:
         async with aiohttp.ClientSession(

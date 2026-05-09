@@ -22,6 +22,7 @@ Early project. The current version is intentionally small:
 - Bundled Open WebUI runtime
 - Messenger listener using `fbchat-muqit`
 - Open WebUI `/api/chat/completions` backend
+- Open WebUI `/api/v1/images/generations` image bridge
 - Automatic Open WebUI JWT sign-in when no API key is provided
 - Per-thread short conversation memory
 - Optional `/ai` prefix trigger
@@ -121,22 +122,24 @@ OPENWEBUI_MODEL=deepseek/deepseek-chat-v3-0324:free
 OPENWEBUI_MODEL_ALIASES=free=deepseek/deepseek-chat-v3-0324:free,fast=google/gemini-2.0-flash-exp:free
 ```
 
-Murmur is bridge-only. It does not call image, vision, Cloudflare, OpenRouter, or other AI providers directly. Image generation and vision commands are disabled until they can be bridged through Open WebUI APIs:
+Murmur is bridge-only for Messenger commands: text goes through Open WebUI chat completions, and image prompts go through Open WebUI image generation:
 
 ```text
 /ai image a neon cyberpunk teashop in the rain
 /ai see what is in this image?
 ```
 
-Those commands currently reply with a bridge-only disabled message instead of bypassing Open WebUI.
+Vision commands still reply with a bridge-only disabled message until they can be wired through Open WebUI. For Cloudflare Workers AI image models, the bundled public proxy exposes a local OpenAI-compatible image endpoint that Open WebUI can use as its image backend.
 
 Current Open WebUI bridge surface:
 
 - Text chat uses Open WebUI `/api/chat/completions`.
+- Image generation uses Open WebUI `/api/v1/images/generations`.
 - Auth uses `OPENWEBUI_API_KEY` or the configured WebUI admin email/password.
 - Text model listing uses Open WebUI `/api/models` or `/api/v1/models`.
 - Murmur keeps short per-thread memory and sends that context to Open WebUI.
-- Image generation and vision are disabled until Murmur can bridge them through Open WebUI.
+- Cloudflare image generation is exposed to Open WebUI as an OpenAI-compatible local endpoint.
+- Vision is disabled until Murmur can bridge it through Open WebUI.
 
 ## Docker: All In One
 
@@ -183,6 +186,11 @@ OPENAI_API_KEY=your-openrouter-api-key
 OPENWEBUI_MODEL=openrouter/free
 
 FB_COOKIES_JSON_B64=base64-encoded-cookies-json
+
+CF_ACCOUNT_ID=your-cloudflare-account-id
+CF_API_TOKEN=your-cloudflare-workers-ai-token
+CLOUDFLARE_IMAGE_MODEL=@cf/black-forest-labs/flux-1-schnell
+IMAGE_PROXY_API_KEY=random-local-image-proxy-key
 ```
 
 Optional but recommended:
@@ -195,6 +203,7 @@ ENABLE_SIGNUP=false
 DEFAULT_USER_ROLE=pending
 FB_USER_AGENT=the-browser-user-agent-that-exported-your-cookies
 FB_MQTT_WATCHDOG_SECONDS=15
+IMAGE_STEPS=4
 ```
 
 Free Spaces have enough RAM for Open WebUI, but the disk is ephemeral and free CPU basic Spaces sleep after inactivity. For persistence without paid Hugging Face storage, an external database would be ideal; however, Hugging Face Spaces networking may block direct Postgres connections on port `5432`, so Neon may not work from a free Space. If Neon fails to connect, remove `DATABASE_URL`, `PGVECTOR_DB_URL`, `VECTOR_DB`, and `PGSSLMODE` and use the default local SQLite storage, understanding that state may be lost on restart.
@@ -292,6 +301,18 @@ Open WebUI still needs an AI provider key or an OpenAI-compatible provider with 
 | `SYSTEM_PROMPT` | No | helpful assistant prompt | System prompt sent to Open WebUI |
 | `ENABLE_OLLAMA_API` | No | `false` | Disable unused Ollama checks in this all-in-one deployment |
 | `ENABLE_BASE_MODELS_CACHE` | No | `true` | Cache Open WebUI base model list after startup |
+| `CF_ACCOUNT_ID` | No | | Cloudflare account ID for the optional image bridge |
+| `CF_API_TOKEN` | No | | Cloudflare Workers AI token for the optional image bridge |
+| `CLOUDFLARE_IMAGE_MODEL` | No | | Cloudflare text-to-image model, e.g. `@cf/black-forest-labs/flux-1-schnell` |
+| `IMAGE_PROXY_API_KEY` | No | `IMAGES_OPENAI_API_KEY` or `CF_API_TOKEN` | Bearer token Open WebUI uses to call Murmur's local image proxy |
+| `IMAGE_PROXY_BASE_PATH` | No | `/murmur-image-openai/v1` | Internal OpenAI-compatible image proxy path served by Murmur's public proxy |
+| `ENABLE_IMAGE_GENERATION` | No | `true` when Cloudflare image vars exist | Open WebUI image generation toggle |
+| `IMAGE_GENERATION_ENGINE` | No | `openai` when Cloudflare image vars exist | Open WebUI image engine |
+| `IMAGE_GENERATION_MODEL` | No | `CLOUDFLARE_IMAGE_MODEL` | Image model sent through Open WebUI |
+| `IMAGES_OPENAI_API_BASE_URL` | No | local Murmur image proxy | Open WebUI image API base URL |
+| `IMAGES_OPENAI_API_KEY` | No | `IMAGE_PROXY_API_KEY` | Open WebUI image API bearer token |
+| `IMAGE_SIZE` | No | `1024x1024` | Open WebUI image size value |
+| `IMAGE_STEPS` | No | `4` | Cloudflare image diffusion steps, max `8` |
 
 ## Recommended Safety
 
