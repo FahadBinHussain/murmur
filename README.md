@@ -37,6 +37,8 @@ Messenger one-to-one user messages may be limited by end-to-end encryption. Murm
 
 Never commit `cookies.json`, `.env`, API keys, or Facebook cookies.
 
+If a hosted deployment cannot reach or authenticate with Facebook, always test Murmur locally with the same cookies before rotating them. If local login also fails, treat the cookie as expired or invalid. If local login works, treat the hosted deployment as a host/IP/networking problem.
+
 ## Requirements
 
 - Python 3.10+
@@ -92,7 +94,7 @@ Help and status:
 /ai status
 ```
 
-`/help` and `/ai help` show the full Messenger command guide. `/ai status` shows the current text model, image provider/model, image ratio, and vision model for the thread.
+`/help` and `/ai help` show the full Messenger command guide. `/ai status` shows the current Open WebUI text model for the thread.
 
 Model switching is per Messenger thread:
 
@@ -104,12 +106,12 @@ Model switching is per Messenger thread:
 /ai @7 summarize this in one sentence
 ```
 
-`/ai models` fetches the configured provider/Open WebUI model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response.
+`/ai models` fetches Open WebUI's model endpoint and lists free models when it can detect them. The numbered list is remembered per thread, so `/ai model 7` selects item 7 from the most recent `/ai models` response.
 
 AI replies start with the provider and model that produced the answer, for example:
 
 ```text
-[OpenRouter - openrouter/free]
+[OpenWebUI - openrouter/free]
 ```
 
 Configure short aliases with `OPENWEBUI_MODEL_ALIASES` for favorites:
@@ -119,27 +121,22 @@ OPENWEBUI_MODEL=deepseek/deepseek-chat-v3-0324:free
 OPENWEBUI_MODEL_ALIASES=free=deepseek/deepseek-chat-v3-0324:free,fast=google/gemini-2.0-flash-exp:free
 ```
 
-Image generation lists every configured image provider and remembers the selected provider/model per Messenger thread. Vision uses the configured OpenAI-compatible provider directly:
+Murmur is bridge-only. It does not call image, vision, Cloudflare, OpenRouter, or other AI providers directly. Image generation and vision commands are disabled until they can be bridged through Open WebUI APIs:
 
 ```text
-/ai image models
-/ai image models all
-/ai image model 3
-/ai image ratio 16:9
 /ai image a neon cyberpunk teashop in the rain
-/ai image @3 a tiny robot drinking tea
 /ai see what is in this image?
 ```
 
-`/ai image models` lists usable image models grouped by provider. Cloudflare is discovered through Workers AI model search; OpenRouter/OpenAI-compatible image models are discovered through `/models?output_modalities=image`. Generated images are uploaded back to Messenger as image attachments. `/ai see ...` analyzes an attached image or an image in the message being replied to.
+Those commands currently reply with a bridge-only disabled message instead of bypassing Open WebUI.
 
 Current Open WebUI bridge surface:
 
 - Text chat uses Open WebUI `/api/chat/completions`.
 - Auth uses `OPENWEBUI_API_KEY` or the configured WebUI admin email/password.
-- Text model listing uses the configured provider `/models`, then Open WebUI `/api/models` as a fallback.
+- Text model listing uses Open WebUI `/api/models` or `/api/v1/models`.
 - Murmur keeps short per-thread memory and sends that context to Open WebUI.
-- Image generation is handled by configured image providers directly, not by the Open WebUI image UI.
+- Image generation and vision are disabled until Murmur can bridge them through Open WebUI.
 
 ## Docker: All In One
 
@@ -265,7 +262,7 @@ Direct PowerShell one-liner:
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.json"))
 ```
 
-You still need an AI provider key or an OpenAI-compatible provider with free quota. Murmur can bundle Open WebUI, but it cannot make paid model usage free.
+Open WebUI still needs an AI provider key or an OpenAI-compatible provider with free quota. Murmur only bridges Messenger to Open WebUI; it cannot make paid model usage free.
 
 ## Configuration
 
@@ -279,23 +276,12 @@ You still need an AI provider key or an OpenAI-compatible provider with free quo
 | `OPENWEBUI_MODEL_ALIASES` | No | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` list for Messenger model switching |
 | `OPENWEBUI_WARMUP` | No | `true` | Warm Open WebUI auth/model endpoints before Messenger starts listening |
 | `OPENWEBUI_WARMUP_CHAT` | No | `true` | Send a tiny non-history chat completion at startup to reduce first real reply latency |
-| `VISION_MODEL` | No | `openrouter/free` | Provider model used for image understanding |
-| `IMAGE_PROVIDER` | No | `openrouter` | Use `cloudflare` for Cloudflare Workers AI image generation |
-| `IMAGE_MODEL` | No | `openrouter/free` | Default provider image-generation model |
-| `CF_ACCOUNT_ID` | Cloudflare images | | Cloudflare account ID |
-| `CF_API_TOKEN` | Cloudflare images | | Cloudflare Workers AI token |
-| `CLOUDFLARE_IMAGE_MODEL` | No | `@cf/black-forest-labs/flux-1-schnell` | Default Cloudflare Workers AI image model |
-| `IMAGE_ASPECT_RATIO` | No | `1:1` | Default image ratio for generation |
-| `ALLOW_PAID_IMAGE_MODELS` | No | `false` | If true, Murmur will try paid/unknown image models |
 | `FB_COOKIES_PATH` | No | `cookies.json` | Path to Facebook cookies JSON |
 | `FB_COOKIES_JSON_B64` | No | | Base64 cookies JSON, useful on Render |
 | `FB_USER_AGENT` | No | library default | Browser user-agent to use with Facebook cookies |
 | `FB_PROXY` | No | | HTTP/SOCKS proxy for Facebook requests |
 | `FB_MQTT_PROXY` | No | `FB_PROXY` | HTTP/SOCKS proxy for Messenger MQTT websocket |
 | `FB_MQTT_WATCHDOG_SECONDS` | No | `15` | Restart Murmur when the Messenger realtime listener stops silently |
-| `MESSENGER_UPLOAD_RETRIES` | No | `3` | Retry Messenger image uploads when Facebook's upload endpoint is flaky |
-| `MESSENGER_UPLOAD_RETRY_SECONDS` | No | `3` | Seconds to wait between Messenger image upload retries |
-| `MESSENGER_UPLOAD_ENDPOINTS` | No | Facebook upload, Messenger upload | Comma-separated upload endpoints tried for Messenger image attachments |
 | `BOT_PREFIX` | No | `/ai` | Prefix that triggers Murmur |
 | `RESPOND_ONLY_ON_PREFIX` | No | `true` | If false, replies to every allowed message |
 | `RESPOND_TO_BOT_REPLIES` | No | `true` | If true, replies to direct replies on bot messages without requiring the prefix |
