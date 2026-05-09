@@ -313,25 +313,29 @@ def write_cookie_file(cookies: list[dict]) -> Path:
 
 
 def restart_murmur_listener() -> str:
+    try:
+        restart_file = admin_restart_now_file()
+        restart_file.parent.mkdir(parents=True, exist_ok=True)
+        restart_file.write_text(str(int(time.time())), encoding="utf-8")
+    except OSError as exc:
+        return f"Cookie saved. Restart marker could not be written: {exc}"
+
     pid_file = admin_pid_file()
     try:
         pid_text = pid_file.read_text(encoding="utf-8").strip()
         pid = int(pid_text)
     except (OSError, ValueError):
-        return "Cookie saved. Murmur listener PID file was not found, so restart was not requested."
+        return "Cookie saved. Murmur listener is already stopped or sleeping; supervisor wake-up requested."
 
     if pid <= 0:
-        return "Cookie saved. Murmur listener PID was invalid, so restart was not requested."
+        return "Cookie saved. Murmur listener PID was invalid; supervisor wake-up requested."
 
     try:
-        restart_file = admin_restart_now_file()
-        restart_file.parent.mkdir(parents=True, exist_ok=True)
-        restart_file.write_text(str(int(time.time())), encoding="utf-8")
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return "Cookie saved. Murmur listener was already stopped; supervisor should restart it."
+        return "Cookie saved. Murmur listener was already stopped; supervisor wake-up requested."
     except OSError as exc:
-        return f"Cookie saved. Murmur listener restart failed: {exc}"
+        return f"Cookie saved. Supervisor wake-up requested, but listener stop failed: {exc}"
 
     return "Cookie saved. Murmur listener restart requested."
 

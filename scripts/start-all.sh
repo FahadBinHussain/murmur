@@ -428,6 +428,20 @@ start_murmur() {
   printf '%s' "$MURMUR_PID" > "$MURMUR_PID_FILE"
 }
 
+sleep_before_murmur_restart() {
+  local delay="${1:-0}"
+  local elapsed=0
+  while (( elapsed < delay )); do
+    if [[ -f "$MURMUR_RESTART_NOW_FILE" ]]; then
+      rm -f "$MURMUR_RESTART_NOW_FILE"
+      echo "Murmur restart sleep interrupted by admin console."
+      return
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+}
+
 if [[ -n "${FB_COOKIES_JSON_B64:-}" ]]; then
   echo "Writing Messenger cookies from FB_COOKIES_JSON_B64."
   printf '%s' "$FB_COOKIES_JSON_B64" | base64 -d > "$FB_COOKIES_PATH"
@@ -519,7 +533,7 @@ while true; do
     echo "Murmur exited with code ${MURMUR_EXIT_CODE}; restarting in ${RESTART_DELAY}s."
     MURMUR_PID=""
     rm -f "$MURMUR_PID_FILE"
-    sleep "$RESTART_DELAY"
+    sleep_before_murmur_restart "$RESTART_DELAY"
     start_murmur
   fi
   sleep 2
