@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import tempfile
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,15 @@ import fbchat_muqit.state as fb_state
 import fbchat_muqit.utils.stateHelper as fb_state_helper
 from dotenv import load_dotenv
 from fbchat_muqit import Client, EventType, Message
+
+from .admin_state import (
+    read_thread_allowlist,
+    read_thread_registry,
+    thread_allowed,
+    thread_allowlist_path,
+    thread_registry_path,
+    write_thread_registry,
+)
 
 
 DEFAULT_FB_UPLOAD_ENDPOINTS = [
@@ -62,6 +72,8 @@ class Settings:
     max_reply_chars: int
     request_timeout_seconds: int
     allowed_thread_ids: set[str]
+    thread_registry_path: str
+    thread_allowlist_path: str
     system_prompt: str
 
 
@@ -207,6 +219,10 @@ def load_settings() -> Settings:
         max_reply_chars=int(os.getenv("MAX_REPLY_CHARS", "1800")),
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "120")),
         allowed_thread_ids=allowed_thread_ids,
+        thread_registry_path=os.getenv("MURMUR_THREAD_REGISTRY_PATH")
+        or str(thread_registry_path()),
+        thread_allowlist_path=os.getenv("MURMUR_THREAD_ALLOWLIST_PATH")
+        or str(thread_allowlist_path()),
         system_prompt=os.getenv(
             "SYSTEM_PROMPT",
             "You are a helpful AI assistant replying inside a Messenger group chat. "
@@ -235,6 +251,7 @@ class Murmur:
         self.resolved_model_cache: dict[str, str] = {}
         self.openwebui_token: str | None = None
         self.mqtt_watchdog_task: asyncio.Task | None = None
+        self.thread_registry_refresh_task: asyncio.Task | None = None
         self.response_tasks: set[asyncio.Task] = set()
         self.file_upload_lock = asyncio.Lock()
         self.fb_user_names: dict[str, str] = {}
@@ -242,6 +259,12 @@ class Murmur:
         self.fb_thread_name_tasks: dict[str, asyncio.Task] = {}
         self.fb_user_name_tasks: dict[str, asyncio.Task] = {}
         self.fb_name_cache_path = Path(settings.fb_log_name_cache_path)
+        self.thread_registry_path = Path(settings.thread_registry_path)
+        self.thread_allowlist_path = Path(settings.thread_allowlist_path)
+        self.thread_registry = read_thread_registry(self.thread_registry_path)
+        self.thread_allowlist_mtime: float | None = None
+        self.thread_allowlist_mode = "allowlist" if settings.allowed_thread_ids else "allow_all"
+        self.thread_allowlist_ids: set[str] = set(settings.allowed_thread_ids)
         self.load_facebook_name_cache()
         self.configure_facebook_http_timeout()
         self.configure_mqtt_proxy()
@@ -335,6 +358,40 @@ class Murmur:
         self.fb_thread_names[thread_id_text] = name_text
         return True
 
+    def remember_thread_registry_entry(
+        self,
+        thread_id: object,
+        name: object = None,
+        thread_type: object = None,
+        last_sender_id: object = None,
+    ) -> None:
+        thread_id_text = self.facebook_id(thread_id)
+        if not thread_id_text:
+            return
+
+        entry = self.thread_registry.setdefault(thread_id_text, {"id": thread_id_text})
+        entry["id"] = thread_id_text
+        name_text = str(name or "").strip()
+        if name_text and name_text != thread_id_text:
+            entry["name"] = name_text
+        elif self.fb_thread_names.get(thread_id_text):
+            entry["name"] = self.fb_thread_names[thread_id_text]
+        if thread_type is not None:
+            entry["type"] = getattr(thread_type, "name", str(thread_type))
+        sender_id_text = self.facebook_id(last_sender_id)
+        if sender_id_text:
+            entry["last_sender_id"] = sender_id_text
+            if self.fb_user_names.get(sender_id_text):
+                entry["last_sender_name"] = self.fb_user_names[sender_id_text]
+        entry["last_seen"] = int(time.time())
+        self.write_thread_registry()
+
+    def write_thread_registry(self) -> None:
+        try:
+            write_thread_registry(self.thread_registry, self.thread_registry_path)
+        except OSError as exc:
+            print(f"Messenger thread registry write failed: {exc}")
+
     def remember_self_identity(self) -> None:
         changed = self.remember_facebook_user_name(self.client.uid, self.client.name)
         if changed:
@@ -413,6 +470,11 @@ class Murmur:
 
         changed = False
         for thread in threads:
+            self.remember_thread_registry_entry(
+                getattr(thread, "thread_id", thread_id),
+                getattr(thread, "name", ""),
+                getattr(thread, "thread_type", None),
+            )
             changed |= self.remember_facebook_thread_name(
                 getattr(thread, "thread_id", thread_id),
                 getattr(thread, "name", ""),
@@ -430,6 +492,33 @@ class Murmur:
                 )
 
         if changed:
+            self.write_facebook_name_cache()
+
+    async def refresh_thread_registry(self) -> None:
+        try:
+            limit = int(os.getenv("MURMUR_THREAD_FETCH_LIMIT", "100"))
+            threads = await self.client.fetch_thread_list(limit=max(1, limit))
+        except Exception as exc:
+            print(f"Messenger thread registry refresh failed: {exc}")
+            return
+
+        changed_names = False
+        for thread in threads:
+            thread_id = getattr(thread, "thread_id", "")
+            name = getattr(thread, "name", "")
+            self.remember_thread_registry_entry(
+                thread_id,
+                name,
+                getattr(thread, "thread_type", None),
+            )
+            changed_names |= self.remember_facebook_thread_name(thread_id, name)
+            for participant in getattr(thread, "all_participants", ()) or ():
+                changed_names |= self.remember_facebook_user_name(
+                    getattr(participant, "id", ""),
+                    getattr(participant, "name", ""),
+                )
+
+        if changed_names:
             self.write_facebook_name_cache()
 
     async def fetch_facebook_user_name(self, user_id: str) -> None:
@@ -706,6 +795,13 @@ class Murmur:
         print(f"Murmur online as {self.client.name} ({self.client.uid})")
         if self.mqtt_watchdog_task is None or self.mqtt_watchdog_task.done():
             self.mqtt_watchdog_task = asyncio.create_task(self.watch_mqtt_listener())
+        if (
+            self.thread_registry_refresh_task is None
+            or self.thread_registry_refresh_task.done()
+        ):
+            self.thread_registry_refresh_task = asyncio.create_task(
+                self.refresh_thread_registry()
+            )
 
     async def watch_mqtt_listener(self) -> None:
         await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)
@@ -731,6 +827,12 @@ class Murmur:
             os._exit(12)
 
     async def on_message(self, message: Message) -> None:
+        self.remember_thread_registry_entry(
+            message.thread_id,
+            thread_type=message.thread_type,
+            last_sender_id=message.sender_id,
+        )
+
         if message.sender_id == self.client.uid:
             return
 
@@ -1021,10 +1123,26 @@ class Murmur:
         return "1357001" in str(exc) or "Not logged in" in str(exc)
 
     def is_allowed_thread(self, thread_id: str) -> bool:
-        return (
-            not self.settings.allowed_thread_ids
-            or thread_id in self.settings.allowed_thread_ids
-        )
+        mode, allowed_ids = self.current_thread_allowlist()
+        return thread_allowed(thread_id, mode, allowed_ids)
+
+    def current_thread_allowlist(self) -> tuple[str, set[str]]:
+        try:
+            stat = self.thread_allowlist_path.stat()
+            mtime = stat.st_mtime
+        except OSError:
+            self.thread_allowlist_mtime = None
+            if self.settings.allowed_thread_ids:
+                return "env_allowlist", set(self.settings.allowed_thread_ids)
+            return "allow_all", set()
+
+        if self.thread_allowlist_mtime != mtime:
+            mode, allowed_ids = read_thread_allowlist(self.thread_allowlist_path)
+            self.thread_allowlist_mode = mode
+            self.thread_allowlist_ids = allowed_ids
+            self.thread_allowlist_mtime = mtime
+
+        return self.thread_allowlist_mode, set(self.thread_allowlist_ids)
 
     def get_request(self, message: Message) -> PromptRequest | None:
         text = (message.text or "").strip()

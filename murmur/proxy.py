@@ -14,6 +14,16 @@ from contextlib import suppress
 import aiohttp
 from aiohttp import ClientError, WSMsgType, web
 
+from .admin_state import (
+    parse_thread_ids,
+    read_thread_allowlist,
+    read_thread_registry,
+    thread_allowed,
+    thread_allowlist_path,
+    thread_registry_path,
+    write_thread_allowlist,
+)
+
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -358,12 +368,103 @@ def admin_status() -> dict[str, str]:
         status["murmur_pid"] = pid_file.read_text(encoding="utf-8").strip()
     except OSError:
         status["murmur_pid"] = "missing"
+
+    try:
+        stat = admin_restart_now_file().stat()
+        status["restart_marker"] = f"present, modified {time.ctime(stat.st_mtime)}"
+    except OSError:
+        status["restart_marker"] = "missing"
     return status
+
+
+def admin_thread_state() -> tuple[list[dict[str, object]], str, set[str], set[str]]:
+    threads = read_thread_registry(thread_registry_path())
+    mode, allowed_ids = read_thread_allowlist(thread_allowlist_path())
+    env_ids = {
+        thread_id.strip()
+        for thread_id in os.getenv("ALLOWED_THREAD_IDS", "").split(",")
+        if thread_id.strip()
+    }
+    entries = []
+    for thread_id, entry in threads.items():
+        entries.append(
+            {
+                "id": thread_id,
+                "name": str(entry.get("name") or thread_id),
+                "type": str(entry.get("type") or ""),
+                "last_seen": int(entry.get("last_seen") or 0),
+                "last_sender_name": str(entry.get("last_sender_name") or ""),
+                "allowed": thread_allowed(thread_id, mode, allowed_ids),
+            }
+        )
+    entries.sort(key=lambda item: int(item["last_seen"]), reverse=True)
+    known_ids = {str(entry["id"]) for entry in entries}
+    extra_allowed_ids = allowed_ids - known_ids
+    extra_env_ids = env_ids - known_ids
+    return entries, mode, allowed_ids, extra_allowed_ids | extra_env_ids
+
+
+def format_time(timestamp: object) -> str:
+    try:
+        value = int(timestamp)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        return "unknown"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+
+
+def admin_threads_html(csrf_token: str) -> str:
+    entries, mode, _allowed_ids, extra_ids = admin_thread_state()
+    policy_label = {
+        "allow_all": "All threads are currently allowed until you save a custom allowlist.",
+        "env_allowlist": "Using ALLOWED_THREAD_IDS until you save a custom allowlist.",
+        "allowlist": "Using admin console allowlist.",
+    }.get(mode, mode)
+
+    if entries:
+        rows = "\n".join(
+            "<tr>"
+            "<td>"
+            f'<input type="checkbox" name="allowed_thread_ids" value="{html.escape(str(entry["id"]))}" '
+            f'{"checked" if entry["allowed"] else ""}>'
+            "</td>"
+            f"<td><strong>{html.escape(str(entry['name']))}</strong><br><code>{html.escape(str(entry['id']))}</code></td>"
+            f"<td>{html.escape(str(entry['type']))}</td>"
+            f"<td>{html.escape(str(entry['last_sender_name']))}</td>"
+            f"<td>{html.escape(format_time(entry['last_seen']))}</td>"
+            "</tr>"
+            for entry in entries
+        )
+        table = (
+            '<table class="threads">'
+            "<thead><tr><th>Use</th><th>Thread</th><th>Type</th><th>Last Sender</th><th>Last Seen</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
+    else:
+        table = '<p class="muted">No threads have been seen yet. Send a message in a thread or wait for the listener to refresh recent inbox threads.</p>'
+
+    extra_value = "\n".join(sorted(extra_ids))
+    return f"""
+    <section>
+      <h2>Thread Access</h2>
+      <p>{html.escape(policy_label)}</p>
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{csrf_token}">
+        <input type="hidden" name="action" value="save_threads">
+        {table}
+        <label for="extra_thread_ids">Additional allowed thread IDs</label>
+        <textarea id="extra_thread_ids" name="extra_thread_ids" spellcheck="false">{html.escape(extra_value)}</textarea>
+        <button type="submit">Save Thread Access</button>
+      </form>
+    </section>
+    """
 
 
 def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     token = html.escape(csrf_token)
     status = admin_status()
+    threads_html = admin_threads_html(token)
     rows = "\n".join(
         "<tr>"
         f"<th>{html.escape(key.replace('_', ' ').title())}</th>"
@@ -400,6 +501,8 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     }}
     h1 {{ margin: 0 0 8px; font-size: 24px; }}
     p {{ color: #4b5563; line-height: 1.5; }}
+    h2 {{ margin: 32px 0 8px; font-size: 18px; }}
+    section {{ margin-top: 28px; }}
     label {{ display: block; margin: 18px 0 8px; font-weight: 650; }}
     input[type="file"], textarea {{
       width: 100%;
@@ -424,6 +527,9 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     table {{ width: 100%; margin-top: 24px; border-collapse: collapse; }}
     th, td {{ border-top: 1px solid #e5e7eb; padding: 10px 0; text-align: left; vertical-align: top; }}
     th {{ width: 160px; color: #374151; }}
+    code {{ font-size: 12px; color: #4b5563; }}
+    .threads th:first-child, .threads td:first-child {{ width: 48px; }}
+    .muted {{ color: #6b7280; }}
     .notice {{ margin: 18px 0; padding: 12px; border-radius: 6px; }}
     .success {{ background: #ecfdf5; color: #065f46; }}
     .error {{ background: #fef2f2; color: #991b1b; }}
@@ -434,6 +540,7 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
       input[type="file"], textarea {{ background: #0f172a; color: #e5e7eb; border-color: #4b5563; }}
       th, td {{ border-color: #374151; }}
       th {{ color: #cbd5e1; }}
+      code {{ color: #cbd5e1; }}
       .success {{ background: #064e3b; color: #d1fae5; }}
       .error {{ background: #7f1d1d; color: #fee2e2; }}
     }}
@@ -442,19 +549,31 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
 <body>
   <main>
     <h1>Murmur Admin</h1>
-    <p>Upload a fresh Facebook cookie JSON file. Murmur writes it to the active cookie path and restarts only the Messenger listener.</p>
     {message_html}
     {error_html}
+    {threads_html}
+    <section>
+    <h2>Facebook Cookies</h2>
+    <p>Upload a fresh Facebook cookie JSON file. Murmur writes it to the active cookie path and restarts only the Messenger listener.</p>
     <form method="post" enctype="multipart/form-data">
       <input type="hidden" name="csrf_token" value="{token}">
+      <input type="hidden" name="action" value="upload_cookies">
       <label for="cookies_file">Cookie JSON file</label>
       <input id="cookies_file" name="cookies_file" type="file" accept=".json,application/json">
       <label for="cookies_json">Or paste cookie JSON</label>
       <textarea id="cookies_json" name="cookies_json" spellcheck="false"></textarea>
-      <label><input name="restart_murmur" type="checkbox" value="1" checked> Restart Messenger listener after upload</label>
       <button type="submit">Save Cookies</button>
     </form>
+    </section>
+    <section>
+    <h2>Runtime Status</h2>
     <table>{rows}</table>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{token}">
+      <input type="hidden" name="action" value="restart_murmur">
+      <button type="submit">Restart Messenger Listener</button>
+    </form>
+    </section>
   </main>
 </body>
 </html>"""
@@ -474,6 +593,43 @@ async def admin_post(request: web.Request) -> web.Response:
         if str(form.get("csrf_token") or "") != request.app["admin_csrf_token"]:
             raise ValueError("Invalid admin form token. Refresh the page and try again.")
 
+        action = str(form.get("action") or "upload_cookies")
+        if action == "save_threads":
+            allowed_ids = {
+                str(thread_id).strip()
+                for thread_id in form.getall("allowed_thread_ids", [])
+                if str(thread_id).strip()
+            }
+            allowed_ids.update(parse_thread_ids(str(form.get("extra_thread_ids") or "")))
+            write_thread_allowlist(allowed_ids, thread_allowlist_path())
+            message = f"Saved thread access for {len(allowed_ids)} allowed thread(s)."
+            print(
+                "MURMUR_ADMIN_THREAD_ACCESS_UPDATE "
+                f"allowed_count={len(allowed_ids)}",
+                flush=True,
+            )
+            return web.Response(
+                text=admin_html(request.app["admin_csrf_token"], message=message),
+                content_type="text/html",
+                headers=no_store_headers(),
+            )
+
+        if action == "restart_murmur":
+            message = restart_murmur_listener()
+            print(
+                "MURMUR_ADMIN_RESTART_REQUEST "
+                f"result={compact_log_value(message)}",
+                flush=True,
+            )
+            return web.Response(
+                text=admin_html(request.app["admin_csrf_token"], message=message),
+                content_type="text/html",
+                headers=no_store_headers(),
+            )
+
+        if action != "upload_cookies":
+            raise ValueError(f"Unknown admin action: {action}")
+
         raw_text = str(form.get("cookies_json") or "").strip()
         file_field = form.get("cookies_file")
         if getattr(file_field, "file", None):
@@ -485,11 +641,13 @@ async def admin_post(request: web.Request) -> web.Response:
 
         cookies, summary = validate_cookie_payload(raw_text)
         path = write_cookie_file(cookies)
-        restart_message = ""
-        if form.get("restart_murmur"):
-            restart_message = " " + restart_murmur_listener()
+        restart_message = " " + restart_murmur_listener()
         message = f"Saved {summary} to {path}.{restart_message}"
-        print(f"MURMUR_ADMIN_COOKIE_UPLOAD {summary} path={path}", flush=True)
+        print(
+            f"MURMUR_ADMIN_COOKIE_UPLOAD {summary} path={path} "
+            f"restart={compact_log_value(restart_message.strip())}",
+            flush=True,
+        )
         return web.Response(
             text=admin_html(request.app["admin_csrf_token"], message=message),
             content_type="text/html",

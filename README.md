@@ -45,10 +45,10 @@ There is one intentional adapter exception: Cloudflare Workers AI image generati
 - Symmetric per-thread chat and image model selection
 - Short per-thread memory before sending messages to Open WebUI
 - Long Messenger replies split into deliverable chunks
-- Optional allowed-thread allowlist
+- Optional allowed-thread allowlist and admin thread gate
 - Optional Facebook HTTP, MQTT, and upload proxies
 - Name-aware Messenger event logs
-- Password-protected admin console for cookie upload
+- Password-protected admin console for thread access and cookie upload
 
 ## Command Reference
 
@@ -257,6 +257,9 @@ BOT_PREFIX=/ai
 RESPOND_ONLY_ON_PREFIX=true
 RESPOND_TO_BOT_REPLIES=true
 ALLOWED_THREAD_IDS=
+MURMUR_THREAD_REGISTRY_PATH=/tmp/murmur-threads.json
+MURMUR_THREAD_ALLOWLIST_PATH=/tmp/murmur-thread-allowlist.json
+MURMUR_THREAD_FETCH_LIMIT=100
 
 FB_COOKIES_PATH=cookies.json
 FB_COOKIES_JSON_B64=
@@ -269,7 +272,7 @@ FB_MQTT_WATCHDOG_SECONDS=15
 FB_UPLOAD_RETRIES=3
 ```
 
-Use `ALLOWED_THREAD_IDS` in production so Murmur only answers in threads you control.
+Use `ALLOWED_THREAD_IDS` or the admin console thread gate in production so Murmur only answers in threads you control.
 
 Messenger one-to-one user messages may be limited by end-to-end encryption. Group chats, room chats, and pages are usually better test targets for `fbchat-muqit`.
 
@@ -299,7 +302,13 @@ MURMUR_ADMIN_USERNAME=admin@example.com
 MURMUR_ADMIN_PASSWORD=strong-admin-password
 ```
 
-The console uploads a fresh Facebook cookie JSON file, writes it to `FB_COOKIES_PATH`, and restarts only the Murmur Messenger listener. Open WebUI does not restart.
+The console has two runtime tools:
+
+- Thread Access shows the Messenger threads Murmur has discovered and lets you choose exactly where the bot may answer.
+- Facebook Cookies uploads a fresh Facebook cookie JSON file, writes it to `FB_COOKIES_PATH`, and restarts only the Murmur Messenger listener.
+- Runtime Status shows listener paths and includes a manual Messenger listener restart button.
+
+Thread access changes are stored in `MURMUR_THREAD_ALLOWLIST_PATH` and are picked up by the listener on the next message. The thread list is stored in `MURMUR_THREAD_REGISTRY_PATH`; it is filled from recent inbox refreshes and from threads that send messages while Murmur is online. Open WebUI does not restart for admin console changes.
 
 For ephemeral hosts such as free Hugging Face Spaces, this updates the running container. Update the hosted `FB_COOKIES_JSON_B64` secret as well if you need the new cookies to survive a full Space rebuild or restart.
 
@@ -442,6 +451,9 @@ Direct PowerShell one-liner:
 | `RESPOND_ONLY_ON_PREFIX` | `true` | Only respond to prefixed messages. |
 | `RESPOND_TO_BOT_REPLIES` | `true` | Respond to replies on bot messages without prefix. |
 | `ALLOWED_THREAD_IDS` | empty | Comma-separated Messenger thread allowlist. |
+| `MURMUR_THREAD_REGISTRY_PATH` | `/tmp/murmur-threads.json` | Runtime registry of discovered Messenger threads for the admin console. |
+| `MURMUR_THREAD_ALLOWLIST_PATH` | `/tmp/murmur-thread-allowlist.json` | Runtime thread allowlist written by the admin console. |
+| `MURMUR_THREAD_FETCH_LIMIT` | `100` | Recent Messenger threads to fetch after login for the admin console registry. |
 | `FB_COOKIES_PATH` | `cookies.json` | Path to Facebook cookies JSON. |
 | `FB_COOKIES_JSON_B64` | empty | Base64 cookies JSON for hosted deployments. |
 | `FB_USER_AGENT` | library default | Browser user-agent paired with exported cookies. |
@@ -472,7 +484,7 @@ Direct PowerShell one-liner:
 
 | Variable | Default | Description |
 |---|---|---|
-| `MURMUR_ADMIN_CONSOLE` | `true` | Enable the cookie upload admin console. |
+| `MURMUR_ADMIN_CONSOLE` | `true` | Enable the admin console. |
 | `MURMUR_ADMIN_PATH` | `/murmur-admin` | Admin console URL path. |
 | `MURMUR_ADMIN_USERNAME` | `WEBUI_ADMIN_EMAIL` or `admin` | HTTP Basic Auth username. |
 | `MURMUR_ADMIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | HTTP Basic Auth password. Required when enabled. |
