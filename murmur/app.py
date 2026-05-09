@@ -1295,10 +1295,10 @@ class Murmur:
         for provider, options in self.thread_provider_model_options.get(
             thread_id, {}
         ).items():
-            if any(option.id == model_id for option in options):
+            if any(self.equivalent_model_id(option.id, model_id) for option in options):
                 return provider
         for option in self.thread_model_options.get(thread_id, []):
-            if option.id == model_id:
+            if self.equivalent_model_id(option.id, model_id):
                 return self.option_provider(option)
         return self.provider_for_model(model_id)
 
@@ -1377,9 +1377,12 @@ class Murmur:
             lines.append(f"[{self.provider_display_name(provider)}]")
             for index, option in enumerate(provider_options, start=1):
                 current_labels = []
-                if option.id == current_model:
+                if self.equivalent_model_id(option.id, current_model):
                     current_labels.append("chat current")
-                if current_image_model and option.id == current_image_model:
+                if current_image_model and self.equivalent_model_id(
+                    option.id,
+                    current_image_model,
+                ):
                     current_labels.append("image current")
                 current = f" ({', '.join(current_labels)})" if current_labels else ""
                 lines.append(f"{index}. {self.model_display(option)}{current}")
@@ -1563,7 +1566,7 @@ class Murmur:
         include_all: bool = False,
         strict_free: bool = False,
     ) -> list[ModelOption]:
-        models = await self.fetch_openwebui_models()
+        models = self.with_configured_models(await self.fetch_openwebui_models())
 
         if include_all:
             return sorted(models, key=lambda model: model.id)
@@ -1579,6 +1582,79 @@ class Murmur:
             visible_models.extend(free_by_provider.get(provider) or provider_models)
 
         return self.dedupe_model_options(visible_models)
+
+    def with_configured_models(self, models: list[ModelOption]) -> list[ModelOption]:
+        options = list(models)
+        configured_models = [
+            self.settings.openwebui_model,
+            self.settings.image_generation_model,
+            *self.settings.openwebui_model_aliases.values(),
+        ]
+        for model_id in configured_models:
+            if not model_id:
+                continue
+            if any(self.equivalent_model_id(option.id, model_id) for option in options):
+                continue
+
+            provider = self.preferred_provider_for_model(model_id, options)
+            short_id = self.model_short_id(model_id)
+            options.append(
+                ModelOption(
+                    id=self.provider_model_id(provider, model_id),
+                    name=short_id,
+                    provider=provider,
+                    is_free=self.is_free_model_id(model_id, short_id),
+                    task=self.configured_model_task(model_id),
+                    capabilities=self.configured_model_capabilities(model_id),
+                )
+            )
+
+        return self.dedupe_model_options(options)
+
+    def preferred_provider_for_model(
+        self,
+        model_id: str,
+        options: list[ModelOption],
+    ) -> str:
+        provider = self.provider_for_model(model_id)
+        family = self.provider_family(provider)
+        providers = sorted(
+            {self.option_provider(option) for option in options},
+            key=self.provider_sort_key,
+        )
+        family_matches = [
+            candidate
+            for candidate in providers
+            if self.provider_family(candidate) == family
+        ]
+        if provider in family_matches:
+            return provider
+        for candidate in family_matches:
+            if candidate.endswith("_1"):
+                return candidate
+        return family_matches[0] if family_matches else provider
+
+    def equivalent_model_id(self, left: str | None, right: str | None) -> bool:
+        if not left or not right:
+            return False
+        left_key = left.strip().lower()
+        right_key = right.strip().lower()
+        if left_key == right_key:
+            return True
+
+        left_provider = self.provider_connection_prefix(left_key)
+        right_provider = self.provider_connection_prefix(right_key)
+        if left_provider and right_provider:
+            return False
+        if left_provider or right_provider:
+            return self.model_short_id(left_key) == self.model_short_id(right_key)
+        return False
+
+    def provider_connection_prefix(self, model_id: str) -> str | None:
+        if "." not in model_id:
+            return None
+        prefix = model_id.split(".", 1)[0]
+        return prefix if self.is_provider_connection(prefix) else None
 
     async def fetch_openwebui_models(self) -> list[ModelOption]:
         async with aiohttp.ClientSession(
