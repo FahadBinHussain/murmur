@@ -101,20 +101,14 @@ Model switching is per Messenger thread:
 
 ```text
 /ai models
-/ai models free
-/ai providers
-/ai provider openrouter 2
-/ai model openrouter 1
+/ai models openrouter 2
 /ai model openrouter 2 1
-/ai model free
-/ai model 7
-/ai @free summarize this in one sentence
-/ai @7 summarize this in one sentence
 /ai image model openrouter 2 1
 /ai image openrouter 2 1 a neon cyberpunk teashop in the rain
+/ai status
 ```
 
-`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection. Cloudflare model discovery uses Cloudflare's Workers AI `GET /accounts/{account_id}/ai/models/search` metadata endpoint, then Murmur still sends actual chat/image calls through Open WebUI. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai model openrouter 1` selects item 1 under `[openrouter 1]`, and `/ai model openrouter 2 1` selects item 1 under `[openrouter 2]`. `/ai image model openrouter 2 1` sets the current image model for the thread, and `/ai image openrouter 2 1 ...` sets that image model before generating. `/ai model 7` still selects item 7 from the flat model list for backwards compatibility. Murmur still only calls Open WebUI for inference; provider switching selects Open WebUI model IDs.
+`/ai models` fetches Open WebUI's model endpoints and lists configured/available models grouped by provider connection. Cloudflare model discovery uses Cloudflare's Workers AI `GET /accounts/{account_id}/ai/models/search` metadata endpoint, then Murmur still sends actual chat/image calls through Open WebUI. Use `/ai models free` when you only want models that advertise as free. The provider lists are remembered per thread, so `/ai chat model openrouter 2 1` selects item 1 under `[openrouter 2]` for chat, and `/ai image model openrouter 2 1` selects it for image. `/ai image openrouter 2 1 ...` sets that image model before generating. Older shortcuts like `/ai model openrouter 2 1` and `/ai model 7` still work for chat. Murmur still only calls Open WebUI for inference; provider switching selects Open WebUI model IDs.
 
 AI replies start with the provider and model that produced the answer, for example:
 

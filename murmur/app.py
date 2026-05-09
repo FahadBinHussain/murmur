@@ -69,6 +69,12 @@ class PromptRequest:
 
 
 @dataclass(frozen=True)
+class ChatCommandResult:
+    prompt: str | None = None
+    response: str | None = None
+
+
+@dataclass(frozen=True)
 class BotResponse:
     text: str | None = None
     file_paths: list[str] | None = None
@@ -449,13 +455,25 @@ class Murmur:
             await self.client.typing(message.thread_id, True, message.thread_type)
 
             if request.is_prefixed:
-                bot_response = await self.handle_media_command(message, prompt)
+                chat_command = await self.handle_chat_command(
+                    message.thread_id,
+                    prompt,
+                )
+                if chat_command is not None:
+                    if chat_command.response is not None:
+                        control_response = chat_command.response
+                    elif chat_command.prompt is not None:
+                        prompt = chat_command.prompt
+
+                if chat_command is None:
+                    bot_response = await self.handle_media_command(message, prompt)
 
                 if bot_response is None:
-                    control_response = await self.handle_control_command(
-                        message.thread_id,
-                        prompt,
-                    )
+                    if control_response is None and chat_command is None:
+                        control_response = await self.handle_control_command(
+                            message.thread_id,
+                            prompt,
+                        )
 
                 if control_response is None and bot_response is None:
                     one_shot_model = self.extract_one_shot_model(
@@ -763,12 +781,7 @@ class Murmur:
             return self.status_message(thread_id)
 
         if command == "models":
-            mode = parts[1].lower() if len(parts) > 1 else ""
-            include_all = mode == "all"
-            free_only = mode == "free"
-            provider_filter = " ".join(
-                parts[2:] if mode in {"all", "free"} else parts[1:]
-            )
+            include_all, free_only, provider_filter = self.model_list_args(parts[1:])
             return await self.model_list_message(
                 thread_id,
                 include_all=include_all,
@@ -811,6 +824,92 @@ class Murmur:
 
         return None
 
+    async def handle_chat_command(
+        self,
+        thread_id: str,
+        prompt: str,
+    ) -> ChatCommandResult | None:
+        parts = prompt.split(maxsplit=1)
+        if not parts or parts[0].lower() not in {"chat", "text"}:
+            return None
+
+        if len(parts) == 1 or not parts[1].strip():
+            return ChatCommandResult(prompt="Hello")
+
+        rest = parts[1].strip()
+        rest_parts = rest.split()
+        subcommand = rest_parts[0].lower()
+
+        if subcommand in {"help", "commands", "?"}:
+            return ChatCommandResult(response=self.help_message(thread_id))
+
+        if subcommand in {"status", "current"}:
+            return ChatCommandResult(response=self.status_message(thread_id))
+
+        if subcommand == "models":
+            include_all, free_only, provider_filter = self.model_list_args(
+                rest_parts[1:]
+            )
+            return ChatCommandResult(
+                response=await self.model_list_message(
+                    thread_id,
+                    include_all=include_all,
+                    free_only=free_only,
+                    provider_filter=provider_filter,
+                )
+            )
+
+        if subcommand == "providers":
+            include_all = len(rest_parts) > 1 and rest_parts[1].lower() == "all"
+            return ChatCommandResult(
+                response=await self.provider_list_message(
+                    thread_id,
+                    include_all=include_all,
+                )
+            )
+
+        if subcommand == "provider":
+            if len(rest_parts) == 1:
+                provider = self.current_provider(thread_id)
+                return ChatCommandResult(
+                    response=(
+                        f"Current provider: {self.provider_display_name(provider)}\n"
+                        f"Use {self.settings.bot_prefix} providers to see options."
+                    )
+                )
+            return ChatCommandResult(
+                response=await self.set_thread_provider(
+                    thread_id,
+                    " ".join(rest_parts[1:]),
+                )
+            )
+
+        if subcommand in {"model", "use"}:
+            if len(rest_parts) == 1:
+                alias = self.current_model_alias(thread_id)
+                model = self.current_model(thread_id)
+                return ChatCommandResult(
+                    response=(
+                        f"Current chat model: {alias} ({self.model_short_id(model)})\n"
+                        f"Use {self.settings.bot_prefix} chat models to see options."
+                    )
+                )
+            return ChatCommandResult(
+                response=await self.set_thread_model(
+                    thread_id,
+                    " ".join(rest_parts[1:]),
+                )
+            )
+
+        return ChatCommandResult(prompt=rest)
+
+    def model_list_args(self, args: list[str]) -> tuple[bool, bool, str]:
+        mode = args[0].lower() if args else ""
+        include_all = mode == "all"
+        free_only = mode == "free"
+        provider_filter = " ".join(args[1:] if mode in {"all", "free"} else args)
+        return include_all, free_only, provider_filter
+
     async def handle_media_command(
         self,
         message: Message,
@@ -833,6 +932,19 @@ class Murmur:
                 )
             image_args = parts[1].strip()
             image_arg_parts = image_args.split(maxsplit=1)
+            if image_arg_parts and image_arg_parts[0].lower() == "models":
+                include_all, free_only, provider_filter = self.model_list_args(
+                    image_args.split()[1:]
+                )
+                return BotResponse(
+                    text=await self.model_list_message(
+                        message.thread_id,
+                        include_all=include_all,
+                        free_only=free_only,
+                        provider_filter=provider_filter,
+                    )
+                )
+
             if image_arg_parts and image_arg_parts[0].lower() in {"model", "use"}:
                 if len(image_arg_parts) == 1:
                     return BotResponse(text=self.current_image_model_message(message.thread_id))
@@ -886,30 +998,18 @@ class Murmur:
             [
                 "Murmur help",
                 "",
-                "Quick start",
-                f"- {prefix} your question",
-                f"- Put {prefix} anywhere as a standalone tag, e.g. `wtf are you {prefix}`.",
-                "- Reply to one of my messages to continue without the prefix.",
-                f"- /help or {prefix} help shows this guide.",
-                f"- {prefix} status shows current models/providers.",
-                "",
                 "Chat",
-                f"- {prefix} providers: list provider connections and model counts.",
-                f"- {prefix} provider <provider> [connection]: switch provider for this thread.",
-                f"- {prefix} models: list models grouped by provider.",
-                f"- {prefix} models <provider> [connection]: list one provider.",
-                f"- {prefix} models free: list free models grouped by provider.",
-                f"- {prefix} model: show selected chat model.",
-                f"- {prefix} model <provider> [connection] <number>: set chat model for this thread.",
-                f"- {prefix} model <number|alias>: also works after {prefix} models.",
-                f"- {prefix} @<number|alias> message: one-shot chat model.",
+                f"{prefix} <message>",
+                f"{prefix} model <provider> [connection] <number>",
                 "",
-                "Image generation",
-                f"- {prefix} image ...: generate using this thread's image model.",
-                f"- {prefix} image model <provider> [connection] <number>: set this thread's image model.",
-                f"- {prefix} image <provider> [connection] <number> ...: set image model and generate.",
+                "Image",
+                f"{prefix} image <prompt>",
+                f"{prefix} image model <provider> [connection] <number>",
                 "",
-                f"Use {prefix} status for current settings.",
+                "Models",
+                f"{prefix} models",
+                f"{prefix} models <provider> [connection]",
+                f"{prefix} status",
             ]
         )
 
