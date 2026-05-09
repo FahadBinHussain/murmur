@@ -29,95 +29,128 @@ if [[ -n "${CF_ACCOUNT_ID:-}" && -n "${CF_API_TOKEN:-}" && -n "${CLOUDFLARE_IMAG
   echo "Configured Open WebUI image generation through Murmur Cloudflare bridge."
 fi
 
-trim_value() {
-  local value="${1:-}"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-configure_openrouter_connections() {
-  local openrouter_keys=()
-  local key value
-
-  if [[ -n "${OPENROUTER_API_KEYS:-}" ]]; then
-    IFS=';' read -ra split_keys <<< "$OPENROUTER_API_KEYS"
-    for key in "${split_keys[@]}"; do
-      value="$(trim_value "$key")"
-      if [[ -n "$value" ]]; then
-        openrouter_keys+=("$value")
-      fi
-    done
+configure_provider_connections() {
+  local python_bin="${PYTHON_BIN:-/app/murmur/.venv/bin/python}"
+  if [[ ! -x "$python_bin" ]]; then
+    python_bin="python"
   fi
 
-  for index in 1 2 3 4 5; do
-    key="OPENROUTER_API_KEY_${index}"
-    value="$(trim_value "${!key:-}")"
-    if [[ -n "$value" ]]; then
-      openrouter_keys+=("$value")
-    fi
-  done
-
-  if (( ${#openrouter_keys[@]} == 0 )); then
-    return
-  fi
-
-  local base_url="${OPENROUTER_API_BASE_URL:-https://openrouter.ai/api/v1}"
-  local repeated_urls=()
-  for _ in "${openrouter_keys[@]}"; do
-    repeated_urls+=("$base_url")
-  done
-
-  export OPENAI_API_BASE_URL="${OPENAI_API_BASE_URL:-$base_url}"
-  if [[ -z "${OPENAI_API_KEYS:-}" ]]; then
-    export OPENAI_API_KEYS="$(IFS=';'; printf '%s' "${openrouter_keys[*]}")"
-  fi
-  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    export OPENAI_API_KEY="${openrouter_keys[0]}"
-  fi
-  if [[ -z "${OPENAI_API_BASE_URLS:-}" ]]; then
-    export OPENAI_API_BASE_URLS="$(IFS=';'; printf '%s' "${repeated_urls[*]}")"
-  fi
-  if [[ -z "${OPENAI_API_CONFIGS:-}" ]]; then
-    export OPENROUTER_CONNECTION_COUNT="${#openrouter_keys[@]}"
-    export OPENAI_API_CONFIGS="$(
-      python - <<'PY'
+  eval "$("$python_bin" - <<'PY'
 import json
 import os
+import re
+import shlex
+import sys
 
-count = int(os.environ["OPENROUTER_CONNECTION_COUNT"])
+
+def split_items(value):
+    return [item.strip() for item in re.split(r"[;,\s]+", value or "") if item.strip()]
+
+
+def env_prefix(family):
+    return re.sub(r"[^A-Z0-9]+", "_", family.upper()).strip("_")
+
+
+def canonical_family(value):
+    value = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return value
+
+
+def provider_keys(prefix):
+    keys = []
+    for item in (os.getenv(f"{prefix}_API_KEYS") or "").replace("\n", ";").split(";"):
+        item = item.strip()
+        if item:
+            keys.append(item)
+    for index in range(1, 21):
+        item = (os.getenv(f"{prefix}_API_KEY_{index}") or "").strip()
+        if item:
+            keys.append(item)
+    return list(dict.fromkeys(keys))
+
+
+families = [canonical_family(item) for item in split_items(os.getenv("OPENWEBUI_PROVIDER_FAMILIES", ""))]
+families = [family for family in families if family]
+if not families and provider_keys("OPENROUTER"):
+    families = ["openrouter"]
+
+default_base_urls = {
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
+connections = []
+for family in families:
+    prefix = env_prefix(family)
+    base_url = (os.getenv(f"{prefix}_API_BASE_URL") or default_base_urls.get(family, "")).strip().rstrip("/")
+    keys = provider_keys(prefix)
+    if not keys:
+        print(f"Skipping {family}: no {prefix}_API_KEY_N values configured.", file=sys.stderr)
+        continue
+    if not base_url:
+        print(f"Skipping {family}: {prefix}_API_BASE_URL is required.", file=sys.stderr)
+        continue
+
+    for index, key in enumerate(keys, start=1):
+        connections.append(
+            {
+                "family": family,
+                "index": index,
+                "base_url": base_url,
+                "key": key,
+                "prefix_id": f"{family}_{index}",
+            }
+        )
+
+
+def emit(name, value):
+    print(f"export {name}={shlex.quote(str(value))}")
+
+
+if not connections:
+    emit("MURMUR_PROVIDER_CONFIGURED", "false")
+    raise SystemExit(0)
+
+urls = [connection["base_url"] for connection in connections]
+keys = [connection["key"] for connection in connections]
 configs = {
     str(index): {
         "enable": True,
         "connection_type": "external",
-        "prefix_id": f"or{index + 1}",
+        "prefix_id": connection["prefix_id"],
     }
-    for index in range(count)
+    for index, connection in enumerate(connections)
 }
-print(json.dumps(configs, separators=(",", ":")))
+
+emit("MURMUR_PROVIDER_CONFIGURED", "true")
+emit("MURMUR_PROVIDER_CONNECTIONS_JSON", json.dumps(connections, separators=(",", ":")))
+emit("OPENAI_API_BASE_URL", os.getenv("OPENAI_API_BASE_URL") or urls[0])
+emit("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY") or keys[0])
+emit("OPENAI_API_BASE_URLS", os.getenv("OPENAI_API_BASE_URLS") or ";".join(urls))
+emit("OPENAI_API_KEYS", os.getenv("OPENAI_API_KEYS") or ";".join(keys))
+emit("OPENAI_API_CONFIGS", os.getenv("OPENAI_API_CONFIGS") or json.dumps(configs, separators=(",", ":")))
+
+counts = {}
+for connection in connections:
+    counts[connection["family"]] = counts.get(connection["family"], 0) + 1
+summary = ", ".join(f"{family}={count}" for family, count in sorted(counts.items()))
+print(f"Configured Open WebUI provider connections: {summary}.", file=sys.stderr)
 PY
-    )"
-    unset OPENROUTER_CONNECTION_COUNT
-  fi
-
-  export MURMUR_OPENROUTER_CONFIGURED=true
-  export MURMUR_OPENROUTER_BASE_URL="$base_url"
-  export MURMUR_OPENROUTER_KEYS="$(IFS=';'; printf '%s' "${openrouter_keys[*]}")"
-  echo "Configured ${#openrouter_keys[@]} OpenRouter key(s) for Open WebUI."
+  )"
 }
 
-sync_openrouter_config_to_openwebui() {
-  if [[ "${OPENROUTER_SYNC_OPENWEBUI_CONFIG:-true}" != "true" ]]; then
+sync_provider_config_to_openwebui() {
+  local provider_sync="${OPENWEBUI_PROVIDER_SYNC:-${OPENROUTER_SYNC_OPENWEBUI_CONFIG:-true}}"
+  if [[ "$provider_sync" != "true" ]]; then
     return
   fi
-  if [[ "${MURMUR_OPENROUTER_CONFIGURED:-false}" != "true" ]]; then
+  if [[ "${MURMUR_PROVIDER_CONFIGURED:-false}" != "true" ]]; then
     return
   fi
 
   local admin_email="${OPENWEBUI_LOGIN_EMAIL:-${WEBUI_ADMIN_EMAIL:-}}"
   local admin_password="${OPENWEBUI_LOGIN_PASSWORD:-${WEBUI_ADMIN_PASSWORD:-}}"
   if [[ -z "$admin_email" || -z "$admin_password" ]]; then
-    echo "Skipping OpenRouter Open WebUI config sync: admin login is not configured."
+    echo "Skipping Open WebUI provider config sync: admin login is not configured."
     return
   fi
 
@@ -132,16 +165,11 @@ import urllib.error
 import urllib.request
 
 base_url = os.environ["OPENWEBUI_BASE_URL"].rstrip("/")
-openrouter_url = os.environ["MURMUR_OPENROUTER_BASE_URL"].rstrip("/")
-openrouter_keys = [
-    key.strip()
-    for key in os.environ.get("MURMUR_OPENROUTER_KEYS", "").split(";")
-    if key.strip()
-]
+connections = json.loads(os.environ.get("MURMUR_PROVIDER_CONNECTIONS_JSON", "[]"))
 email = os.environ["OPENWEBUI_ADMIN_EMAIL_FOR_SYNC"]
 password = os.environ["OPENWEBUI_ADMIN_PASSWORD_FOR_SYNC"]
 
-if not openrouter_keys:
+if not connections:
     sys.exit(0)
 
 
@@ -160,6 +188,40 @@ def request(path, method="GET", body=None, token=None):
         raise RuntimeError(f"{method} {path} returned {exc.code}: {raw[:500]}") from exc
 
 
+def desired_entries(model_ids_by_family=None):
+    model_ids_by_family = model_ids_by_family or {}
+    return [
+        (
+            connection["base_url"].rstrip("/"),
+            connection["key"],
+            {
+                "enable": True,
+                "connection_type": "external",
+                "prefix_id": connection["prefix_id"],
+                **(
+                    {"model_ids": model_ids_by_family[connection["family"]]}
+                    if model_ids_by_family.get(connection["family"])
+                    else {}
+                ),
+            },
+        )
+        for connection in connections
+    ]
+
+
+def update_config(desired_entries, preserved_entries):
+    entries = desired_entries + preserved_entries
+    payload = {
+        "ENABLE_OPENAI_API": True,
+        "OPENAI_API_BASE_URLS": [entry[0] for entry in entries],
+        "OPENAI_API_KEYS": [entry[1] for entry in entries],
+        "OPENAI_API_CONFIGS": {
+            str(index): entry[2] for index, entry in enumerate(entries)
+        },
+    }
+    request("/openai/config/update", "POST", payload, token=token)
+
+
 try:
     token = request(
         "/api/v1/auths/signin",
@@ -174,6 +236,8 @@ try:
     if not isinstance(configs, dict):
         configs = {}
 
+    managed_prefixes = {connection["prefix_id"].lower() for connection in connections}
+    managed_base_urls = {connection["base_url"].rstrip("/") for connection in connections}
     preserved = []
     for index, url in enumerate(urls):
         url = str(url)
@@ -182,41 +246,63 @@ try:
         if not isinstance(api_config, dict):
             api_config = {}
         prefix = str(api_config.get("prefix_id", "")).lower()
-        if url.rstrip("/") == openrouter_url or re.fullmatch(r"or\d+", prefix):
+        if (
+            prefix in managed_prefixes
+            or re.fullmatch(r"or\d+", prefix)
+            or url.rstrip("/") in managed_base_urls
+        ):
             continue
         preserved.append((url, key, api_config))
 
-    desired = [
-        (
-            openrouter_url,
-            key,
-            {
-                "enable": True,
-                "connection_type": "external",
-                "prefix_id": f"or{index + 1}",
-            },
-        )
-        for index, key in enumerate(openrouter_keys)
-    ]
-    entries = desired + preserved
-    payload = {
-        "ENABLE_OPENAI_API": True,
-        "OPENAI_API_BASE_URLS": [entry[0] for entry in entries],
-        "OPENAI_API_KEYS": [entry[1] for entry in entries],
-        "OPENAI_API_CONFIGS": {
-            str(index): entry[2] for index, entry in enumerate(entries)
-        },
-    }
-    request("/openai/config/update", "POST", payload, token=token)
-    print(
-        f"Synced {len(openrouter_keys)} OpenRouter connection(s) into Open WebUI."
+    update_config(desired_entries(), preserved)
+
+    first_index_by_family = {}
+    for index, connection in enumerate(connections):
+        first_index_by_family.setdefault(connection["family"], index)
+
+    model_ids_by_family = {}
+    for family, index in first_index_by_family.items():
+        model_ids = []
+        try:
+            model_response = request(f"/openai/models/{index}", token=token)
+            for model in model_response.get("data", []):
+                if isinstance(model, dict):
+                    model_id = model.get("id") or model.get("name")
+                else:
+                    model_id = model
+                if isinstance(model_id, str) and model_id.strip():
+                    model_ids.append(model_id.strip())
+            model_ids = sorted(dict.fromkeys(model_ids))
+        except Exception as exc:
+            print(f"{family} model-id sync skipped: {exc}")
+        if model_ids:
+            model_ids_by_family[family] = model_ids
+
+    if model_ids_by_family:
+        update_config(desired_entries(model_ids_by_family), preserved)
+
+    counts = {}
+    for connection in connections:
+        counts[connection["family"]] = counts.get(connection["family"], 0) + 1
+    summary = ", ".join(
+        f"{family}={count}" for family, count in sorted(counts.items())
     )
+    explicit_summary = ", ".join(
+        f"{family}={len(model_ids)}" for family, model_ids in sorted(model_ids_by_family.items())
+    )
+    if explicit_summary:
+        print(
+            "Synced Open WebUI provider connections: "
+            f"{summary}; explicit models: {explicit_summary}."
+        )
+    else:
+        print(f"Synced Open WebUI provider connections: {summary}.")
 except Exception as exc:
-    print(f"OpenRouter Open WebUI config sync failed: {exc}")
+    print(f"Open WebUI provider config sync failed: {exc}")
 PY
 }
 
-configure_openrouter_connections
+configure_provider_connections
 
 shutdown() {
   local code="${1:-0}"
@@ -302,7 +388,7 @@ while true; do
   sleep 2
 done
 
-sync_openrouter_config_to_openwebui
+sync_provider_config_to_openwebui
 
 if [[ "$MURMUR_ENABLED" == "true" ]]; then
   start_murmur
