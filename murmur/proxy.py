@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import hashlib
+import html
 import json
 import os
 import secrets
+import signal
 import time
 from pathlib import Path
 from collections.abc import Iterable
@@ -25,6 +27,13 @@ HOP_BY_HOP_HEADERS = {
 }
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def filtered_headers(headers: Iterable[tuple[str, str]]) -> dict[str, str]:
     return {
         key: value
@@ -36,6 +45,95 @@ def filtered_headers(headers: Iterable[tuple[str, str]]) -> dict[str, str]:
 def target_url(request: web.Request) -> str:
     base_url = request.app["target_base_url"]
     return f"{base_url}{request.rel_url}"
+
+
+def admin_base_path() -> str:
+    path = os.getenv("MURMUR_ADMIN_PATH", "/murmur-admin").strip() or "/murmur-admin"
+    return "/" + path.strip("/")
+
+
+def admin_console_enabled() -> bool:
+    return env_bool("MURMUR_ADMIN_CONSOLE", True)
+
+
+def admin_username() -> str:
+    return (
+        os.getenv("MURMUR_ADMIN_USERNAME")
+        or os.getenv("WEBUI_ADMIN_EMAIL")
+        or "admin"
+    )
+
+
+def admin_password() -> str:
+    return os.getenv("MURMUR_ADMIN_PASSWORD") or os.getenv("WEBUI_ADMIN_PASSWORD") or ""
+
+
+def no_store_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = {
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+        "X-Robots-Tag": "noindex, nofollow",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def admin_auth_error(request: web.Request) -> web.Response | None:
+    expected_password = admin_password()
+    if not expected_password:
+        return web.Response(
+            text="Murmur admin console is missing MURMUR_ADMIN_PASSWORD or WEBUI_ADMIN_PASSWORD.",
+            status=503,
+            headers=no_store_headers(),
+        )
+
+    auth_header = request.headers.get("Authorization", "")
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() != "basic" or not token:
+        return admin_auth_required()
+
+    try:
+        decoded = base64.b64decode(token).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return admin_auth_required()
+
+    username, sep, password = decoded.partition(":")
+    if not sep:
+        return admin_auth_required()
+
+    if not (
+        secrets.compare_digest(username, admin_username())
+        and secrets.compare_digest(password, expected_password)
+    ):
+        return admin_auth_required()
+
+    return None
+
+
+def admin_auth_required() -> web.Response:
+    return web.Response(
+        text="Authentication required.",
+        status=401,
+        headers=no_store_headers(
+            {"WWW-Authenticate": 'Basic realm="Murmur Admin", charset="UTF-8"'}
+        ),
+    )
+
+
+def admin_cookie_path() -> Path:
+    path = Path(os.getenv("FB_COOKIES_PATH", "cookies.json"))
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def admin_pid_file() -> Path:
+    return Path(os.getenv("MURMUR_PID_FILE", "/tmp/murmur.pid"))
+
+
+def admin_restart_now_file() -> Path:
+    return Path(os.getenv("MURMUR_RESTART_NOW_FILE", "/tmp/murmur-restart-now"))
 
 
 def image_proxy_auth_key() -> str | None:
@@ -152,6 +250,277 @@ def write_image_proxy_error(prompt_id: str, message: str) -> None:
             f"prompt_id={prompt_id} error={compact_log_value(exc)}",
             flush=True,
         )
+
+
+def validate_cookie_payload(raw_text: str) -> tuple[list[dict], str]:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON: {exc}") from exc
+
+    if isinstance(payload, dict) and isinstance(payload.get("cookies"), list):
+        cookies = payload["cookies"]
+    elif isinstance(payload, list):
+        cookies = payload
+    else:
+        raise ValueError("Cookie JSON must be a browser-exported list of cookies.")
+
+    if not cookies:
+        raise ValueError("Cookie JSON is empty.")
+    if not all(isinstance(cookie, dict) for cookie in cookies):
+        raise ValueError("Every cookie entry must be a JSON object.")
+
+    names = {
+        str(cookie.get("name") or "")
+        for cookie in cookies
+        if isinstance(cookie, dict)
+    }
+    missing = [name for name in ("c_user", "xs") if name not in names]
+    if missing:
+        raise ValueError(
+            "Cookie JSON is missing required Facebook session cookies: "
+            + ", ".join(missing)
+        )
+
+    account_id = next(
+        (
+            str(cookie.get("value") or "")
+            for cookie in cookies
+            if str(cookie.get("name") or "") == "c_user"
+        ),
+        "",
+    )
+    summary = f"{len(cookies)} cookies"
+    if account_id:
+        summary += f", c_user={account_id}"
+    return cookies, summary
+
+
+def write_cookie_file(cookies: list[dict]) -> Path:
+    path = admin_cookie_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(
+        json.dumps(cookies, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with suppress(OSError):
+        temp_path.chmod(0o600)
+    temp_path.replace(path)
+    with suppress(OSError):
+        path.chmod(0o600)
+    return path
+
+
+def restart_murmur_listener() -> str:
+    pid_file = admin_pid_file()
+    try:
+        pid_text = pid_file.read_text(encoding="utf-8").strip()
+        pid = int(pid_text)
+    except (OSError, ValueError):
+        return "Cookie saved. Murmur listener PID file was not found, so restart was not requested."
+
+    if pid <= 0:
+        return "Cookie saved. Murmur listener PID was invalid, so restart was not requested."
+
+    try:
+        restart_file = admin_restart_now_file()
+        restart_file.parent.mkdir(parents=True, exist_ok=True)
+        restart_file.write_text(str(int(time.time())), encoding="utf-8")
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return "Cookie saved. Murmur listener was already stopped; supervisor should restart it."
+    except OSError as exc:
+        return f"Cookie saved. Murmur listener restart failed: {exc}"
+
+    return "Cookie saved. Murmur listener restart requested."
+
+
+def admin_status() -> dict[str, str]:
+    cookie_path = admin_cookie_path()
+    pid_file = admin_pid_file()
+    status = {
+        "cookie_path": str(cookie_path),
+        "pid_file": str(pid_file),
+        "restart_file": str(admin_restart_now_file()),
+    }
+    try:
+        stat = cookie_path.stat()
+        status["cookie_file"] = f"{stat.st_size} bytes, modified {time.ctime(stat.st_mtime)}"
+    except OSError:
+        status["cookie_file"] = "missing"
+
+    try:
+        status["murmur_pid"] = pid_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        status["murmur_pid"] = "missing"
+    return status
+
+
+def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
+    token = html.escape(csrf_token)
+    status = admin_status()
+    rows = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(key.replace('_', ' ').title())}</th>"
+        f"<td>{html.escape(value)}</td>"
+        "</tr>"
+        for key, value in status.items()
+    )
+    message_html = (
+        f'<div class="notice success">{html.escape(message)}</div>' if message else ""
+    )
+    error_html = f'<div class="notice error">{html.escape(error)}</div>' if error else ""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Murmur Admin</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f6f7f8;
+      color: #111827;
+    }}
+    main {{
+      width: min(720px, calc(100vw - 32px));
+      margin: 48px auto;
+      background: #fff;
+      border: 1px solid #d9dde3;
+      border-radius: 8px;
+      padding: 28px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 24px; }}
+    p {{ color: #4b5563; line-height: 1.5; }}
+    label {{ display: block; margin: 18px 0 8px; font-weight: 650; }}
+    input[type="file"], textarea {{
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 10px;
+      background: #fff;
+      color: #111827;
+    }}
+    textarea {{ min-height: 160px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+    button {{
+      margin-top: 18px;
+      border: 0;
+      border-radius: 6px;
+      background: #0f766e;
+      color: white;
+      font-weight: 700;
+      padding: 10px 14px;
+      cursor: pointer;
+    }}
+    table {{ width: 100%; margin-top: 24px; border-collapse: collapse; }}
+    th, td {{ border-top: 1px solid #e5e7eb; padding: 10px 0; text-align: left; vertical-align: top; }}
+    th {{ width: 160px; color: #374151; }}
+    .notice {{ margin: 18px 0; padding: 12px; border-radius: 6px; }}
+    .success {{ background: #ecfdf5; color: #065f46; }}
+    .error {{ background: #fef2f2; color: #991b1b; }}
+    @media (prefers-color-scheme: dark) {{
+      body {{ background: #0f172a; color: #e5e7eb; }}
+      main {{ background: #111827; border-color: #374151; }}
+      p {{ color: #cbd5e1; }}
+      input[type="file"], textarea {{ background: #0f172a; color: #e5e7eb; border-color: #4b5563; }}
+      th, td {{ border-color: #374151; }}
+      th {{ color: #cbd5e1; }}
+      .success {{ background: #064e3b; color: #d1fae5; }}
+      .error {{ background: #7f1d1d; color: #fee2e2; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Murmur Admin</h1>
+    <p>Upload a fresh Facebook cookie JSON file. Murmur writes it to the active cookie path and restarts only the Messenger listener.</p>
+    {message_html}
+    {error_html}
+    <form method="post" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{token}">
+      <label for="cookies_file">Cookie JSON file</label>
+      <input id="cookies_file" name="cookies_file" type="file" accept=".json,application/json">
+      <label for="cookies_json">Or paste cookie JSON</label>
+      <textarea id="cookies_json" name="cookies_json" spellcheck="false"></textarea>
+      <label><input name="restart_murmur" type="checkbox" value="1" checked> Restart Messenger listener after upload</label>
+      <button type="submit">Save Cookies</button>
+    </form>
+    <table>{rows}</table>
+  </main>
+</body>
+</html>"""
+
+
+async def admin_get(request: web.Request) -> web.Response:
+    return web.Response(
+        text=admin_html(request.app["admin_csrf_token"]),
+        content_type="text/html",
+        headers=no_store_headers(),
+    )
+
+
+async def admin_post(request: web.Request) -> web.Response:
+    try:
+        form = await request.post()
+        if str(form.get("csrf_token") or "") != request.app["admin_csrf_token"]:
+            raise ValueError("Invalid admin form token. Refresh the page and try again.")
+
+        raw_text = str(form.get("cookies_json") or "").strip()
+        file_field = form.get("cookies_file")
+        if getattr(file_field, "file", None):
+            raw_bytes = file_field.file.read()
+            raw_text = raw_bytes.decode("utf-8-sig")
+
+        if not raw_text:
+            raise ValueError("Upload a cookie JSON file or paste cookie JSON.")
+
+        cookies, summary = validate_cookie_payload(raw_text)
+        path = write_cookie_file(cookies)
+        restart_message = ""
+        if form.get("restart_murmur"):
+            restart_message = " " + restart_murmur_listener()
+        message = f"Saved {summary} to {path}.{restart_message}"
+        print(f"MURMUR_ADMIN_COOKIE_UPLOAD {summary} path={path}", flush=True)
+        return web.Response(
+            text=admin_html(request.app["admin_csrf_token"], message=message),
+            content_type="text/html",
+            headers=no_store_headers(),
+        )
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return web.Response(
+            text=admin_html(request.app["admin_csrf_token"], error=str(exc)),
+            content_type="text/html",
+            status=400,
+            headers=no_store_headers(),
+        )
+
+
+async def maybe_handle_admin_console(request: web.Request) -> web.Response | None:
+    base_path = admin_base_path()
+    if request.path not in {base_path, f"{base_path}/"}:
+        return None
+
+    if not admin_console_enabled():
+        return web.Response(text="Not found.", status=404)
+
+    auth_error = admin_auth_error(request)
+    if auth_error is not None:
+        return auth_error
+
+    if request.method == "GET":
+        return await admin_get(request)
+    if request.method == "POST":
+        return await admin_post(request)
+    return web.Response(
+        text="Method not allowed.",
+        status=405,
+        headers=no_store_headers(),
+    )
 
 
 async def cloudflare_image_proxy_models(request: web.Request) -> web.Response:
@@ -355,6 +724,10 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
 
 
 async def handle(request: web.Request) -> web.StreamResponse:
+    admin_response = await maybe_handle_admin_console(request)
+    if admin_response is not None:
+        return admin_response
+
     image_proxy_response = await maybe_handle_image_proxy(request)
     if image_proxy_response is not None:
         return image_proxy_response
@@ -373,8 +746,9 @@ async def session_context(app: web.Application):
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=2 * 1024 * 1024)
     app["target_base_url"] = os.environ["PROXY_TARGET_BASE_URL"].rstrip("/")
+    app["admin_csrf_token"] = secrets.token_urlsafe(32)
     app.cleanup_ctx.append(session_context)
     app.router.add_route("*", "/{path_info:.*}", handle)
     return app

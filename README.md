@@ -48,6 +48,7 @@ There is one intentional adapter exception: Cloudflare Workers AI image generati
 - Optional allowed-thread allowlist
 - Optional Facebook HTTP, MQTT, and upload proxies
 - Name-aware Messenger event logs
+- Password-protected admin console for cookie upload
 
 ## Command Reference
 
@@ -274,6 +275,34 @@ Messenger one-to-one user messages may be limited by end-to-end encryption. Grou
 
 Logging out of Facebook can invalidate the cookies in `cookies.json` or `FB_COOKIES_JSON_B64`. If Murmur suddenly cannot log in after a logout, export a fresh cookie file.
 
+## Admin Console
+
+The all-in-one public proxy includes a small admin console at:
+
+```text
+/murmur-admin
+```
+
+It is protected with HTTP Basic Auth. By default it uses:
+
+```text
+username: WEBUI_ADMIN_EMAIL
+password: WEBUI_ADMIN_PASSWORD
+```
+
+You can override those credentials:
+
+```env
+MURMUR_ADMIN_CONSOLE=true
+MURMUR_ADMIN_PATH=/murmur-admin
+MURMUR_ADMIN_USERNAME=admin@example.com
+MURMUR_ADMIN_PASSWORD=strong-admin-password
+```
+
+The console uploads a fresh Facebook cookie JSON file, writes it to `FB_COOKIES_PATH`, and restarts only the Murmur Messenger listener. Open WebUI does not restart.
+
+For ephemeral hosts such as free Hugging Face Spaces, this updates the running container. Update the hosted `FB_COOKIES_JSON_B64` secret as well if you need the new cookies to survive a full Space rebuild or restart.
+
 ## Hugging Face Spaces
 
 The repository is ready for Docker Spaces:
@@ -436,6 +465,17 @@ Direct PowerShell one-liner:
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Open WebUI request timeout. |
 | `SYSTEM_PROMPT` | helpful assistant prompt | System message sent to Open WebUI. |
 | `MURMUR_RESTART_SECONDS` | `60` | Delay before restarting the Messenger listener. |
+| `MURMUR_PID_FILE` | `/tmp/murmur.pid` | PID file used by the admin console to restart the listener. |
+| `MURMUR_RESTART_NOW_FILE` | `/tmp/murmur-restart-now` | Marker file for fast admin-requested restarts. |
+
+### Admin Console
+
+| Variable | Default | Description |
+|---|---|---|
+| `MURMUR_ADMIN_CONSOLE` | `true` | Enable the cookie upload admin console. |
+| `MURMUR_ADMIN_PATH` | `/murmur-admin` | Admin console URL path. |
+| `MURMUR_ADMIN_USERNAME` | `WEBUI_ADMIN_EMAIL` or `admin` | HTTP Basic Auth username. |
+| `MURMUR_ADMIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | HTTP Basic Auth password. Required when enabled. |
 
 ### Images
 
@@ -466,6 +506,7 @@ Direct PowerShell one-liner:
 - Never commit `.env`, `cookies.json`, API keys, or Facebook cookies.
 - Use a dedicated Facebook account.
 - Do not log out of the Facebook session that produced the cookies unless you are ready to export new cookies.
+- Keep the admin console protected with a strong password, especially on public hosts.
 - Keep `RESPOND_ONLY_ON_PREFIX=true` unless you want automatic replies.
 - Set `ALLOWED_THREAD_IDS` for production.
 - Disable Open WebUI signup on public deployments.

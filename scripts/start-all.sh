@@ -12,6 +12,10 @@ export PROXY_TARGET_BASE_URL="http://${OPENWEBUI_INTERNAL_HOST}:${OPENWEBUI_INTE
 export FB_COOKIES_PATH="${FB_COOKIES_PATH:-/app/murmur/cookies.json}"
 export MURMUR_ENABLED="${MURMUR_ENABLED:-true}"
 export MURMUR_RESTART_SECONDS="${MURMUR_RESTART_SECONDS:-60}"
+export MURMUR_PID_FILE="${MURMUR_PID_FILE:-/tmp/murmur.pid}"
+export MURMUR_RESTART_NOW_FILE="${MURMUR_RESTART_NOW_FILE:-/tmp/murmur-restart-now}"
+export MURMUR_ADMIN_CONSOLE="${MURMUR_ADMIN_CONSOLE:-true}"
+export MURMUR_ADMIN_PATH="${MURMUR_ADMIN_PATH:-/murmur-admin}"
 export ENABLE_OLLAMA_API="${ENABLE_OLLAMA_API:-false}"
 export ENABLE_BASE_MODELS_CACHE="${ENABLE_BASE_MODELS_CACHE:-true}"
 export OPENWEBUI_ACCESS_LOG="${OPENWEBUI_ACCESS_LOG:-false}"
@@ -410,6 +414,7 @@ shutdown() {
   if [[ -n "${OPENWEBUI_PID:-}" ]]; then
     kill "$OPENWEBUI_PID" 2>/dev/null || true
   fi
+  rm -f "$MURMUR_PID_FILE" "$MURMUR_RESTART_NOW_FILE"
   wait 2>/dev/null || true
   exit "$code"
 }
@@ -420,6 +425,7 @@ start_murmur() {
   echo "Starting Murmur..."
   /app/murmur/.venv/bin/python -m murmur &
   MURMUR_PID="$!"
+  printf '%s' "$MURMUR_PID" > "$MURMUR_PID_FILE"
 }
 
 if [[ -n "${FB_COOKIES_JSON_B64:-}" ]]; then
@@ -504,9 +510,16 @@ while true; do
   if [[ "$MURMUR_ENABLED" == "true" ]] && [[ -n "${MURMUR_PID:-}" ]] && ! kill -0 "$MURMUR_PID" 2>/dev/null; then
     wait "$MURMUR_PID"
     MURMUR_EXIT_CODE="$?"
-    echo "Murmur exited with code ${MURMUR_EXIT_CODE}; restarting in ${MURMUR_RESTART_SECONDS}s."
+    RESTART_DELAY="$MURMUR_RESTART_SECONDS"
+    if [[ -f "$MURMUR_RESTART_NOW_FILE" ]]; then
+      rm -f "$MURMUR_RESTART_NOW_FILE"
+      RESTART_DELAY=1
+      echo "Murmur restart requested by admin console."
+    fi
+    echo "Murmur exited with code ${MURMUR_EXIT_CODE}; restarting in ${RESTART_DELAY}s."
     MURMUR_PID=""
-    sleep "$MURMUR_RESTART_SECONDS"
+    rm -f "$MURMUR_PID_FILE"
+    sleep "$RESTART_DELAY"
     start_murmur
   fi
   sleep 2
