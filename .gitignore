@@ -10,3 +10,5 @@ env/
 .env
 cookies.json
 *.log
+.murmur-facebook-profile/
+cookies.json.bak-*

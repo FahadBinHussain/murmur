@@ -385,6 +385,34 @@ For Neon/Open WebUI v0.9, prefer `PGSSLMODE=require` as a separate variable. Do 
 
 ## Cookie Utilities
 
+### Browser-assisted refresh
+
+Murmur includes a local helper for refreshing Facebook cookies through a real browser session. It can type the configured email or phone and password, generate an authenticator code from a local TOTP secret, then waits while you finish any Facebook checkpoint in the opened browser.
+
+Install the optional local dependency once:
+
+```powershell
+python -m pip install -e .[facebook-login]
+python -m playwright install chromium
+```
+
+Set these in `.env`:
+
+```env
+FB_LOGIN_EMAIL=your-facebook-email
+FB_LOGIN_PHONE=your-facebook-phone-or-email
+FB_LOGIN_PASSWORD=your-facebook-password
+FB_LOGIN_TOTP_SECRET=your-authenticator-secret
+```
+
+Run the refresh:
+
+```powershell
+python .\scripts\facebook_login_refresh.py
+```
+
+By default the helper opens Chromium with a persistent profile at `.murmur-facebook-profile`, prefers `FB_LOGIN_EMAIL` over `FB_LOGIN_PHONE`, exports fresh cookies to `FB_LOGIN_EXPORT_PATH` or `FB_COOKIES_PATH`, backs up the previous cookie file, and verifies the result with `fbchat-muqit`. It uses `FB_LOGIN_PROXY` when set, otherwise it falls back to `FB_PROXY`; set `FB_LOGIN_PROXY=direct` to force a direct browser login.
+
 Generate a base64 cookie payload from `cookies.json`:
 
 ```powershell
@@ -488,6 +516,21 @@ Direct PowerShell one-liner:
 | `FB_LOG_NAMES` | `true` | Resolve Messenger IDs to names in logs. |
 | `FB_LOG_NAMES_KEEP_IDS` | `true` | Keep IDs beside resolved names. |
 | `FB_LOG_NAME_CACHE_PATH` | temp file | JSON cache for resolved Messenger names. |
+| `FB_LOGIN_PHONE` | empty | Local browser-login helper phone/email. Not used by the hosted bot. |
+| `FB_LOGIN_EMAIL` | empty | Local browser-login helper email. Preferred over `FB_LOGIN_PHONE`. |
+| `FB_LOGIN_PASSWORD` | empty | Local browser-login helper password. Not used by the hosted bot. |
+| `FB_LOGIN_TOTP_SECRET` | empty | Local browser-login helper authenticator secret used to generate 2FA codes. |
+| `FB_LOGIN_URL` | `https://www.facebook.com/login` | Facebook login page opened by the helper. |
+| `FB_LOGIN_PROFILE_DIR` | `.murmur-facebook-profile` | Persistent local Chromium profile used by the helper. |
+| `FB_LOGIN_EXPORT_PATH` | `FB_COOKIES_PATH` | Cookie JSON path written by the helper. |
+| `FB_LOGIN_HEADLESS` | `false` | Run helper browser headless. Keep `false` for checkpoints and 2FA. |
+| `FB_LOGIN_TIMEOUT_SECONDS` | `300` | Time to wait for `c_user` and `xs` cookies after login starts. |
+| `FB_LOGIN_VERIFY` | `true` | Verify the exported cookies with `fbchat-muqit`. |
+| `FB_LOGIN_PERSIST_DB` | `false` | Also persist exported cookies to Murmur runtime PostgreSQL state. |
+| `FB_LOGIN_BACKUP_EXISTING` | `true` | Back up the old cookie file before overwriting it. |
+| `FB_LOGIN_PROXY` | `FB_PROXY` | Browser proxy for local Facebook login. Use `direct` to disable. |
+| `FB_LOGIN_VERIFY_PROXY` | `FB_LOGIN_PROXY` | Proxy used by the `fbchat-muqit` verification request. |
+| `FB_LOGIN_USER_AGENT` | `FB_USER_AGENT` | Browser and verification user-agent override. |
 
 ### Runtime
 
