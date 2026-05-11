@@ -11,4 +11,6 @@ env/
 cookies.json
 *.log
 .murmur-facebook-profile/
+output/
+.hf-upload-staging/
 cookies.json.bak-*

@@ -49,6 +49,7 @@ There is one intentional adapter exception: Cloudflare Workers AI image generati
 - Optional Facebook HTTP, MQTT, and upload proxies
 - Name-aware Messenger event logs
 - Password-protected admin console for thread access and cookie upload
+- Encrypted trusted-browser profile vault for hosted Facebook cookie refresh
 
 ## Command Reference
 
@@ -322,7 +323,7 @@ The console has two runtime tools:
 
 Thread access changes are stored in `MURMUR_THREAD_ALLOWLIST_PATH` and are picked up by the listener on the next message. The thread list is stored in `MURMUR_THREAD_REGISTRY_PATH`; it is filled from recent inbox refreshes and from threads that send messages while Murmur is online. Open WebUI does not restart for admin console changes.
 
-For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads survive rebuilds without changing Space secrets on every upload, configure PostgreSQL with `DATABASE_URL` or `MURMUR_STATE_DATABASE_URL`. The admin console writes encrypted cookie state to `MURMUR_STATE_TABLE`, and startup reads it before falling back to `FB_COOKIES_JSON_B64`.
+For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads and trusted browser profiles survive rebuilds without changing Space secrets on every upload, configure PostgreSQL with `DATABASE_URL` or `MURMUR_STATE_DATABASE_URL`. Murmur writes encrypted cookie state and an encrypted browser-profile vault to `MURMUR_STATE_TABLE`; startup restores the profile, then reads cookie state before falling back to `FB_COOKIES_JSON_B64`.
 
 ## Hugging Face Spaces
 
@@ -412,6 +413,64 @@ python .\scripts\facebook_login_refresh.py
 ```
 
 By default the helper opens Chromium with a persistent profile at `.murmur-facebook-profile`, prefers `FB_LOGIN_EMAIL` over `FB_LOGIN_PHONE`, exports fresh cookies to `FB_LOGIN_EXPORT_PATH` or `FB_COOKIES_PATH`, backs up the previous cookie file, and verifies the result with `fbchat-muqit`. It uses `FB_LOGIN_PROXY` when set, otherwise it falls back to `FB_PROXY`; set `FB_LOGIN_PROXY=direct` to force a direct browser login.
+
+### Hosted auto-refresh
+
+When `FB_LOGIN_AUTO_REFRESH=true`, Murmur exits with a dedicated code for known expired-cookie login failures and the supervisor runs the same browser-login helper before restarting the Messenger listener. This is intended for hosted deployments where the local machine will not be online.
+
+Required hosted secrets:
+
+```env
+FB_LOGIN_EMAIL=your-facebook-email
+FB_LOGIN_PASSWORD=your-facebook-password
+FB_LOGIN_TOTP_SECRET=your-authenticator-secret
+```
+
+Recommended hosted settings:
+
+```env
+FB_LOGIN_AUTO_REFRESH=true
+FB_LOGIN_HEADLESS=true
+FB_LOGIN_PERSIST_DB=true
+FB_LOGIN_PROFILE_VAULT_ENABLED=true
+FB_LOGIN_PROFILE_VAULT_RESTORE=true
+FB_LOGIN_PROFILE_PERSIST_DB=true
+FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES=true
+FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS=900
+```
+
+Only cookie-login failures trigger the hosted refresh path. Other Messenger or network failures continue through the normal restart loop.
+
+### Trusted browser-profile vault
+
+Fresh hosted Facebook login can trigger extra challenges. The stronger hosted path is to reuse a browser profile that Facebook already trusts.
+
+Murmur can pack `.murmur-facebook-profile`, remove volatile cache files, encrypt the zip payload with `MURMUR_COOKIE_STATE_SECRET` or `WEBUI_SECRET_KEY`, and store it in PostgreSQL. On hosted startup it restores that profile before the Messenger listener starts. After a successful browser refresh, it writes both fresh cookies and the updated profile back to PostgreSQL.
+
+Persist the current local trusted profile:
+
+```powershell
+python -m murmur.runtime_state persist-profile
+```
+
+Restore it locally for testing:
+
+```powershell
+python -m murmur.runtime_state restore-profile --overwrite
+```
+
+Useful vault settings:
+
+```env
+FB_LOGIN_PROFILE_DIR=.murmur-facebook-profile
+FB_LOGIN_PROFILE_VAULT_ENABLED=true
+FB_LOGIN_PROFILE_VAULT_RESTORE=true
+FB_LOGIN_PROFILE_VAULT_OVERWRITE=false
+FB_LOGIN_PROFILE_PERSIST_DB=true
+FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES=true
+FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES=true
+FB_LOGIN_PROFILE_VAULT_MAX_BYTES=209715200
+```
 
 Generate a base64 cookie payload from `cookies.json`:
 
@@ -516,13 +575,20 @@ Direct PowerShell one-liner:
 | `FB_LOG_NAMES` | `true` | Resolve Messenger IDs to names in logs. |
 | `FB_LOG_NAMES_KEEP_IDS` | `true` | Keep IDs beside resolved names. |
 | `FB_LOG_NAME_CACHE_PATH` | temp file | JSON cache for resolved Messenger names. |
-| `FB_LOGIN_PHONE` | empty | Local browser-login helper phone/email. Not used by the hosted bot. |
-| `FB_LOGIN_EMAIL` | empty | Local browser-login helper email. Preferred over `FB_LOGIN_PHONE`. |
-| `FB_LOGIN_PASSWORD` | empty | Local browser-login helper password. Not used by the hosted bot. |
+| `FB_LOGIN_PHONE` | empty | Browser-login helper phone/email fallback. |
+| `FB_LOGIN_EMAIL` | empty | Browser-login helper email. Preferred over `FB_LOGIN_PHONE`. |
+| `FB_LOGIN_PASSWORD` | empty | Browser-login helper password for local or hosted auto-refresh. |
 | `FB_LOGIN_TOTP_SECRET` | empty | Local browser-login helper authenticator secret used to generate 2FA codes. |
 | `FB_LOGIN_URL` | `https://www.facebook.com/login` | Facebook login page opened by the helper. |
 | `FB_LOGIN_PROFILE_DIR` | `.murmur-facebook-profile` | Persistent local Chromium profile used by the helper. |
 | `FB_LOGIN_EXPORT_PATH` | `FB_COOKIES_PATH` | Cookie JSON path written by the helper. |
+| `FB_LOGIN_PROFILE_VAULT_ENABLED` | `true` | Enable encrypted browser-profile persistence in runtime state. |
+| `FB_LOGIN_PROFILE_VAULT_RESTORE` | `true` | Restore the stored profile before hosted Murmur starts and before hosted refresh attempts. |
+| `FB_LOGIN_PROFILE_VAULT_OVERWRITE` | `false` | Overwrite a non-empty local profile directory when restoring the vault. |
+| `FB_LOGIN_PROFILE_PERSIST_DB` | `true` | Persist the browser profile after a successful browser-login refresh. |
+| `FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES` | `true` | Seed an empty restored profile with latest cookie state before opening Facebook. |
+| `FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES` | `true` | Allow profile bootstrap to read encrypted cookie state from PostgreSQL. |
+| `FB_LOGIN_PROFILE_VAULT_MAX_BYTES` | `209715200` | Maximum compressed profile size accepted for DB storage. |
 | `FB_LOGIN_HEADLESS` | `false` | Run helper browser headless. Keep `false` for checkpoints and 2FA. |
 | `FB_LOGIN_TIMEOUT_SECONDS` | `300` | Time to wait for `c_user` and `xs` cookies after login starts. |
 | `FB_LOGIN_VERIFY` | `true` | Verify the exported cookies with `fbchat-muqit`. |
@@ -531,6 +597,10 @@ Direct PowerShell one-liner:
 | `FB_LOGIN_PROXY` | `FB_PROXY` | Browser proxy for local Facebook login. Use `direct` to disable. |
 | `FB_LOGIN_VERIFY_PROXY` | `FB_LOGIN_PROXY` | Proxy used by the `fbchat-muqit` verification request. |
 | `FB_LOGIN_USER_AGENT` | `FB_USER_AGENT` | Browser and verification user-agent override. |
+| `FB_LOGIN_AUTO_REFRESH` | `false` | Run the browser-login helper automatically after known expired-cookie failures. |
+| `FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS` | `900` | Minimum seconds between hosted auto-refresh attempts. |
+| `FB_LOGIN_AUTO_REFRESH_STAMP` | `/tmp/murmur-facebook-login-refresh-last` | Timestamp file used for auto-refresh cooldown. |
+| `MURMUR_FACEBOOK_COOKIE_EXPIRED_EXIT_CODE` | `42` | Process exit code used when Murmur detects an expired Facebook cookie session. |
 
 ### Runtime
 

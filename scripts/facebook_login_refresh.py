@@ -82,6 +82,14 @@ def redacted_url(value: str | None) -> str:
     return f"{parsed.scheme}://{auth}@{host}"
 
 
+def fbchat_proxy(proxy_url: str | None) -> str | None:
+    if not proxy_url:
+        return None
+    if proxy_url.strip().lower() in {"direct", "none", "off", "false"}:
+        return None
+    return proxy_url.strip()
+
+
 def playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
     if not proxy_url:
         return None
@@ -121,6 +129,31 @@ def fbchat_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def playwright_cookie(cookie: dict[str, Any]) -> dict[str, Any] | None:
+    name = str(cookie.get("name") or "").strip()
+    value = str(cookie.get("value") or "")
+    domain = str(cookie.get("domain") or "").strip()
+    if not name or not domain:
+        return None
+
+    out: dict[str, Any] = {
+        "name": name,
+        "value": value,
+        "domain": domain,
+        "path": str(cookie.get("path") or "/"),
+    }
+    for source, target in (("secure", "secure"), ("httpOnly", "httpOnly")):
+        if source in cookie:
+            out[target] = bool(cookie[source])
+    same_site = str(cookie.get("sameSite") or "").strip().lower()
+    if same_site in {"strict", "lax", "none"}:
+        out["sameSite"] = same_site.capitalize()
+    expires = cookie.get("expires", cookie.get("expirationDate"))
+    if isinstance(expires, (int, float)) and expires > 0:
+        out["expires"] = expires
+    return out
+
+
 def required_cookie_names(cookies: list[dict[str, Any]]) -> set[str]:
     return {str(cookie.get("name") or "") for cookie in cookies}
 
@@ -153,6 +186,60 @@ async def facebook_cookies(context) -> list[dict[str, Any]]:
     return out
 
 
+def load_cookie_list(path: Path) -> tuple[list[dict[str, Any]], str] | None:
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            source = str(path)
+        elif env_bool("FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES", True):
+            from murmur.runtime_state import load_cookie_state_text
+
+            payload = json.loads(load_cookie_state_text())
+            source = "DB cookie state"
+        else:
+            return None
+    except Exception as exc:
+        print(f"Cookie bootstrap skipped: {exc}")
+        return None
+
+    if isinstance(payload, dict) and isinstance(payload.get("cookies"), list):
+        payload = payload["cookies"]
+    if not isinstance(payload, list):
+        print("Cookie bootstrap skipped: cookie payload is not a list.")
+        return None
+
+    cookies = [cookie for cookie in payload if isinstance(cookie, dict)]
+    if not cookies:
+        print("Cookie bootstrap skipped: cookie payload is empty.")
+        return None
+    return cookies, source
+
+
+async def bootstrap_context_cookies(context, path: Path) -> None:
+    if not env_bool("FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES", True):
+        return
+    try:
+        current = await facebook_cookies(context)
+        if has_login_cookies(current):
+            return
+    except Exception:
+        pass
+
+    loaded = load_cookie_list(path)
+    if loaded is None:
+        return
+    cookies, source = loaded
+    converted = [item for item in (playwright_cookie(cookie) for cookie in cookies) if item]
+    if not converted:
+        print("Cookie bootstrap skipped: no browser-compatible Facebook cookies found.")
+        return
+    try:
+        await context.add_cookies(converted)
+        print(f"Bootstrapped browser profile with {len(converted)} cookies from {source}.")
+    except Exception as exc:
+        print(f"Cookie bootstrap failed: {exc}")
+
+
 async def first_visible(page, selectors: list[str], timeout_ms: int = 1500):
     for selector in selectors:
         locator = page.locator(selector).first
@@ -173,6 +260,18 @@ async def first_visible_locator(locators: list[Any], timeout_ms: int = 1500):
         except Exception:
             continue
     return None
+
+
+def page_scopes(page) -> list[Any]:
+    scopes: list[Any] = [page]
+    try:
+        main_frame = page.main_frame
+        for frame in page.frames:
+            if frame != main_frame:
+                scopes.append(frame)
+    except Exception:
+        pass
+    return scopes
 
 
 def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
@@ -215,21 +314,29 @@ async def click_submit_or_continue(page) -> bool:
         'input[name="login"]',
         'input[type="submit"]',
     ]
-    for selector in selectors:
-        submit = await first_visible(page, [selector], timeout_ms=300)
-        if submit is None:
-            continue
-        try:
-            await submit.click(timeout=1500)
-            return True
-        except Exception:
-            continue
+    for scope in page_scopes(page):
+        for selector in selectors:
+            submit = await first_visible(scope, [selector], timeout_ms=300)
+            if submit is None:
+                continue
+            try:
+                await submit.click(timeout=1500)
+                return True
+            except Exception:
+                continue
     return False
 
 
 async def click_safe_facebook_step(page) -> bool:
     safe_texts = [
         "Continue",
+        "Try another way",
+        "Try another method",
+        "Use another method",
+        "Choose another way",
+        "Choose another method",
+        "Get a code",
+        "Enter code",
         "This was me",
         "Yes, continue",
         "Yes",
@@ -242,22 +349,142 @@ async def click_safe_facebook_step(page) -> bool:
         "OK",
         "Done",
     ]
-    for text in safe_texts:
-        selectors = [
-            f'button:has-text("{text}")',
-            f'div[role="button"]:has-text("{text}")',
-            f'a[role="button"]:has-text("{text}")',
-            f'input[type="submit"][value="{text}"]',
-        ]
-        target = await first_visible(page, selectors, timeout_ms=250)
-        if target is None:
-            continue
+    for scope in page_scopes(page):
+        for text in safe_texts:
+            selectors = [
+                f'button:has-text("{text}")',
+                f'div[role="button"]:has-text("{text}")',
+                f'a[role="button"]:has-text("{text}")',
+                f'input[type="submit"][value="{text}"]',
+            ]
+            target = await first_visible(scope, selectors, timeout_ms=250)
+            if target is None:
+                continue
+            try:
+                await target.click()
+                print(f"Clicked Facebook step: {text}")
+                return True
+            except Exception:
+                continue
+    return False
+
+
+async def facebook_page_debug(page) -> None:
+    try:
+        url = page.url
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        flow = qs.get("flow", [""])[0]
+        compact_url = parsed.path + (f"?flow={flow}" if flow else "")
+        title = ""
+        html_len = 0
+        inputs: list[str] = []
+        buttons: list[str] = []
+        frames: list[str] = []
         try:
-            await target.click()
-            print(f"Clicked Facebook step: {text}")
-            return True
+            title = await page.title()
         except Exception:
-            continue
+            title = ""
+        try:
+            html_len = len(await page.content())
+        except Exception:
+            html_len = 0
+        body = await page.locator("body").inner_text(timeout=1000)
+        body = " ".join(body.split())
+        if len(body) > 700:
+            body = body[:700] + "..."
+        try:
+            inputs = await page.locator("input").evaluate_all(
+                """els => els.slice(0, 10).map(e => [
+                    e.getAttribute('name') || '',
+                    e.getAttribute('type') || '',
+                    e.getAttribute('autocomplete') || '',
+                    e.getAttribute('aria-label') || '',
+                    e.getAttribute('placeholder') || ''
+                ].filter(Boolean).join('/')).filter(Boolean)"""
+            )
+        except Exception:
+            inputs = []
+        try:
+            buttons = await page.locator("button, div[role='button'], input[type='submit']").evaluate_all(
+                """els => els.slice(0, 10).map(e =>
+                    (e.innerText || e.getAttribute('aria-label') || e.getAttribute('value') || '')
+                        .replace(/\\s+/g, ' ')
+                        .trim()
+                ).filter(Boolean)"""
+            )
+        except Exception:
+            buttons = []
+        try:
+            for frame in page.frames[:6]:
+                frame_url = urlparse(frame.url)
+                frame_text = ""
+                try:
+                    frame_text = await frame.locator("body").inner_text(timeout=500)
+                    frame_text = " ".join(frame_text.split())
+                    if len(frame_text) > 120:
+                        frame_text = frame_text[:120] + "..."
+                except Exception:
+                    frame_text = ""
+                frames.append(f"{frame_url.netloc}{frame_url.path} text={frame_text or '<empty>'}")
+        except Exception:
+            frames = []
+        print(
+            "Facebook page debug: "
+            f"{compact_url} title={title!r} html_len={html_len} "
+            f"body={body or '<empty>'} inputs={inputs} buttons={buttons} frames={frames}"
+        )
+    except Exception as exc:
+        print(f"Facebook page debug unavailable: {exc}")
+
+
+async def facebook_captcha_detected(page) -> bool:
+    try:
+        for frame in page.frames:
+            frame_url = frame.url.lower()
+            if "recaptcha" in frame_url or "google.com/recaptcha" in frame_url:
+                return True
+    except Exception:
+        pass
+    try:
+        recaptcha = await page.locator('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA" i]').count()
+        return recaptcha > 0
+    except Exception:
+        return False
+
+
+async def click_authentication_app_option(page) -> bool:
+    option_texts = [
+        "Authentication app",
+        "Authenticator app",
+        "Use authentication app",
+        "Use an authentication app",
+        "Get a code from your authentication app",
+        "Get code from authentication app",
+        "Enter a code from your authentication app",
+        "Go to your authentication app",
+        "Code generator",
+    ]
+    for scope in page_scopes(page):
+        for text in option_texts:
+            locators = [
+                scope.get_by_text(text, exact=True),
+                scope.get_by_text(text),
+                scope.locator(f'div[role="button"]:has-text("{text}")'),
+                scope.locator(f'label:has-text("{text}")'),
+                scope.locator(f'[role="radio"]:has-text("{text}")'),
+            ]
+            target = await first_visible_locator(locators, timeout_ms=250)
+            if target is None:
+                continue
+            try:
+                await target.click(timeout=1500)
+                print(f"Clicked Facebook 2FA option: {text}")
+                await page.wait_for_timeout(500)
+                await click_submit_or_continue(page)
+                return True
+            except Exception:
+                continue
     return False
 
 
@@ -285,8 +512,8 @@ async def fill_login_form(page, identifier: str, password: str) -> bool:
     if email_box is None or password_box is None:
         return False
 
-    await email_box.fill(identifier)
-    await password_box.fill(password)
+    await email_box.fill(identifier, timeout=2000)
+    await password_box.fill(password, timeout=2000)
 
     if not await click_submit_or_continue(page):
         await password_box.press("Enter")
@@ -296,23 +523,40 @@ async def fill_login_form(page, identifier: str, password: str) -> bool:
 async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -> str | None:
     if not totp_secret:
         return last_code
+    for scope in page_scopes(page):
+        login_password = await first_visible(
+            scope,
+            [
+                'input[name="pass"]',
+                "#pass",
+                'input[type="password"]',
+                'input[autocomplete="current-password"]',
+            ],
+            timeout_ms=100,
+        )
+        if login_password is not None:
+            return last_code
 
-    code_box = await first_visible_locator(
-        [
-            page.locator('input[name="approvals_code"]'),
-            page.locator("#approvals_code"),
-            page.locator('input[autocomplete="one-time-code"]'),
-            page.get_by_placeholder("Code"),
-            page.get_by_label("Code"),
-            page.locator('input[aria-label*="code" i]'),
-            page.locator('input[inputmode="numeric"]'),
-            page.locator('input[maxlength="6"]'),
-            page.locator('input[type="tel"]'),
-            page.locator('input[name="checkpoint_data"]'),
-            page.get_by_role("textbox"),
-        ],
-        timeout_ms=500,
-    )
+    code_box = None
+    for scope in page_scopes(page):
+        code_box = await first_visible_locator(
+            [
+                scope.locator('input[name="approvals_code"]'),
+                scope.locator("#approvals_code"),
+                scope.locator('input[autocomplete="one-time-code"]'),
+                scope.get_by_placeholder("Code"),
+                scope.get_by_label("Code"),
+                scope.locator('input[aria-label*="code" i]'),
+                scope.locator('input[inputmode="numeric"]'),
+                scope.locator('input[maxlength="6"]'),
+                scope.locator('input[type="tel"]'),
+                scope.locator('input[name="checkpoint_data"]'),
+                scope.get_by_role("textbox"),
+            ],
+            timeout_ms=500,
+        )
+        if code_box is not None:
+            break
     if code_box is None:
         return last_code
 
@@ -320,7 +564,7 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
     if code == last_code:
         return last_code
 
-    await code_box.fill(code)
+    await code_box.fill(code, timeout=2000)
     await page.wait_for_timeout(300)
     if not await click_submit_or_continue(page):
         await code_box.press("Enter")
@@ -328,10 +572,19 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
     return code
 
 
-async def wait_for_login(context, page, timeout_seconds: int, totp_secret: str) -> list[dict[str, Any]]:
+async def wait_for_login(
+    context,
+    page,
+    timeout_seconds: int,
+    totp_secret: str,
+    login_identifier: str = "",
+    password: str = "",
+) -> list[dict[str, Any]]:
     deadline = time.monotonic() + timeout_seconds
     last_totp_code: str | None = None
     last_status_log = 0.0
+    login_resubmits = 0
+    last_login_submit = 0.0
     while time.monotonic() < deadline:
         try:
             cookies = await facebook_cookies(context)
@@ -341,14 +594,34 @@ async def wait_for_login(context, page, timeout_seconds: int, totp_secret: str) 
             raise
         if has_login_cookies(cookies):
             return cookies
+        if await facebook_captcha_detected(page):
+            await facebook_page_debug(page)
+            raise RuntimeError(
+                "Facebook login blocked by reCAPTCHA. "
+                "Hosted auto-refresh cannot solve this challenge without an already trusted profile."
+            )
         if time.monotonic() - last_status_log > 20:
             try:
                 print(f"Waiting on Facebook page: {page.url}")
+                await facebook_page_debug(page)
             except Exception:
                 pass
             last_status_log = time.monotonic()
         last_totp_code = await submit_totp_if_needed(page, totp_secret, last_totp_code)
+        await click_authentication_app_option(page)
         await click_safe_facebook_step(page)
+        if (
+            login_identifier
+            and password
+            and login_resubmits < 3
+            and time.monotonic() - last_login_submit > 15
+            and await fill_login_form(page, login_identifier, password)
+        ):
+            login_resubmits += 1
+            last_login_submit = time.monotonic()
+            print(f"Resubmitted Facebook login form after redirect ({login_resubmits}/3).")
+            await asyncio.sleep(3)
+            continue
         await asyncio.sleep(2)
     screenshot_path = ROOT / "output" / "facebook_login_refresh_timeout.png"
     try:
@@ -391,6 +664,13 @@ def persist_to_db(cookies: list[dict[str, Any]]) -> None:
     print(message)
 
 
+def persist_profile_to_db(profile_dir: Path) -> None:
+    from murmur.runtime_state import persist_facebook_profile_state
+
+    message = persist_facebook_profile_state(profile_dir)
+    print(message)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Open a local browser, log in to Facebook, and export fresh Murmur cookies."
@@ -404,8 +684,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=env_path("FB_LOGIN_EXPORT_PATH", os.getenv("FB_COOKIES_PATH", "cookies.json")))
     parser.add_argument("--timeout", type=int, default=env_int("FB_LOGIN_TIMEOUT_SECONDS", 300))
     parser.add_argument("--headless", action="store_true", default=env_bool("FB_LOGIN_HEADLESS", False))
+    parser.add_argument("--headed", action="store_false", dest="headless")
     parser.add_argument("--no-verify", action="store_true", default=not env_bool("FB_LOGIN_VERIFY", True))
     parser.add_argument("--persist-db", action="store_true", default=env_bool("FB_LOGIN_PERSIST_DB", False))
+    parser.add_argument(
+        "--persist-profile-db",
+        action="store_true",
+        default=env_bool("FB_LOGIN_PROFILE_PERSIST_DB", False),
+    )
+    parser.add_argument("--no-persist-profile-db", action="store_false", dest="persist_profile_db")
     parser.add_argument("--no-backup", action="store_true", default=not env_bool("FB_LOGIN_BACKUP_EXISTING", True))
     return parser.parse_args()
 
@@ -427,7 +714,7 @@ async def main_async() -> int:
     password = args.password
     totp_secret = str(args.totp_secret or "").strip()
     proxy_url = os.getenv("FB_LOGIN_PROXY") or os.getenv("FB_PROXY") or ""
-    verify_proxy = os.getenv("FB_LOGIN_VERIFY_PROXY", proxy_url)
+    verify_proxy = fbchat_proxy(os.getenv("FB_LOGIN_VERIFY_PROXY") or proxy_url)
     user_agent = os.getenv("FB_LOGIN_USER_AGENT") or os.getenv("FB_USER_AGENT") or None
 
     print(f"Browser profile: {args.profile_dir}")
@@ -451,6 +738,7 @@ async def main_async() -> int:
 
         context = await p.chromium.launch_persistent_context(str(args.profile_dir), **launch_args)
         try:
+            await bootstrap_context_cookies(context, args.output)
             page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(args.login_url, wait_until="domcontentloaded")
 
@@ -463,10 +751,10 @@ async def main_async() -> int:
                     print("Submitted Facebook login form. Waiting for c_user/xs cookies...")
                 else:
                     print("Could not find the login form automatically. Use the browser manually.")
-                cookies = await wait_for_login(context, page, args.timeout, totp_secret)
+                cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
             else:
                 print("FB_LOGIN_EMAIL/FB_LOGIN_PHONE or FB_LOGIN_PASSWORD is empty. Use the browser manually.")
-                cookies = await wait_for_login(context, page, args.timeout, totp_secret)
+                cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
 
             write_cookies(args.output, cookies, backup=not args.no_backup)
             names = required_cookie_names(cookies)
@@ -477,8 +765,11 @@ async def main_async() -> int:
     if args.persist_db:
         persist_to_db(cookies)
 
+    if args.persist_profile_db:
+        persist_profile_to_db(args.profile_dir)
+
     if not args.no_verify:
-        await verify_with_fbchat(args.output, user_agent, verify_proxy or None)
+        await verify_with_fbchat(args.output, user_agent, verify_proxy)
 
     return 0
 

@@ -14,11 +14,24 @@ export MURMUR_ENABLED="${MURMUR_ENABLED:-true}"
 export MURMUR_RESTART_SECONDS="${MURMUR_RESTART_SECONDS:-60}"
 export MURMUR_PID_FILE="${MURMUR_PID_FILE:-/tmp/murmur.pid}"
 export MURMUR_RESTART_NOW_FILE="${MURMUR_RESTART_NOW_FILE:-/tmp/murmur-restart-now}"
+export MURMUR_FACEBOOK_COOKIE_EXPIRED_EXIT_CODE="${MURMUR_FACEBOOK_COOKIE_EXPIRED_EXIT_CODE:-42}"
 export MURMUR_ADMIN_CONSOLE="${MURMUR_ADMIN_CONSOLE:-true}"
 export MURMUR_ADMIN_PATH="${MURMUR_ADMIN_PATH:-/murmur-admin}"
 export ENABLE_OLLAMA_API="${ENABLE_OLLAMA_API:-false}"
 export ENABLE_BASE_MODELS_CACHE="${ENABLE_BASE_MODELS_CACHE:-true}"
 export OPENWEBUI_ACCESS_LOG="${OPENWEBUI_ACCESS_LOG:-false}"
+export FB_LOGIN_AUTO_REFRESH="${FB_LOGIN_AUTO_REFRESH:-false}"
+export FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS="${FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS:-900}"
+export FB_LOGIN_AUTO_REFRESH_STAMP="${FB_LOGIN_AUTO_REFRESH_STAMP:-/tmp/murmur-facebook-login-refresh-last}"
+export FB_LOGIN_HEADLESS="${FB_LOGIN_HEADLESS:-true}"
+export FB_LOGIN_EXPORT_PATH="${FB_LOGIN_EXPORT_PATH:-$FB_COOKIES_PATH}"
+export FB_LOGIN_PERSIST_DB="${FB_LOGIN_PERSIST_DB:-true}"
+export FB_LOGIN_PROFILE_VAULT_ENABLED="${FB_LOGIN_PROFILE_VAULT_ENABLED:-true}"
+export FB_LOGIN_PROFILE_VAULT_RESTORE="${FB_LOGIN_PROFILE_VAULT_RESTORE:-true}"
+export FB_LOGIN_PROFILE_VAULT_OVERWRITE="${FB_LOGIN_PROFILE_VAULT_OVERWRITE:-false}"
+export FB_LOGIN_PROFILE_PERSIST_DB="${FB_LOGIN_PROFILE_PERSIST_DB:-true}"
+export FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES="${FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES:-true}"
+export FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES="${FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES:-true}"
 
 image_generation_model="${IMAGE_GENERATION_MODEL:-${CLOUDFLARE_IMAGE_MODEL:-}}"
 if [[ -n "${CF_ACCOUNT_ID:-}" && -n "${CF_API_TOKEN:-}" && "$image_generation_model" == @cf/* ]]; then
@@ -442,6 +455,93 @@ sleep_before_murmur_restart() {
   done
 }
 
+facebook_login_refresh_recent() {
+  local stamp_file="$FB_LOGIN_AUTO_REFRESH_STAMP"
+  local cooldown="$FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS"
+  if [[ ! -f "$stamp_file" ]]; then
+    return 1
+  fi
+
+  local now
+  now="$(date +%s)"
+  local last
+  last="$(cat "$stamp_file" 2>/dev/null || echo 0)"
+  if [[ ! "$last" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+
+  (( now - last < cooldown ))
+}
+
+restore_facebook_profile_from_db_state() {
+  local python_bin="${PYTHON_BIN:-/app/murmur/.venv/bin/python}"
+  if [[ ! -x "$python_bin" ]]; then
+    python_bin="python"
+  fi
+
+  if [[ "${FB_LOGIN_PROFILE_VAULT_ENABLED,,}" != "true" ]]; then
+    return 0
+  fi
+  if [[ "${FB_LOGIN_PROFILE_VAULT_RESTORE,,}" != "true" ]]; then
+    return 0
+  fi
+
+  local restore_cmd=("$python_bin" -m murmur.runtime_state restore-profile)
+  if [[ "${FB_LOGIN_PROFILE_VAULT_OVERWRITE,,}" == "true" ]]; then
+    restore_cmd+=(--overwrite)
+  fi
+  "${restore_cmd[@]}"
+}
+
+run_facebook_login_refresh() {
+  local python_bin="${PYTHON_BIN:-/app/murmur/.venv/bin/python}"
+  if [[ ! -x "$python_bin" ]]; then
+    python_bin="python"
+  fi
+
+  if [[ "${FB_LOGIN_AUTO_REFRESH,,}" != "true" ]]; then
+    echo "Facebook cookie auto-refresh is disabled."
+    return 1
+  fi
+  if [[ -z "${FB_LOGIN_PASSWORD:-}" || ( -z "${FB_LOGIN_EMAIL:-}" && -z "${FB_LOGIN_PHONE:-}" ) ]]; then
+    echo "Facebook cookie auto-refresh missing FB_LOGIN_EMAIL/FB_LOGIN_PHONE or FB_LOGIN_PASSWORD."
+    return 1
+  fi
+  if facebook_login_refresh_recent; then
+    echo "Facebook cookie auto-refresh skipped due to cooldown (${FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS}s)."
+    return 1
+  fi
+
+  echo "Facebook cookie expiry detected; attempting hosted browser login refresh."
+  restore_facebook_profile_from_db_state || true
+  local refresh_cmd=("$python_bin" /app/murmur/scripts/facebook_login_refresh.py --persist-db --no-backup)
+  if [[ "${FB_LOGIN_PROFILE_PERSIST_DB,,}" == "true" ]]; then
+    refresh_cmd+=(--persist-profile-db)
+  fi
+  if [[ "${FB_LOGIN_HEADLESS,,}" == "false" ]]; then
+    if command -v xvfb-run >/dev/null 2>&1; then
+      echo "Running Facebook login refresh in headed Chromium with Xvfb."
+      refresh_cmd=(xvfb-run -a "${refresh_cmd[@]}")
+    else
+      echo "Facebook login refresh requested headed mode, but xvfb-run is not installed."
+      return 1
+    fi
+  else
+    echo "Running Facebook login refresh in headless Chromium."
+  fi
+
+  if "${refresh_cmd[@]}"; then
+    rm -f "$FB_LOGIN_AUTO_REFRESH_STAMP"
+    echo "Facebook cookie auto-refresh succeeded."
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$FB_LOGIN_AUTO_REFRESH_STAMP")"
+  date +%s > "$FB_LOGIN_AUTO_REFRESH_STAMP"
+  echo "Facebook cookie auto-refresh failed."
+  return 1
+}
+
 write_cookies_from_db_state() {
   local python_bin="${PYTHON_BIN:-/app/murmur/.venv/bin/python}"
   if [[ ! -x "$python_bin" ]]; then
@@ -450,6 +550,8 @@ write_cookies_from_db_state() {
 
   "$python_bin" -m murmur.runtime_state write-cookies
 }
+
+restore_facebook_profile_from_db_state || true
 
 if write_cookies_from_db_state; then
   :
@@ -540,6 +642,11 @@ while true; do
       rm -f "$MURMUR_RESTART_NOW_FILE"
       RESTART_DELAY=1
       echo "Murmur restart requested by admin console."
+    fi
+    if [[ "$MURMUR_EXIT_CODE" == "$MURMUR_FACEBOOK_COOKIE_EXPIRED_EXIT_CODE" ]]; then
+      if run_facebook_login_refresh; then
+        RESTART_DELAY=1
+      fi
     fi
     echo "Murmur exited with code ${MURMUR_EXIT_CODE}; restarting in ${RESTART_DELAY}s."
     MURMUR_PID=""

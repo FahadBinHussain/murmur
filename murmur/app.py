@@ -40,6 +40,17 @@ DEFAULT_FB_UPLOAD_ENDPOINTS = [
     "https://upload.messenger.com/ajax/mercury/upload.php",
 ]
 
+FACEBOOK_COOKIE_EXPIRED_EXIT_CODE = 42
+FACEBOOK_COOKIE_EXPIRED_SIGNATURES = (
+    "async_get_token' not found",
+    "fb_dtsg' token not found",
+    "failed to load session from cookies",
+    "failed to extract session data",
+    "cookie json is missing required facebook session cookies",
+    "invalid fbstate format",
+    "mqtt endpoint not found",
+)
+
 
 class UserVisibleError(RuntimeError):
     pass
@@ -136,6 +147,20 @@ def env_bool(name: str, default: bool) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def facebook_cookie_expired_error(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = f"{type(current).__name__}: {current}".lower()
+        if any(signature in text for signature in FACEBOOK_COOKIE_EXPIRED_SIGNATURES):
+            return True
+        current = current.__cause__ or current.__context__
+
+    return False
+
+
 def parse_model_aliases(default_model: str) -> dict[str, str]:
     aliases = {"default": default_model}
     raw_aliases = os.getenv("OPENWEBUI_MODEL_ALIASES", "")
@@ -187,6 +212,8 @@ def normalize_proxy(value: str | None) -> str | None:
     if value is None or not value.strip():
         return None
     value = value.strip()
+    if value.lower() in {"direct", "none", "off", "false"}:
+        return None
     if "://" not in value:
         value = f"http://{value}"
     return value
@@ -696,7 +723,22 @@ class Murmur:
                 asyncio.run(self.warmup_openwebui())
             except Exception as exc:
                 print(f"Open WebUI warmup failed: {exc}")
+        asyncio.run(self.preflight_facebook_cookie_login())
         self.client.run()
+
+    async def preflight_facebook_cookie_login(self) -> None:
+        state = None
+        try:
+            state = await fb_state.State.from_json_cookies(
+                self.settings.fb_cookies_path,
+                self.settings.fb_user_agent,
+                self.settings.fb_proxy,
+            )
+            who = state.user_name or state.user_id
+            print(f"Messenger cookie preflight verified as {who} ({state.user_id}).")
+        finally:
+            if state is not None:
+                await state.close()
 
     def configure_facebook_http_timeout(self) -> None:
         timeout_seconds = max(30, self.settings.fb_http_timeout_seconds)
@@ -3390,4 +3432,15 @@ class Murmur:
 
 
 def main() -> None:
-    Murmur(load_settings()).run()
+    try:
+        Murmur(load_settings()).run()
+    except Exception as exc:
+        if facebook_cookie_expired_error(exc):
+            print(
+                "FACEBOOK_COOKIE_EXPIRED_DETECTED "
+                f"exit_code={FACEBOOK_COOKIE_EXPIRED_EXIT_CODE} "
+                f"error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise SystemExit(FACEBOOK_COOKIE_EXPIRED_EXIT_CODE) from exc
+        raise

@@ -12,3 +12,6 @@ __pycache__/
 venv/
 env/
 *.log
+.murmur-facebook-profile/
+output/
+.hf-upload-staging/
