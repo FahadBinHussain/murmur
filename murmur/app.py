@@ -2449,8 +2449,14 @@ class Murmur:
     def dedupe_model_options(self, options: list[ModelOption]) -> list[ModelOption]:
         deduped: dict[str, ModelOption] = {}
         for option in options:
+            if not self.is_usable_model_option(option):
+                continue
             deduped.setdefault(option.id, option)
         return sorted(deduped.values(), key=lambda model: model.id)
+
+    def is_usable_model_option(self, option: ModelOption) -> bool:
+        model_id = self.model_short_id(option.id).strip().lower()
+        return model_id not in {"arena-model"}
 
     async def fetch_openwebui_provider_map(
         self, session: aiohttp.ClientSession
