@@ -735,25 +735,15 @@ class Murmur:
                     print(f"Open WebUI model warmup {path} failed: {exc}")
 
             if self.settings.openwebui_warmup_chat:
-                model = await self.resolve_chat_model(
-                    "__warmup__",
-                    self.settings.openwebui_model,
-                )
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "stream": False,
-                    "max_tokens": 2,
-                    **self.openwebui_chat_metadata("__warmup__"),
-                }
-                body, status = await self.post_chat_completion(session, payload)
-                if status >= 400:
-                    print(
-                        "Open WebUI chat warmup returned "
-                        f"{status} for model {model}: {body}"
+                try:
+                    await self.ask_openwebui(
+                        "__warmup__",
+                        "Reply with OK.",
+                        self.settings.openwebui_model,
                     )
-                else:
                     print("Open WebUI chat completion warmed.")
+                except Exception as exc:
+                    print(f"Open WebUI chat warmup failed: {exc}")
 
     def configure_mqtt_proxy(self) -> None:
         if not self.settings.fb_mqtt_proxy:
@@ -1621,6 +1611,23 @@ class Murmur:
             )
 
         resolved = self.resolve_model_id_from_options(model, options)
+        resolved_option = self.model_option_from_options(resolved, options)
+        if resolved_option and not self.is_probably_chat_model(resolved_option):
+            fallback = self.fallback_chat_model(model, options)
+            if fallback:
+                print(
+                    "Configured chat model "
+                    f"{model!r} is not a chat model; using {fallback.id!r}."
+                )
+                resolved = fallback.id
+            else:
+                raise UserVisibleError(
+                    "Configured model is not a chat model: "
+                    f"{self.model_display(resolved_option)}\n"
+                    f"Use {self.settings.bot_prefix} model <provider> [connection] <number> "
+                    "with a chat/text model."
+                )
+
         if options and not self.model_id_in_options(resolved, options):
             fallback = self.fallback_chat_model(model, options)
             if fallback:
@@ -1641,7 +1648,17 @@ class Murmur:
         return resolved
 
     def model_id_in_options(self, model_id: str, options: list[ModelOption]) -> bool:
-        return any(self.equivalent_model_id(option.id, model_id) for option in options)
+        return self.model_option_from_options(model_id, options) is not None
+
+    def model_option_from_options(
+        self,
+        model_id: str,
+        options: list[ModelOption],
+    ) -> ModelOption | None:
+        for option in options:
+            if self.equivalent_model_id(option.id, model_id):
+                return option
+        return None
 
     def fallback_chat_model(
         self,
@@ -1698,6 +1715,11 @@ class Murmur:
             "video",
             "music",
             "classify-image",
+            "summarize",
+            "classify",
+            "detect",
+            "translate",
+            "voice-activity",
         }
         if capability_set & non_chat_capabilities:
             return False
@@ -1714,6 +1736,13 @@ class Murmur:
             "tts",
             "lyria",
             "ocr",
+            "indictrans",
+            "translate",
+            "translation",
+            "classification",
+            "summarization",
+            "object-detection",
+            "rerank",
         )
         return not any(term in text for term in non_chat_terms)
 
@@ -1774,12 +1803,51 @@ class Murmur:
                 f"Provider model syntax: {self.settings.bot_prefix} model openrouter 1"
             )
 
+        option = await self.ensure_thread_model_option(thread_id, model)
+        if option and not self.is_probably_chat_model(option):
+            return (
+                "That model is not a chat model:\n"
+                f"{self.model_display(option)}\n"
+                f"Use {self.settings.bot_prefix} model <provider> [connection] <number> "
+                "with a chat/text model."
+            )
+
+        if option is None and not self.is_probably_chat_model(
+            ModelOption(
+                id=model,
+                name=self.model_short_id(model),
+                provider=self.provider_for_model(model),
+            )
+        ):
+            return (
+                "That model does not look like a chat model:\n"
+                f"{self.model_short_id(model)}\n"
+                f"Use {self.settings.bot_prefix} models to pick a chat/text model."
+            )
+
         self.thread_models[thread_id] = model
         self.thread_model_aliases[thread_id] = self.model_label(thread_id, alias, model)
         self.thread_providers[thread_id] = self.provider_for_selected_model(
             thread_id, model
         )
         return f"Model set to {alias} ({self.model_short_id(model)}) for this thread."
+
+    async def ensure_thread_model_option(
+        self,
+        thread_id: str,
+        model_id: str,
+    ) -> ModelOption | None:
+        options = self.thread_model_options.get(thread_id)
+        if not options:
+            options = await self.fetch_model_options(include_all=True)
+            self.thread_model_options[thread_id] = options
+            groups = self.group_model_options(options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+        return self.model_option_from_options(model_id, options)
 
     async def set_thread_image_model(self, thread_id: str, name: str) -> str:
         alias = name.strip().lower().lstrip("@")
