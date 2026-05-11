@@ -291,7 +291,7 @@ The all-in-one public proxy includes a small admin console at:
 /murmur-admin
 ```
 
-It is protected with HTTP Basic Auth. By default it uses:
+It is protected with a signed-cookie login page. By default it uses:
 
 ```text
 username: WEBUI_ADMIN_EMAIL
@@ -305,6 +305,10 @@ MURMUR_ADMIN_CONSOLE=true
 MURMUR_ADMIN_PATH=/murmur-admin
 MURMUR_ADMIN_USERNAME=admin@example.com
 MURMUR_ADMIN_PASSWORD=strong-admin-password
+MURMUR_ADMIN_SESSION_SECONDS=86400
+MURMUR_ADMIN_SESSION_SECRET=
+MURMUR_ADMIN_COOKIE_SECURE=
+MURMUR_ADMIN_BASIC_AUTH=false
 ```
 
 The console has two runtime tools:
@@ -336,8 +340,8 @@ WEBUI_ADMIN_PASSWORD=strong-admin-password
 ENABLE_SIGNUP=false
 DEFAULT_USER_ROLE=pending
 
-OPENWEBUI_MODEL=openrouter/free
-OPENWEBUI_MODEL_ALIASES=free=openrouter/free
+OPENWEBUI_MODEL=openrouter_1.openai/gpt-oss-20b:free
+OPENWEBUI_MODEL_ALIASES=free=openrouter_1.openai/gpt-oss-20b:free
 
 OPENWEBUI_PROVIDER_SYNC=true
 OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
@@ -499,8 +503,12 @@ Direct PowerShell one-liner:
 |---|---|---|
 | `MURMUR_ADMIN_CONSOLE` | `true` | Enable the admin console. |
 | `MURMUR_ADMIN_PATH` | `/murmur-admin` | Admin console URL path. |
-| `MURMUR_ADMIN_USERNAME` | `WEBUI_ADMIN_EMAIL` or `admin` | HTTP Basic Auth username. |
-| `MURMUR_ADMIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | HTTP Basic Auth password. Required when enabled. |
+| `MURMUR_ADMIN_USERNAME` | `WEBUI_ADMIN_EMAIL` or `admin` | Admin login username. |
+| `MURMUR_ADMIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | Admin login password. Required when enabled. |
+| `MURMUR_ADMIN_SESSION_SECONDS` | `86400` | Admin session lifetime. |
+| `MURMUR_ADMIN_SESSION_SECRET` | `WEBUI_SECRET_KEY` | Optional separate secret for signed admin sessions. |
+| `MURMUR_ADMIN_COOKIE_SECURE` | auto | Force secure admin session cookies on or off. |
+| `MURMUR_ADMIN_BASIC_AUTH` | `false` | Optional legacy Basic Auth fallback. Keep disabled for the login page flow. |
 
 ### Images
 

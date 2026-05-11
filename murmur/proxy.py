@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import suppress
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import ClientError, WSMsgType, web
@@ -90,45 +92,129 @@ def no_store_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     return headers
 
 
-def admin_auth_error(request: web.Request) -> web.Response | None:
+def admin_session_cookie_name() -> str:
+    return os.getenv("MURMUR_ADMIN_SESSION_COOKIE", "murmur_admin_session")
+
+
+def admin_session_seconds() -> int:
+    return parse_positive_int(os.getenv("MURMUR_ADMIN_SESSION_SECONDS"), 86400)
+
+
+def admin_session_secret() -> str:
+    return (
+        os.getenv("MURMUR_ADMIN_SESSION_SECRET")
+        or os.getenv("WEBUI_SECRET_KEY")
+        or admin_password()
+        or ""
+    ).strip()
+
+
+def admin_cookie_secure(request: web.Request) -> bool:
+    configured = os.getenv("MURMUR_ADMIN_COOKIE_SECURE")
+    if configured is not None:
+        return configured.lower() in {"1", "true", "yes", "on"}
+    return request.secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+
+def admin_basic_auth_enabled() -> bool:
+    return env_bool("MURMUR_ADMIN_BASIC_AUTH", False)
+
+
+def admin_redirect_location(request: web.Request) -> str:
+    sign = request.query.get("__sign", "")
+    if sign:
+        return f"{admin_base_path()}?__sign={quote(sign, safe='')}"
+    return admin_base_path()
+
+
+def b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def sign_admin_payload(payload: str) -> str:
+    secret = admin_session_secret()
+    return b64url_encode(hmac.new(secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest())
+
+
+def make_admin_session(username: str) -> str:
+    payload = b64url_encode(
+        json.dumps(
+            {"u": username, "iat": int(time.time()), "n": secrets.token_urlsafe(12)},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    return f"{payload}.{sign_admin_payload(payload)}"
+
+
+def valid_admin_session(request: web.Request) -> bool:
+    secret = admin_session_secret()
+    if not secret:
+        return False
+
+    cookie = request.cookies.get(admin_session_cookie_name(), "")
+    payload, sep, signature = cookie.partition(".")
+    if not sep or not payload or not signature:
+        return False
+
+    expected = sign_admin_payload(payload)
+    if not secrets.compare_digest(signature, expected):
+        return False
+
+    try:
+        data = json.loads(b64url_decode(payload).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+    if str(data.get("u") or "") != admin_username():
+        return False
+
+    try:
+        issued_at = int(data.get("iat") or 0)
+    except (TypeError, ValueError):
+        return False
+    return issued_at > 0 and int(time.time()) - issued_at <= admin_session_seconds()
+
+
+def valid_basic_admin_auth(request: web.Request) -> bool:
     expected_password = admin_password()
     if not expected_password:
-        return web.Response(
-            text="Murmur admin console is missing MURMUR_ADMIN_PASSWORD or WEBUI_ADMIN_PASSWORD.",
-            status=503,
-            headers=no_store_headers(),
-        )
+        return False
 
     auth_header = request.headers.get("Authorization", "")
     scheme, _, token = auth_header.partition(" ")
     if scheme.lower() != "basic" or not token:
-        return admin_auth_required()
+        return False
 
     try:
         decoded = base64.b64decode(token).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
-        return admin_auth_required()
+        return False
 
     username, sep, password = decoded.partition(":")
-    if not sep:
-        return admin_auth_required()
-
-    if not (
-        secrets.compare_digest(username, admin_username())
+    return bool(
+        sep
+        and secrets.compare_digest(username, admin_username())
         and secrets.compare_digest(password, expected_password)
-    ):
-        return admin_auth_required()
-
-    return None
+    )
 
 
-def admin_auth_required() -> web.Response:
+def admin_authenticated(request: web.Request) -> bool:
+    return valid_admin_session(request) or (
+        admin_basic_auth_enabled() and valid_basic_admin_auth(request)
+    )
+
+
+def admin_missing_config_response() -> web.Response | None:
+    if admin_password() and admin_session_secret():
+        return None
     return web.Response(
-        text="Authentication required.",
-        status=401,
-        headers=no_store_headers(
-            {"WWW-Authenticate": 'Basic realm="Murmur Admin", charset="UTF-8"'}
-        ),
+        text="Murmur admin console is missing MURMUR_ADMIN_PASSWORD or WEBUI_ADMIN_PASSWORD.",
+        status=503,
+        headers=no_store_headers(),
     )
 
 
@@ -462,6 +548,95 @@ def admin_threads_html(csrf_token: str) -> str:
     """
 
 
+def admin_login_html(csrf_token: str, error: str = "", username: str = "") -> str:
+    token = html.escape(csrf_token)
+    error_html = f'<div class="notice error">{html.escape(error)}</div>' if error else ""
+    username_value = html.escape(username)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Murmur Admin Login</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #eef2f3;
+      color: #111827;
+    }}
+    main {{
+      width: min(420px, calc(100vw - 32px));
+      background: #fff;
+      border: 1px solid #d7dde2;
+      border-radius: 8px;
+      padding: 28px;
+      box-shadow: 0 18px 48px rgba(15, 23, 42, 0.14);
+    }}
+    h1 {{ margin: 0 0 6px; font-size: 24px; letter-spacing: 0; }}
+    p {{ margin: 0 0 22px; color: #5b6472; line-height: 1.5; }}
+    label {{ display: block; margin: 16px 0 8px; font-weight: 650; }}
+    input {{
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #c9d2dc;
+      border-radius: 6px;
+      padding: 11px 12px;
+      background: #fff;
+      color: #111827;
+      font: inherit;
+    }}
+    input:focus {{
+      outline: 2px solid #0f766e;
+      outline-offset: 2px;
+      border-color: #0f766e;
+    }}
+    button {{
+      width: 100%;
+      margin-top: 22px;
+      border: 0;
+      border-radius: 6px;
+      background: #0f766e;
+      color: white;
+      font-weight: 750;
+      padding: 11px 14px;
+      cursor: pointer;
+      font: inherit;
+    }}
+    .notice {{ margin: 16px 0 0; padding: 12px; border-radius: 6px; }}
+    .error {{ background: #fef2f2; color: #991b1b; }}
+    @media (prefers-color-scheme: dark) {{
+      body {{ background: #0f172a; color: #e5e7eb; }}
+      main {{ background: #111827; border-color: #374151; }}
+      p {{ color: #cbd5e1; }}
+      input {{ background: #0f172a; color: #e5e7eb; border-color: #4b5563; }}
+      .error {{ background: #7f1d1d; color: #fee2e2; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Murmur Admin</h1>
+    <p>Sign in to manage Messenger threads, cookies, and listener status.</p>
+    {error_html}
+    <form method="post" autocomplete="on">
+      <input type="hidden" name="csrf_token" value="{token}">
+      <input type="hidden" name="action" value="login">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" value="{username_value}" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign In</button>
+    </form>
+  </main>
+</body>
+</html>"""
+
+
 def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     token = html.escape(csrf_token)
     status = admin_status()
@@ -500,7 +675,24 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
       padding: 28px;
       box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
     }}
-    h1 {{ margin: 0 0 8px; font-size: 24px; }}
+    h1 {{ margin: 0; font-size: 24px; }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 8px;
+    }}
+    .logout {{
+      margin: 0;
+    }}
+    .logout button {{
+      margin: 0;
+      background: transparent;
+      color: #0f766e;
+      border: 1px solid #99c8c2;
+      padding: 8px 10px;
+    }}
     p {{ color: #4b5563; line-height: 1.5; }}
     h2 {{ margin: 32px 0 8px; font-size: 18px; }}
     section {{ margin-top: 28px; }}
@@ -542,6 +734,7 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
       th, td {{ border-color: #374151; }}
       th {{ color: #cbd5e1; }}
       code {{ color: #cbd5e1; }}
+      .logout button {{ color: #5eead4; border-color: #0f766e; }}
       .success {{ background: #064e3b; color: #d1fae5; }}
       .error {{ background: #7f1d1d; color: #fee2e2; }}
     }}
@@ -549,7 +742,14 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
 </head>
 <body>
   <main>
-    <h1>Murmur Admin</h1>
+    <div class="topbar">
+      <h1>Murmur Admin</h1>
+      <form class="logout" method="post">
+        <input type="hidden" name="csrf_token" value="{token}">
+        <input type="hidden" name="action" value="logout">
+        <button type="submit">Sign Out</button>
+      </form>
+    </div>
     {message_html}
     {error_html}
     {threads_html}
@@ -588,13 +788,66 @@ async def admin_get(request: web.Request) -> web.Response:
     )
 
 
-async def admin_post(request: web.Request) -> web.Response:
+async def admin_login_post(request: web.Request, form) -> web.Response:
+    if str(form.get("csrf_token") or "") != request.app["admin_csrf_token"]:
+        return web.Response(
+            text=admin_login_html(
+                request.app["admin_csrf_token"],
+                error="Invalid login token. Refresh and try again.",
+            ),
+            content_type="text/html",
+            status=400,
+            headers=no_store_headers(),
+        )
+
+    username = str(form.get("username") or "")
+    password = str(form.get("password") or "")
+    if not (
+        secrets.compare_digest(username, admin_username())
+        and secrets.compare_digest(password, admin_password())
+    ):
+        return web.Response(
+            text=admin_login_html(
+                request.app["admin_csrf_token"],
+                error="Invalid username or password.",
+                username=username,
+            ),
+            content_type="text/html",
+            status=401,
+            headers=no_store_headers(),
+        )
+
+    response = web.HTTPSeeOther(admin_redirect_location(request))
+    response.set_cookie(
+        admin_session_cookie_name(),
+        make_admin_session(username),
+        max_age=admin_session_seconds(),
+        path=admin_base_path(),
+        httponly=True,
+        secure=admin_cookie_secure(request),
+        samesite="Strict",
+    )
+    return response
+
+
+def admin_logout_response(request: web.Request) -> web.Response:
+    response = web.HTTPSeeOther(admin_redirect_location(request), headers=no_store_headers())
+    response.del_cookie(admin_session_cookie_name(), path=admin_base_path())
+    response.del_cookie(admin_session_cookie_name(), path="/")
+    return response
+
+
+async def admin_post(request: web.Request, form=None) -> web.Response:
     try:
-        form = await request.post()
+        if form is None:
+            form = await request.post()
+        action = str(form.get("action") or "upload_cookies")
+        if action == "logout":
+            return admin_logout_response(request)
+
         if str(form.get("csrf_token") or "") != request.app["admin_csrf_token"]:
             raise ValueError("Invalid admin form token. Refresh the page and try again.")
 
-        action = str(form.get("action") or "upload_cookies")
         if action == "save_threads":
             allowed_ids = {
                 str(thread_id).strip()
@@ -673,14 +926,34 @@ async def maybe_handle_admin_console(request: web.Request) -> web.Response | Non
     if not admin_console_enabled():
         return web.Response(text="Not found.", status=404)
 
-    auth_error = admin_auth_error(request)
-    if auth_error is not None:
-        return auth_error
+    config_error = admin_missing_config_response()
+    if config_error is not None:
+        return config_error
 
     if request.method == "GET":
-        return await admin_get(request)
+        if admin_authenticated(request):
+            return await admin_get(request)
+        return web.Response(
+            text=admin_login_html(request.app["admin_csrf_token"]),
+            content_type="text/html",
+            headers=no_store_headers(),
+        )
     if request.method == "POST":
-        return await admin_post(request)
+        form = await request.post()
+        action = str(form.get("action") or "")
+        if action == "login":
+            return await admin_login_post(request, form)
+        if not admin_authenticated(request):
+            return web.Response(
+                text=admin_login_html(
+                    request.app["admin_csrf_token"],
+                    error="Sign in again to continue.",
+                ),
+                content_type="text/html",
+                status=401,
+                headers=no_store_headers(),
+            )
+        return await admin_post(request, form)
     return web.Response(
         text="Method not allowed.",
         status=405,

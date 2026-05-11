@@ -40,6 +40,23 @@ class UserVisibleError(RuntimeError):
     pass
 
 
+class OpenWebUIResponseError(UserVisibleError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        body: object,
+        model: object | None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
+        self.model = model
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class Settings:
     openwebui_base_url: str
@@ -727,10 +744,14 @@ class Murmur:
                     "messages": [{"role": "user", "content": "Reply with OK."}],
                     "stream": False,
                     "max_tokens": 2,
+                    **self.openwebui_chat_metadata("__warmup__"),
                 }
                 body, status = await self.post_chat_completion(session, payload)
                 if status >= 400:
-                    print(f"Open WebUI chat warmup returned {status}: {body}")
+                    print(
+                        "Open WebUI chat warmup returned "
+                        f"{status} for model {model}: {body}"
+                    )
                 else:
                     print("Open WebUI chat completion warmed.")
 
@@ -1577,25 +1598,124 @@ class Murmur:
         )
 
     async def resolve_chat_model(self, thread_id: str, model: str) -> str:
+        model = model.strip()
+        if not model:
+            raise UserVisibleError("No chat model is configured.")
+
         cached = self.resolved_model_cache.get(model)
         if cached:
             return cached
 
-        options = self.thread_model_options.get(thread_id)
+        options = await self.fetch_openwebui_models()
         if not options:
-            options = await self.fetch_model_options(include_all=True)
-            if options:
-                self.thread_model_options[thread_id] = options
-                groups = self.group_model_options(options)
-                self.thread_provider_model_options[thread_id] = groups
-                self.thread_provider_options[thread_id] = sorted(
-                    groups,
-                    key=self.provider_sort_key,
+            options = self.thread_model_options.get(thread_id, [])
+
+        if options:
+            display_options = self.with_configured_models(options)
+            self.thread_model_options[thread_id] = display_options
+            groups = self.group_model_options(display_options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+
+        resolved = self.resolve_model_id_from_options(model, options)
+        if options and not self.model_id_in_options(resolved, options):
+            fallback = self.fallback_chat_model(model, options)
+            if fallback:
+                print(
+                    "Configured chat model "
+                    f"{model!r} was not returned by Open WebUI model APIs; "
+                    f"using {fallback.id!r}."
+                )
+                resolved = fallback.id
+            else:
+                raise UserVisibleError(
+                    "Configured chat model is not available in Open WebUI: "
+                    f"{model}\n"
+                    f"Use {self.settings.bot_prefix} models to pick a model."
                 )
 
-        resolved = self.resolve_model_id_from_options(model, options or [])
         self.resolved_model_cache[model] = resolved
         return resolved
+
+    def model_id_in_options(self, model_id: str, options: list[ModelOption]) -> bool:
+        return any(self.equivalent_model_id(option.id, model_id) for option in options)
+
+    def fallback_chat_model(
+        self,
+        requested: str,
+        options: list[ModelOption],
+    ) -> ModelOption | None:
+        provider = self.provider_for_model(requested)
+        family = self.provider_family(provider)
+        candidates = [
+            option
+            for option in options
+            if family == "openwebui"
+            or self.provider_family(self.option_provider(option)) == family
+        ]
+        if not candidates:
+            candidates = list(options)
+
+        chat_candidates = [
+            option for option in candidates if self.is_probably_chat_model(option)
+        ]
+        if not chat_candidates:
+            chat_candidates = candidates
+
+        preferred_ids = (
+            "openai/gpt-oss-20b:free",
+            "openai/gpt-oss-120b:free",
+            "meta-llama/llama-3.2-3b-instruct:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "qwen/qwen3-coder:free",
+            "@cf/openai/gpt-oss-20b",
+            "@cf/meta/llama-3.1-8b-instruct",
+        )
+
+        for pool in (
+            [option for option in chat_candidates if self.is_free_model(option)],
+            chat_candidates,
+        ):
+            for preferred_id in preferred_ids:
+                for option in pool:
+                    if self.model_short_id(option.id).lower() == preferred_id:
+                        return option
+            if pool:
+                return sorted(pool, key=lambda option: option.id)[0]
+
+        return None
+
+    def is_probably_chat_model(self, option: ModelOption) -> bool:
+        capability_set = set(option.capabilities)
+        non_chat_capabilities = {
+            "image",
+            "embeddings",
+            "speech",
+            "speech-to-text",
+            "video",
+            "music",
+            "classify-image",
+        }
+        if capability_set & non_chat_capabilities:
+            return False
+
+        text = f"{option.id} {option.name} {option.task or ''}".lower()
+        non_chat_terms = (
+            "flux",
+            "stable-diffusion",
+            "sdxl",
+            "dall-e",
+            "embedding",
+            "whisper",
+            "text-to-speech",
+            "tts",
+            "lyria",
+            "ocr",
+        )
+        return not any(term in text for term in non_chat_terms)
 
     def resolve_model_id_from_options(
         self,
@@ -2718,24 +2838,95 @@ class Murmur:
             remaining = remaining[cut:].strip()
         return [part for part in parts if part]
 
+    def openwebui_chat_metadata(self, thread_id: str) -> dict[str, str]:
+        digest = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:24]
+        message_id = f"murmur-{digest}-{time.time_ns()}"
+        return {
+            "chat_id": f"local:murmur:{digest}",
+            "id": message_id,
+        }
+
     async def ask_openwebui(self, thread_id: str, prompt: str, model: str) -> str:
         model = await self.resolve_chat_model(thread_id, model)
         messages = [{"role": "system", "content": self.settings.system_prompt}]
         messages.extend(self.history[thread_id])
         messages.append({"role": "user", "content": prompt})
 
-        answer = await self.request_chat_completion(
-            {
+        tried_models: set[str] = set()
+        errors: list[str] = []
+        while True:
+            tried_models.add(model)
+            payload = {
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                **self.openwebui_chat_metadata(thread_id),
             }
-        )
+            try:
+                answer = await self.request_chat_completion(payload)
+                break
+            except OpenWebUIResponseError as exc:
+                errors.append(str(exc))
+                retry_model = await self.next_chat_retry_model(
+                    thread_id,
+                    model,
+                    tried_models,
+                )
+                if not exc.retryable or retry_model is None:
+                    raise UserVisibleError("\n\n".join(errors)) from exc
+
+                print(
+                    "Open WebUI provider error for "
+                    f"{model!r}; retrying with {retry_model!r}."
+                )
+                model = retry_model
 
         self.history[thread_id].append({"role": "user", "content": prompt})
         self.history[thread_id].append({"role": "assistant", "content": answer})
         provider = self.provider_for_selected_model(thread_id, model)
         return f"{self.response_header(provider, model)}\n{answer}"
+
+    async def next_chat_retry_model(
+        self,
+        thread_id: str,
+        failed_model: str,
+        tried_models: set[str],
+    ) -> str | None:
+        options = self.thread_model_options.get(thread_id)
+        if not options:
+            options = self.with_configured_models(await self.fetch_openwebui_models())
+            self.thread_model_options[thread_id] = options
+            groups = self.group_model_options(options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+
+        failed_short = self.model_short_id(failed_model).lower()
+        failed_family = self.provider_family(self.provider_for_model(failed_model))
+        candidates = [
+            option
+            for option in options
+            if self.model_short_id(option.id).lower() == failed_short
+            and option.id not in tried_models
+            and self.is_probably_chat_model(option)
+            and self.provider_family(self.option_provider(option)) == failed_family
+        ]
+        if not candidates:
+            candidates = [
+                option
+                for option in options
+                if option.id not in tried_models
+                and self.is_probably_chat_model(option)
+                and self.provider_family(self.option_provider(option)) == failed_family
+                and self.is_free_model(option)
+            ]
+
+        if not candidates:
+            return None
+
+        return sorted(candidates, key=lambda option: self.provider_sort_key(option.provider))[0].id
 
     async def generate_image_response(
         self,
@@ -2933,14 +3124,44 @@ class Murmur:
                 body, status = await self.post_chat_completion(session, payload)
 
         if status >= 400:
-            raise UserVisibleError(self.openwebui_error_message(status, body))
+            model = payload.get("model")
+            raise OpenWebUIResponseError(
+                self.openwebui_error_message(status, body, model),
+                status=status,
+                body=body,
+                model=model,
+                retryable=self.is_retryable_openwebui_body(status, body),
+            )
+
+        model = payload.get("model")
+        if body is None:
+            raise OpenWebUIResponseError(
+                self.openwebui_null_response_message(status, model),
+                status=status,
+                body=body,
+                model=model,
+                retryable=True,
+            )
+
+        if not isinstance(body, dict):
+            raise OpenWebUIResponseError(
+                self.openwebui_error_message(status, body, model),
+                status=status,
+                body=body,
+                model=model,
+            )
 
         try:
-            if not isinstance(body, dict):
-                raise TypeError("Open WebUI returned a non-JSON object")
             return body["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError(f"Unexpected Open WebUI response: {body}") from exc
+            retryable = self.is_retryable_openwebui_body(status, body)
+            raise OpenWebUIResponseError(
+                self.openwebui_error_message(status, body, model),
+                status=status,
+                body=body,
+                model=model,
+                retryable=retryable,
+            ) from exc
 
     async def post_chat_completion(
         self, session: aiohttp.ClientSession, payload: dict
@@ -2958,8 +3179,14 @@ class Murmur:
         except Exception:
             return await response.text()
 
-    def openwebui_error_message(self, status: int, body: object) -> str:
-        message = f"Open WebUI error {status}: {body}"
+    def openwebui_error_message(
+        self,
+        status: int,
+        body: object,
+        model: object | None = None,
+    ) -> str:
+        model_text = f" for model {model}" if model else ""
+        message = f"Open WebUI error {status}{model_text}: {body}"
         if self.is_rate_limit_error(body):
             message += (
                 "\n\nRate limit hit. Try another provider/model: "
@@ -2968,6 +3195,36 @@ class Murmur:
                 f"{self.settings.bot_prefix} model <provider> [connection] <number>."
             )
         return message
+
+    def openwebui_null_response_message(
+        self,
+        status: int,
+        model: object | None = None,
+    ) -> str:
+        message = self.openwebui_error_message(status, None, model)
+        return (
+            f"{message}\n"
+            "Open WebUI logged: Provider returned error\n"
+            "Open WebUI returned HTTP 200 with a null JSON body, so Murmur "
+            "could not read a deeper provider payload from the response."
+        )
+
+    def is_retryable_openwebui_body(self, status: int, body: object) -> bool:
+        if status in {408, 409, 425, 429} or status >= 500:
+            return True
+        text = str(body).lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "provider returned error",
+                "rate limit",
+                "rate_limit",
+                "quota",
+                "too many requests",
+                "temporarily unavailable",
+                "timeout",
+            )
+        )
 
     def is_rate_limit_error(self, body: object) -> bool:
         text = str(body).lower()
