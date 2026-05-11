@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import suppress
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import aiohttp
 from aiohttp import ClientError, WSMsgType, web
@@ -25,7 +25,13 @@ from .admin_state import (
     thread_registry_path,
     write_thread_allowlist,
 )
-from .runtime_state import persist_cookie_state
+from .runtime_state import (
+    RuntimeStateMissing,
+    RuntimeStateNotConfigured,
+    load_facebook_proxy_state,
+    persist_cookie_state,
+    persist_facebook_proxy_state,
+)
 
 
 HOP_BY_HOP_HEADERS = {
@@ -449,41 +455,94 @@ def write_cookie_file(cookies: list[dict]) -> Path:
     return path
 
 
-def restart_murmur_listener() -> str:
+def restart_murmur_listener(saved_label: str = "Cookie saved") -> str:
     try:
         restart_file = admin_restart_now_file()
         restart_file.parent.mkdir(parents=True, exist_ok=True)
         restart_file.write_text(str(int(time.time())), encoding="utf-8")
     except OSError as exc:
-        return f"Cookie saved. Restart marker could not be written: {exc}"
+        return f"{saved_label}. Restart marker could not be written: {exc}"
 
     pid_file = admin_pid_file()
     try:
         pid_text = pid_file.read_text(encoding="utf-8").strip()
         pid = int(pid_text)
     except (OSError, ValueError):
-        return "Cookie saved. Murmur listener is already stopped or sleeping; supervisor wake-up requested."
+        return f"{saved_label}. Murmur listener is already stopped or sleeping; supervisor wake-up requested."
 
     if pid <= 0:
-        return "Cookie saved. Murmur listener PID was invalid; supervisor wake-up requested."
+        return f"{saved_label}. Murmur listener PID was invalid; supervisor wake-up requested."
 
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return "Cookie saved. Murmur listener was already stopped; supervisor wake-up requested."
+        return f"{saved_label}. Murmur listener was already stopped; supervisor wake-up requested."
     except OSError as exc:
-        return f"Cookie saved. Supervisor wake-up requested, but listener stop failed: {exc}"
+        return f"{saved_label}. Supervisor wake-up requested, but listener stop failed: {exc}"
 
-    return "Cookie saved. Murmur listener restart requested."
+    return f"{saved_label}. Murmur listener restart requested."
+
+
+def normalize_admin_proxy(raw_proxy: str) -> str:
+    proxy = raw_proxy.strip()
+    if not proxy:
+        return ""
+    if "://" not in proxy:
+        proxy = f"http://{proxy}"
+
+    parsed = urlparse(proxy)
+    if parsed.scheme.lower() not in {
+        "http",
+        "https",
+        "socks4",
+        "socks4a",
+        "socks5",
+        "socks5h",
+    }:
+        raise ValueError("Proxy URL must use http, https, socks4, socks4a, socks5, or socks5h.")
+    if not parsed.hostname:
+        raise ValueError("Proxy URL is missing a host.")
+    return proxy
+
+
+def admin_facebook_proxy_values() -> tuple[dict[str, str], str]:
+    try:
+        state = load_facebook_proxy_state()
+        return {
+            "FB_PROXY": str(state.get("FB_PROXY") or ""),
+            "FB_UPLOAD_PROXY": str(state.get("FB_UPLOAD_PROXY") or ""),
+            "FB_MQTT_PROXY": str(state.get("FB_MQTT_PROXY") or ""),
+        }, "runtime state"
+    except (RuntimeStateMissing, RuntimeStateNotConfigured):
+        return {
+            "FB_PROXY": str(os.getenv("FB_PROXY") or ""),
+            "FB_UPLOAD_PROXY": str(os.getenv("FB_UPLOAD_PROXY") or ""),
+            "FB_MQTT_PROXY": str(os.getenv("FB_MQTT_PROXY") or ""),
+        }, "environment"
+    except Exception as exc:
+        print(f"DB proxy state unavailable: {compact_log_value(exc)}", flush=True)
+        return {
+            "FB_PROXY": str(os.getenv("FB_PROXY") or ""),
+            "FB_UPLOAD_PROXY": str(os.getenv("FB_UPLOAD_PROXY") or ""),
+            "FB_MQTT_PROXY": str(os.getenv("FB_MQTT_PROXY") or ""),
+        }, "environment fallback"
 
 
 def admin_status() -> dict[str, str]:
     cookie_path = admin_cookie_path()
     pid_file = admin_pid_file()
+    proxy_values, proxy_source = admin_facebook_proxy_values()
+    login_proxy = proxy_values.get("FB_PROXY") or ""
+    upload_proxy = proxy_values.get("FB_UPLOAD_PROXY") or login_proxy
+    mqtt_proxy = proxy_values.get("FB_MQTT_PROXY") or login_proxy
     status = {
         "cookie_path": str(cookie_path),
         "pid_file": str(pid_file),
         "restart_file": str(admin_restart_now_file()),
+        "facebook_login_proxy": "configured" if login_proxy else "empty",
+        "facebook_upload_proxy": "configured" if upload_proxy else "empty",
+        "facebook_mqtt_proxy": "configured" if mqtt_proxy else "empty",
+        "facebook_proxy_source": proxy_source,
     }
     try:
         stat = cookie_path.stat()
@@ -681,6 +740,14 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     token = html.escape(csrf_token)
     status = admin_status()
     threads_html = admin_threads_html(token)
+    proxy_values, proxy_source = admin_facebook_proxy_values()
+    login_proxy_value = proxy_values.get("FB_PROXY") or ""
+    upload_proxy_value = proxy_values.get("FB_UPLOAD_PROXY") or login_proxy_value
+    mqtt_proxy_value = proxy_values.get("FB_MQTT_PROXY") or login_proxy_value
+    login_proxy_html = html.escape(login_proxy_value)
+    upload_proxy_html = html.escape(upload_proxy_value)
+    mqtt_proxy_html = html.escape(mqtt_proxy_value)
+    proxy_source_html = html.escape(proxy_source)
     rows = "\n".join(
         "<tr>"
         f"<th>{html.escape(key.replace('_', ' ').title())}</th>"
@@ -737,7 +804,7 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     h2 {{ margin: 32px 0 8px; font-size: 18px; }}
     section {{ margin-top: 28px; }}
     label {{ display: block; margin: 18px 0 8px; font-weight: 650; }}
-    input[type="file"], textarea {{
+    input[type="file"], input[type="text"], textarea {{
       width: 100%;
       box-sizing: border-box;
       border: 1px solid #cbd5e1;
@@ -770,7 +837,7 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
       body {{ background: #0f172a; color: #e5e7eb; }}
       main {{ background: #111827; border-color: #374151; }}
       p {{ color: #cbd5e1; }}
-      input[type="file"], textarea {{ background: #0f172a; color: #e5e7eb; border-color: #4b5563; }}
+      input[type="file"], input[type="text"], textarea {{ background: #0f172a; color: #e5e7eb; border-color: #4b5563; }}
       th, td {{ border-color: #374151; }}
       th {{ color: #cbd5e1; }}
       code {{ color: #cbd5e1; }}
@@ -793,6 +860,22 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     {message_html}
     {error_html}
     {threads_html}
+    <section>
+    <h2>Facebook Proxies</h2>
+    <p>Keep login and upload on a stable proxy. Use a separate realtime proxy when MQTT/WebSocket is the failing part.</p>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{token}">
+      <input type="hidden" name="action" value="save_proxies">
+      <label for="facebook_proxy">Login proxy</label>
+      <input id="facebook_proxy" name="facebook_proxy" type="text" value="{login_proxy_html}" autocomplete="off" spellcheck="false" placeholder="http://username:password@host:port">
+      <label for="facebook_upload_proxy">Upload proxy</label>
+      <input id="facebook_upload_proxy" name="facebook_upload_proxy" type="text" value="{upload_proxy_html}" autocomplete="off" spellcheck="false" placeholder="blank uses login proxy">
+      <label for="facebook_mqtt_proxy">Realtime MQTT proxy</label>
+      <input id="facebook_mqtt_proxy" name="facebook_mqtt_proxy" type="text" value="{mqtt_proxy_html}" autocomplete="off" spellcheck="false" placeholder="blank uses login proxy">
+      <p class="muted">Current source: {proxy_source_html}. Blank upload or realtime fields fall back to the login proxy.</p>
+      <button type="submit">Save Proxies</button>
+    </form>
+    </section>
     <section>
     <h2>Facebook Cookies</h2>
     <p>Upload a fresh Facebook cookie JSON file. Murmur writes it to the active cookie path and restarts only the Messenger listener.</p>
@@ -897,8 +980,41 @@ async def admin_post(request: web.Request, form=None) -> web.Response:
             )
             return admin_redirect_response(request, message=message)
 
+        if action in {"save_proxy", "save_proxies"}:
+            login_proxy = normalize_admin_proxy(str(form.get("facebook_proxy") or ""))
+            upload_proxy = normalize_admin_proxy(
+                str(form.get("facebook_upload_proxy") or "")
+            )
+            mqtt_proxy = normalize_admin_proxy(str(form.get("facebook_mqtt_proxy") or ""))
+            if action == "save_proxy":
+                upload_proxy = login_proxy
+                mqtt_proxy = login_proxy
+            proxies = {
+                "FB_PROXY": login_proxy,
+                "FB_UPLOAD_PROXY": upload_proxy,
+                "FB_MQTT_PROXY": mqtt_proxy,
+            }
+            state_sync_message = await asyncio.to_thread(
+                persist_facebook_proxy_state, proxies
+            )
+            restart_message = restart_murmur_listener("Proxy settings saved")
+            message = (
+                "Saved Facebook proxies for login, upload, and realtime MQTT. "
+                f"{state_sync_message} {restart_message}"
+            )
+            print(
+                "MURMUR_ADMIN_PROXY_UPDATE "
+                f"login_configured={bool(login_proxy)} "
+                f"upload_configured={bool(upload_proxy)} "
+                f"mqtt_configured={bool(mqtt_proxy)} "
+                f"state_sync={compact_log_value(state_sync_message)} "
+                f"restart={compact_log_value(restart_message)}",
+                flush=True,
+            )
+            return admin_redirect_response(request, message=message)
+
         if action == "restart_murmur":
-            message = restart_murmur_listener()
+            message = restart_murmur_listener("Manual restart requested")
             print(
                 "MURMUR_ADMIN_RESTART_REQUEST "
                 f"result={compact_log_value(message)}",

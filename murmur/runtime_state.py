@@ -11,6 +11,7 @@ from typing import Any
 
 
 COOKIE_STATE_KEY = "facebook_cookies"
+FACEBOOK_PROXY_STATE_KEY = "facebook_proxies"
 
 
 class RuntimeStateError(Exception):
@@ -85,8 +86,8 @@ def ensure_state_table(connection: Any) -> None:
         )
 
 
-def encode_cookie_state(cookies: list[dict]) -> tuple[str, str]:
-    raw = json.dumps(cookies, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+def encode_json_state(payload: Any) -> tuple[str, str]:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if not env_bool("MURMUR_COOKIE_STATE_ENCRYPT", True):
         return base64.b64encode(raw).decode("ascii"), "base64-json"
 
@@ -102,7 +103,11 @@ def encode_cookie_state(cookies: list[dict]) -> tuple[str, str]:
     return Fernet(key).encrypt(raw).decode("ascii"), "fernet:v1"
 
 
-def decode_cookie_state(value: str, encoding: str) -> str:
+def encode_cookie_state(cookies: list[dict]) -> tuple[str, str]:
+    return encode_json_state(cookies)
+
+
+def decode_json_state(value: str, encoding: str) -> str:
     if encoding == "base64-json":
         return base64.b64decode(value).decode("utf-8")
     if encoding == "plain-json":
@@ -118,7 +123,11 @@ def decode_cookie_state(value: str, encoding: str) -> str:
 
         key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
         return Fernet(key).decrypt(value.encode("ascii")).decode("utf-8")
-    raise RuntimeStateError(f"unsupported cookie state encoding: {encoding}")
+    raise RuntimeStateError(f"unsupported runtime state encoding: {encoding}")
+
+
+def decode_cookie_state(value: str, encoding: str) -> str:
+    return decode_json_state(value, encoding)
 
 
 def validate_cookie_state_text(cookie_text: str) -> None:
@@ -164,6 +173,72 @@ def persist_cookie_state(cookies: list[dict]) -> str:
         return f"DB cookie state sync failed: {exc}"
 
     return "DB cookie state synced."
+
+
+def persist_facebook_proxy_state(proxies: dict[str, str]) -> str:
+    if not env_bool("MURMUR_PERSIST_COOKIES_TO_DB", True):
+        return "DB proxy state sync disabled."
+    if not state_database_url():
+        return "DB proxy state not synced: missing MURMUR_STATE_DATABASE_URL or DATABASE_URL."
+
+    cleaned = {
+        key: str(proxies.get(key) or "").strip()
+        for key in ("FB_PROXY", "FB_UPLOAD_PROXY", "FB_MQTT_PROXY")
+    }
+
+    try:
+        value, encoding = encode_json_state(cleaned)
+        from psycopg import sql
+
+        with connect_state_db() as connection:
+            ensure_state_table(connection)
+            table = sql.Identifier(state_table_name())
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    sql.SQL(
+                        """
+                        INSERT INTO {table} (key, value, encoding, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value,
+                            encoding = EXCLUDED.encoding,
+                            updated_at = NOW()
+                        """
+                    ).format(table=table),
+                    (FACEBOOK_PROXY_STATE_KEY, value, encoding),
+                )
+    except Exception as exc:
+        return f"DB proxy state sync failed: {exc}"
+
+    return "DB proxy state synced."
+
+
+def load_facebook_proxy_state() -> dict[str, str]:
+    from psycopg import sql
+
+    with connect_state_db() as connection:
+        ensure_state_table(connection)
+        table = sql.Identifier(state_table_name())
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("SELECT value, encoding FROM {table} WHERE key = %s").format(
+                    table=table
+                ),
+                (FACEBOOK_PROXY_STATE_KEY,),
+            )
+            row = cursor.fetchone()
+
+    if not row:
+        raise RuntimeStateMissing("no stored Facebook proxy state")
+
+    raw = json.loads(decode_json_state(str(row[0]), str(row[1])))
+    if not isinstance(raw, dict):
+        raise RuntimeStateError("stored Facebook proxy state is not an object")
+
+    return {
+        key: str(raw.get(key) or "").strip()
+        for key in ("FB_PROXY", "FB_UPLOAD_PROXY", "FB_MQTT_PROXY")
+    }
 
 
 def load_cookie_state_text() -> str:

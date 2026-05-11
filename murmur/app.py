@@ -28,6 +28,11 @@ from .admin_state import (
     thread_registry_path,
     write_thread_registry,
 )
+from .runtime_state import (
+    RuntimeStateMissing,
+    RuntimeStateNotConfigured,
+    load_facebook_proxy_state,
+)
 
 
 DEFAULT_FB_UPLOAD_ENDPOINTS = [
@@ -175,6 +180,10 @@ def env_csv(name: str, default: list[str]) -> list[str]:
 
 def env_proxy(name: str) -> str | None:
     value = os.getenv(name)
+    return normalize_proxy(value)
+
+
+def normalize_proxy(value: str | None) -> str | None:
     if value is None or not value.strip():
         return None
     value = value.strip()
@@ -183,12 +192,38 @@ def env_proxy(name: str) -> str | None:
     return value
 
 
+def load_runtime_proxy_state() -> dict[str, str]:
+    if not env_bool("MURMUR_LOAD_PROXY_STATE", True):
+        return {}
+    try:
+        return load_facebook_proxy_state()
+    except (RuntimeStateMissing, RuntimeStateNotConfigured):
+        return {}
+    except Exception as exc:
+        print(f"DB proxy state unavailable: {exc}")
+        return {}
+
+
+def setting_proxy(
+    proxy_state: dict[str, str], key: str, fallback: str | None = None
+) -> str | None:
+    if key in proxy_state:
+        raw = proxy_state.get(key)
+    else:
+        raw = os.getenv(key)
+    return normalize_proxy(raw) or fallback
+
+
 def load_settings() -> Settings:
     load_dotenv()
+    proxy_state = load_runtime_proxy_state()
 
     port = os.getenv("PORT", "8080")
     openwebui_base_url = os.getenv("OPENWEBUI_BASE_URL") or f"http://127.0.0.1:{port}"
     openwebui_model = os.environ["OPENWEBUI_MODEL"]
+    fb_proxy = setting_proxy(proxy_state, "FB_PROXY")
+    fb_upload_proxy = setting_proxy(proxy_state, "FB_UPLOAD_PROXY", fb_proxy)
+    fb_mqtt_proxy = setting_proxy(proxy_state, "FB_MQTT_PROXY", fb_proxy)
 
     allowed_thread_ids = {
         thread_id.strip()
@@ -216,11 +251,11 @@ def load_settings() -> Settings:
         image_steps=env_int("IMAGE_STEPS"),
         fb_cookies_path=os.getenv("FB_COOKIES_PATH", "cookies.json"),
         fb_user_agent=os.getenv("FB_USER_AGENT") or None,
-        fb_proxy=env_proxy("FB_PROXY"),
-        fb_mqtt_proxy=env_proxy("FB_MQTT_PROXY"),
+        fb_proxy=fb_proxy,
+        fb_mqtt_proxy=fb_mqtt_proxy,
         fb_mqtt_watchdog_seconds=int(os.getenv("FB_MQTT_WATCHDOG_SECONDS", "15")),
         fb_http_timeout_seconds=int(os.getenv("FB_HTTP_TIMEOUT_SECONDS", "120")),
-        fb_upload_proxy=env_proxy("FB_UPLOAD_PROXY"),
+        fb_upload_proxy=fb_upload_proxy,
         fb_upload_retries=int(os.getenv("FB_UPLOAD_RETRIES", "3")),
         fb_upload_endpoints=env_csv(
             "FB_UPLOAD_ENDPOINTS", DEFAULT_FB_UPLOAD_ENDPOINTS

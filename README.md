@@ -265,6 +265,7 @@ MURMUR_STATE_DATABASE_URL=
 MURMUR_STATE_TABLE=murmur_runtime_state
 MURMUR_COOKIE_STATE_ENCRYPT=true
 MURMUR_COOKIE_STATE_SECRET=
+MURMUR_LOAD_PROXY_STATE=true
 
 FB_COOKIES_PATH=cookies.json
 FB_COOKIES_JSON_B64=
@@ -278,6 +279,8 @@ FB_UPLOAD_RETRIES=3
 ```
 
 Use `ALLOWED_THREAD_IDS` or the admin console thread gate in production so Murmur only answers in threads you control.
+
+The admin console can also save Facebook proxy URLs to runtime state. Keep the login/upload proxy stable, and use a separate realtime MQTT proxy when the Messenger listener is the failing part.
 
 Messenger one-to-one user messages may be limited by end-to-end encryption. Group chats, room chats, and pages are usually better test targets for `fbchat-muqit`.
 
@@ -471,12 +474,13 @@ Direct PowerShell one-liner:
 | `MURMUR_STATE_TABLE` | `murmur_runtime_state` | PostgreSQL table for Murmur runtime state. Created automatically. |
 | `MURMUR_COOKIE_STATE_ENCRYPT` | `true` | Encrypt stored cookie JSON before writing it to PostgreSQL. |
 | `MURMUR_COOKIE_STATE_SECRET` | `WEBUI_SECRET_KEY` | Optional separate encryption secret for cookie state. |
+| `MURMUR_LOAD_PROXY_STATE` | `true` | Load admin-saved Facebook proxy runtime state from PostgreSQL. |
 | `FB_COOKIES_PATH` | `cookies.json` | Path to Facebook cookies JSON. |
 | `FB_COOKIES_JSON_B64` | empty | Optional bootstrap base64 cookies JSON for hosted deployments. |
 | `FB_USER_AGENT` | library default | Browser user-agent paired with exported cookies. |
 | `FB_PROXY` | empty | Proxy for Facebook HTTP/login requests. |
-| `FB_UPLOAD_PROXY` | empty | Proxy for Messenger attachment uploads. |
-| `FB_MQTT_PROXY` | empty | Proxy for Messenger realtime MQTT. |
+| `FB_UPLOAD_PROXY` | `FB_PROXY` | Proxy for Messenger attachment uploads. |
+| `FB_MQTT_PROXY` | `FB_PROXY` | Proxy for Messenger realtime MQTT. |
 | `FB_HTTP_TIMEOUT_SECONDS` | `120` | Facebook HTTP timeout. |
 | `FB_MQTT_WATCHDOG_SECONDS` | `15` | Restart listener if MQTT stops silently. |
 | `FB_UPLOAD_RETRIES` | `3` | Attachment upload retry count. |
