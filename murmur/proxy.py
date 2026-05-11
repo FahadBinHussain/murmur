@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import suppress
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 import aiohttp
 from aiohttp import ClientError, WSMsgType, web
@@ -120,11 +120,33 @@ def admin_basic_auth_enabled() -> bool:
     return env_bool("MURMUR_ADMIN_BASIC_AUTH", False)
 
 
-def admin_redirect_location(request: web.Request) -> str:
+def admin_redirect_location(
+    request: web.Request,
+    *,
+    message: str = "",
+    error: str = "",
+    login_error: str = "",
+) -> str:
+    query: dict[str, str] = {}
     sign = request.query.get("__sign", "")
     if sign:
-        return f"{admin_base_path()}?__sign={quote(sign, safe='')}"
-    return admin_base_path()
+        query["__sign"] = sign
+    if message:
+        query["admin_message"] = compact_log_value(message, 1200)
+    if error:
+        query["admin_error"] = compact_log_value(error, 1200)
+    if login_error:
+        query["login_error"] = compact_log_value(login_error, 1200)
+
+    suffix = f"?{urlencode(query)}" if query else ""
+    return f"{admin_base_path()}{suffix}"
+
+
+def admin_redirect_response(request: web.Request, **params: str) -> web.Response:
+    return web.HTTPSeeOther(
+        admin_redirect_location(request, **params),
+        headers=no_store_headers(),
+    )
 
 
 def b64url_encode(raw: bytes) -> str:
@@ -177,6 +199,24 @@ def valid_admin_session(request: web.Request) -> bool:
     except (TypeError, ValueError):
         return False
     return issued_at > 0 and int(time.time()) - issued_at <= admin_session_seconds()
+
+
+def admin_csrf_token(request: web.Request, purpose: str = "admin") -> str:
+    secret = admin_session_secret()
+    if not secret:
+        return ""
+
+    session_cookie = request.cookies.get(admin_session_cookie_name(), "")
+    seed = session_cookie if session_cookie else f"anonymous:{purpose}:{admin_username()}"
+    payload = f"csrf:{purpose}:{seed}"
+    return b64url_encode(
+        hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).digest()
+    )
+
+
+def valid_admin_csrf(request: web.Request, token: str, purpose: str = "admin") -> bool:
+    expected = admin_csrf_token(request, purpose)
+    return bool(token and expected and secrets.compare_digest(token, expected))
 
 
 def valid_basic_admin_auth(request: web.Request) -> bool:
@@ -782,22 +822,21 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
 
 async def admin_get(request: web.Request) -> web.Response:
     return web.Response(
-        text=admin_html(request.app["admin_csrf_token"]),
+        text=admin_html(
+            admin_csrf_token(request),
+            message=str(request.query.get("admin_message") or ""),
+            error=str(request.query.get("admin_error") or ""),
+        ),
         content_type="text/html",
         headers=no_store_headers(),
     )
 
 
 async def admin_login_post(request: web.Request, form) -> web.Response:
-    if str(form.get("csrf_token") or "") != request.app["admin_csrf_token"]:
-        return web.Response(
-            text=admin_login_html(
-                request.app["admin_csrf_token"],
-                error="Invalid login token. Refresh and try again.",
-            ),
-            content_type="text/html",
-            status=400,
-            headers=no_store_headers(),
+    if not valid_admin_csrf(request, str(form.get("csrf_token") or ""), "login"):
+        return admin_redirect_response(
+            request,
+            login_error="Invalid login token. Refresh and try again.",
         )
 
     username = str(form.get("username") or "")
@@ -806,18 +845,12 @@ async def admin_login_post(request: web.Request, form) -> web.Response:
         secrets.compare_digest(username, admin_username())
         and secrets.compare_digest(password, admin_password())
     ):
-        return web.Response(
-            text=admin_login_html(
-                request.app["admin_csrf_token"],
-                error="Invalid username or password.",
-                username=username,
-            ),
-            content_type="text/html",
-            status=401,
-            headers=no_store_headers(),
+        return admin_redirect_response(
+            request,
+            login_error="Invalid username or password.",
         )
 
-    response = web.HTTPSeeOther(admin_redirect_location(request))
+    response = admin_redirect_response(request)
     response.set_cookie(
         admin_session_cookie_name(),
         make_admin_session(username),
@@ -831,7 +864,7 @@ async def admin_login_post(request: web.Request, form) -> web.Response:
 
 
 def admin_logout_response(request: web.Request) -> web.Response:
-    response = web.HTTPSeeOther(admin_redirect_location(request), headers=no_store_headers())
+    response = admin_redirect_response(request)
     response.del_cookie(admin_session_cookie_name(), path=admin_base_path())
     response.del_cookie(admin_session_cookie_name(), path="/")
     return response
@@ -845,7 +878,7 @@ async def admin_post(request: web.Request, form=None) -> web.Response:
         if action == "logout":
             return admin_logout_response(request)
 
-        if str(form.get("csrf_token") or "") != request.app["admin_csrf_token"]:
+        if not valid_admin_csrf(request, str(form.get("csrf_token") or "")):
             raise ValueError("Invalid admin form token. Refresh the page and try again.")
 
         if action == "save_threads":
@@ -862,11 +895,7 @@ async def admin_post(request: web.Request, form=None) -> web.Response:
                 f"allowed_count={len(allowed_ids)}",
                 flush=True,
             )
-            return web.Response(
-                text=admin_html(request.app["admin_csrf_token"], message=message),
-                content_type="text/html",
-                headers=no_store_headers(),
-            )
+            return admin_redirect_response(request, message=message)
 
         if action == "restart_murmur":
             message = restart_murmur_listener()
@@ -875,11 +904,7 @@ async def admin_post(request: web.Request, form=None) -> web.Response:
                 f"result={compact_log_value(message)}",
                 flush=True,
             )
-            return web.Response(
-                text=admin_html(request.app["admin_csrf_token"], message=message),
-                content_type="text/html",
-                headers=no_store_headers(),
-            )
+            return admin_redirect_response(request, message=message)
 
         if action != "upload_cookies":
             raise ValueError(f"Unknown admin action: {action}")
@@ -904,18 +929,9 @@ async def admin_post(request: web.Request, form=None) -> web.Response:
             f"restart={compact_log_value(restart_message.strip())}",
             flush=True,
         )
-        return web.Response(
-            text=admin_html(request.app["admin_csrf_token"], message=message),
-            content_type="text/html",
-            headers=no_store_headers(),
-        )
+        return admin_redirect_response(request, message=message)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        return web.Response(
-            text=admin_html(request.app["admin_csrf_token"], error=str(exc)),
-            content_type="text/html",
-            status=400,
-            headers=no_store_headers(),
-        )
+        return admin_redirect_response(request, error=str(exc))
 
 
 async def maybe_handle_admin_console(request: web.Request) -> web.Response | None:
@@ -934,7 +950,10 @@ async def maybe_handle_admin_console(request: web.Request) -> web.Response | Non
         if admin_authenticated(request):
             return await admin_get(request)
         return web.Response(
-            text=admin_login_html(request.app["admin_csrf_token"]),
+            text=admin_login_html(
+                admin_csrf_token(request, "login"),
+                error=str(request.query.get("login_error") or ""),
+            ),
             content_type="text/html",
             headers=no_store_headers(),
         )
@@ -944,14 +963,9 @@ async def maybe_handle_admin_console(request: web.Request) -> web.Response | Non
         if action == "login":
             return await admin_login_post(request, form)
         if not admin_authenticated(request):
-            return web.Response(
-                text=admin_login_html(
-                    request.app["admin_csrf_token"],
-                    error="Sign in again to continue.",
-                ),
-                content_type="text/html",
-                status=401,
-                headers=no_store_headers(),
+            return admin_redirect_response(
+                request,
+                login_error="Sign in again to continue.",
             )
         return await admin_post(request, form)
     return web.Response(
@@ -1186,7 +1200,6 @@ async def session_context(app: web.Application):
 def create_app() -> web.Application:
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app["target_base_url"] = os.environ["PROXY_TARGET_BASE_URL"].rstrip("/")
-    app["admin_csrf_token"] = secrets.token_urlsafe(32)
     app.cleanup_ctx.append(session_context)
     app.router.add_route("*", "/{path_info:.*}", handle)
     return app
