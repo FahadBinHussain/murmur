@@ -104,6 +104,7 @@ if not families and provider_keys("OPENROUTER"):
 
 default_base_urls = {
     "openrouter": "https://openrouter.ai/api/v1",
+    "pollinations": "https://gen.pollinations.ai/v1",
 }
 cloudflare_account_id = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or os.getenv("CF_ACCOUNT_ID") or "").strip()
 if cloudflare_account_id:

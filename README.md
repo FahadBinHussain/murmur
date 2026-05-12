@@ -179,7 +179,7 @@ Murmur syncs provider keys into Open WebUI Connections at startup. The provider 
 
 ```env
 OPENWEBUI_PROVIDER_SYNC=true
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,pollinations
 
 OPENROUTER_API_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY_1=sk-or-v1-...
@@ -187,6 +187,13 @@ OPENROUTER_API_KEY_2=sk-or-v1-...
 OPENROUTER_API_KEY_3=sk-or-v1-...
 OPENROUTER_API_KEY_4=sk-or-v1-...
 OPENROUTER_API_KEY_5=sk-or-v1-...
+
+POLLINATIONS_API_BASE_URL=https://gen.pollinations.ai/v1
+POLLINATIONS_API_KEY_1=sk_...
+POLLINATIONS_API_KEY_2=sk_...
+POLLINATIONS_API_KEY_3=sk_...
+POLLINATIONS_API_KEY_4=sk_...
+POLLINATIONS_API_KEY_5=sk_...
 
 CF_ACCOUNT_ID=your-cloudflare-account-id
 CF_API_TOKEN=your-cloudflare-workers-ai-token
@@ -204,12 +211,17 @@ openrouter 3
 openrouter 4
 openrouter 5
 cloudflare 1
+pollinations 1
+pollinations 2
+pollinations 3
+pollinations 4
+pollinations 5
 ```
 
 Future OpenAI-compatible providers use the same pattern:
 
 ```env
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,gemini,mistral
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,pollinations,gemini,mistral
 
 GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
 GEMINI_API_KEY_1=...
@@ -351,8 +363,9 @@ OPENWEBUI_MODEL=openrouter_1.openai/gpt-oss-20b:free
 OPENWEBUI_MODEL_ALIASES=free=openrouter_1.openai/gpt-oss-20b:free
 
 OPENWEBUI_PROVIDER_SYNC=true
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare
+OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,pollinations
 OPENROUTER_API_KEY_1=sk-or-v1-...
+POLLINATIONS_API_KEY_1=sk_...
 CF_ACCOUNT_ID=your-cloudflare-account-id
 CF_API_TOKEN=your-cloudflare-workers-ai-token
 
@@ -542,6 +555,8 @@ Direct PowerShell one-liner:
 | `<PROVIDER>_MODEL_IDS` | empty | Optional explicit model allowlist. |
 | `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL. |
 | `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | empty | OpenRouter key slots. |
+| `POLLINATIONS_API_BASE_URL` | `https://gen.pollinations.ai/v1` | Pollinations OpenAI-compatible base URL. |
+| `POLLINATIONS_API_KEY_1` ... `POLLINATIONS_API_KEY_5` | empty | Pollinations key slots. Use server-side `sk_` keys. |
 | `CF_ACCOUNT_ID` | empty | Cloudflare account ID. |
 | `CF_API_TOKEN` | empty | Cloudflare Workers AI token. |
 | `CLOUDFLARE_API_BASE_URL` | derived from `CF_ACCOUNT_ID` | Cloudflare OpenAI-compatible chat base URL. |

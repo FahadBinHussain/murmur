@@ -2982,6 +2982,8 @@ class Murmur:
         hostname = hostname.lower()
         if "openrouter.ai" in hostname:
             return "openrouter"
+        if "pollinations.ai" in hostname:
+            return "pollinations"
         if hostname:
             return hostname.removeprefix("api.").split(".", 1)[0]
         return "openwebui"
@@ -2992,6 +2994,8 @@ class Murmur:
             return "cloudflare"
         if model_id.startswith("openrouter/"):
             return "openrouter"
+        if model_id.startswith("pollinations/"):
+            return "pollinations"
         if "." in model_id:
             prefix = model_id.split(".", 1)[0].strip().lower()
             if self.is_provider_connection(prefix):
