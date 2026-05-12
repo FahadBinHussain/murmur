@@ -1524,6 +1524,7 @@ class Murmur:
                 "",
                 "Models",
                 f"{prefix} models",
+                f"{prefix} models all",
                 f"{prefix} models <provider> [connection]",
                 f"{prefix} status",
             ]
@@ -1873,6 +1874,18 @@ class Murmur:
         model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
             alias, thread_id
         )
+        if model is None and len(alias.split()) >= 2:
+            options = await self.fetch_model_options(include_all=True)
+            self.thread_model_options[thread_id] = options
+            groups = self.group_model_options(options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+            model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
+                alias, thread_id
+            )
         if model is None:
             return (
                 f"Unknown model: {name}\n"
@@ -1943,6 +1956,18 @@ class Murmur:
         model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
             alias, thread_id
         )
+        if model is None and len(alias.split()) >= 2:
+            options = await self.fetch_model_options(include_all=True)
+            self.thread_model_options[thread_id] = options
+            groups = self.group_model_options(options)
+            self.thread_provider_model_options[thread_id] = groups
+            self.thread_provider_options[thread_id] = sorted(
+                groups,
+                key=self.provider_sort_key,
+            )
+            model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
+                alias, thread_id
+            )
         if model is None:
             return (
                 f"Unknown image model: {name}\n"
@@ -2051,6 +2076,7 @@ class Murmur:
                 options,
                 include_all,
                 free_only,
+                compact_connections=not include_all,
             )
 
         current_alias = self.current_model_alias(thread_id)
@@ -2070,6 +2096,7 @@ class Murmur:
         options: list[ModelOption],
         include_all: bool,
         free_only: bool = False,
+        compact_connections: bool = False,
     ) -> str:
         current_model = self.current_model(thread_id)
         current_image_model = self.current_image_model(thread_id)
@@ -2080,12 +2107,17 @@ class Murmur:
         else:
             title = "Models"
         groups = self.group_model_options(options)
+        if compact_connections:
+            groups = self.compact_model_groups_by_family(thread_id, groups)
         self.thread_provider_model_options[thread_id] = groups
         self.thread_provider_options[thread_id] = sorted(
             groups,
             key=self.provider_sort_key,
         )
-        lines = [f"{title} ({len(options)}):"]
+        display_count = sum(
+            len(provider_options) for provider_options in groups.values()
+        )
+        lines = [f"{title} ({display_count}):"]
 
         for provider, provider_options in groups.items():
             lines.append("")
@@ -2112,8 +2144,71 @@ class Murmur:
         lines.append(
             f"Filter: {self.settings.bot_prefix} models <provider> [connection]"
         )
+        if include_all:
+            lines.append(f"Compact: {self.settings.bot_prefix} models")
+        else:
+            lines.append(f"All: {self.settings.bot_prefix} models all")
         lines.append(f"Status: {self.settings.bot_prefix} status")
         return "\n".join(lines)
+
+    def compact_model_groups_by_family(
+        self,
+        thread_id: str,
+        groups: dict[str, list[ModelOption]],
+    ) -> dict[str, list[ModelOption]]:
+        current_provider = self.provider_for_selected_model(
+            thread_id,
+            self.current_model(thread_id),
+        )
+        current_image_model = self.current_image_model(thread_id)
+        current_image_provider = (
+            self.provider_for_selected_model(thread_id, current_image_model)
+            if current_image_model
+            else ""
+        )
+
+        families: dict[str, list[str]] = defaultdict(list)
+        for provider in groups:
+            families[self.provider_family(provider)].append(provider)
+
+        compact: dict[str, list[ModelOption]] = {}
+        for family in sorted(families, key=self.provider_sort_key):
+            providers = sorted(families[family], key=self.provider_sort_key)
+            representative = self.representative_provider_for_family(
+                providers,
+                current_provider,
+                current_image_provider,
+            )
+            by_model: dict[str, ModelOption] = {}
+            for provider in providers:
+                for option in groups.get(provider, []):
+                    key = self.model_short_id(option.id).lower()
+                    current = by_model.get(key)
+                    if current is None or self.option_provider(option) == representative:
+                        by_model[key] = option
+
+            compact[family] = sorted(
+                by_model.values(),
+                key=lambda option: self.model_short_id(option.id).lower(),
+            )
+
+        return dict(
+            sorted(compact.items(), key=lambda item: self.provider_sort_key(item[0]))
+        )
+
+    def representative_provider_for_family(
+        self,
+        providers: list[str],
+        current_provider: str,
+        current_image_provider: str,
+    ) -> str:
+        for provider in (current_provider, current_image_provider):
+            if provider in providers:
+                return provider
+        for provider in providers:
+            if provider.endswith("_1"):
+                return provider
+        return providers[0]
 
     def group_model_options(
         self, options: list[ModelOption]
@@ -2189,7 +2284,7 @@ class Murmur:
             f"Pick model: {self.settings.bot_prefix} model <provider> [connection] <number>"
         )
         lines.append(f"Models: {self.settings.bot_prefix} models <provider> [connection]")
-        lines.append(f"All providers/models: {self.settings.bot_prefix} providers all")
+        lines.append(f"All models: {self.settings.bot_prefix} models all")
         return "\n".join(lines)
 
     async def set_thread_provider(self, thread_id: str, name: str) -> str:

@@ -66,6 +66,7 @@ Image
 
 Models
 /ai models
+/ai models all
 /ai models <provider> [connection]
 /ai status
 ```
@@ -77,6 +78,7 @@ Examples:
 ```text
 /ai explain this in one sentence
 /ai models
+/ai models all
 /ai models openrouter 2
 /ai model openrouter 2 1
 /ai image a brutalist library in heavy rain
