@@ -514,7 +514,7 @@ run_facebook_login_refresh() {
 
   echo "Facebook cookie expiry detected; attempting hosted browser login refresh."
   restore_facebook_profile_from_db_state || true
-  local refresh_cmd=("$python_bin" /app/murmur/scripts/facebook_login_refresh.py --persist-db --no-backup)
+  local refresh_cmd=("$python_bin" /app/murmur/scripts/facebook_login_refresh.py --persist-db --no-backup --no-verify)
   if [[ "${FB_LOGIN_PROFILE_PERSIST_DB,,}" == "true" ]]; then
     refresh_cmd+=(--persist-profile-db)
   fi

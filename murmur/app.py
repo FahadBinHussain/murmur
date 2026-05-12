@@ -3302,8 +3302,20 @@ class Murmur:
                 model=model,
             )
 
+        return self.extract_chat_response_content(status, body, model)
+
+    def extract_chat_response_content(
+        self,
+        status: int,
+        body: dict,
+        model: object | None,
+    ) -> str:
         try:
-            return body["choices"][0]["message"]["content"].strip()
+            choice = body["choices"][0]
+            message = choice.get("message") if isinstance(choice, dict) else None
+            if not isinstance(message, dict):
+                raise KeyError("choices[0].message")
+            content = message.get("content")
         except (KeyError, IndexError, TypeError) as exc:
             retryable = self.is_retryable_openwebui_body(status, body)
             raise OpenWebUIResponseError(
@@ -3313,6 +3325,36 @@ class Murmur:
                 model=model,
                 retryable=retryable,
             ) from exc
+
+        text_parts: list[str] = []
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    text_parts.append(item["text"])
+
+        for key in ("reasoning_content", "reasoning", "text"):
+            value = message.get(key)
+            if isinstance(value, str):
+                text_parts.append(value)
+
+        text = "\n".join(part.strip() for part in text_parts if part and part.strip())
+        if text:
+            return text
+
+        raise OpenWebUIResponseError(
+            (
+                f"Open WebUI error {status} for model {model}: response message "
+                f"content was empty or null. Raw response: {body}"
+            ),
+            status=status,
+            body=body,
+            model=model,
+            retryable=True,
+        )
 
     async def post_chat_completion(
         self, session: aiohttp.ClientSession, payload: dict

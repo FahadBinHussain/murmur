@@ -740,11 +740,16 @@ async def main_async() -> int:
         try:
             await bootstrap_context_cookies(context, args.output)
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(args.login_url, wait_until="domcontentloaded")
 
             cookies = await facebook_cookies(context)
             if has_login_cookies(cookies):
-                print("Existing browser profile is already logged in.")
+                print("Existing browser profile already has Facebook login cookies.")
+            else:
+                await page.goto(args.login_url, wait_until="domcontentloaded")
+                cookies = await facebook_cookies(context)
+
+            if has_login_cookies(cookies):
+                pass
             elif login_identifier and password:
                 filled = await fill_login_form(page, login_identifier, password)
                 if filled:
