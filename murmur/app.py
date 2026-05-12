@@ -2053,10 +2053,12 @@ class Murmur:
             include_all=include_all,
             strict_free=free_only,
         )
+        compact_connections = True
         if options:
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
             if provider_filter.strip():
+                compact_connections = not self.is_provider_connection(provider_filter)
                 matching_providers = self.matching_provider_filters(
                     provider_filter,
                     sorted(groups, key=self.provider_sort_key),
@@ -2076,7 +2078,7 @@ class Murmur:
                 options,
                 include_all,
                 free_only,
-                compact_connections=not include_all,
+                compact_connections=compact_connections,
             )
 
         current_alias = self.current_model_alias(thread_id)
@@ -2107,6 +2109,7 @@ class Murmur:
         else:
             title = "Models"
         groups = self.group_model_options(options)
+        connection_counts = self.model_group_connection_counts(groups)
         if compact_connections:
             groups = self.compact_model_groups_by_family(thread_id, groups)
         self.thread_provider_model_options[thread_id] = groups
@@ -2121,7 +2124,7 @@ class Murmur:
 
         for provider, provider_options in groups.items():
             lines.append("")
-            lines.append(f"[{self.provider_display_name(provider)}]")
+            lines.append(f"[{self.model_group_header(provider, connection_counts)}]")
             for index, option in enumerate(provider_options, start=1):
                 current_labels = []
                 if self.equivalent_model_id(option.id, current_model):
@@ -2150,6 +2153,31 @@ class Murmur:
             lines.append(f"All: {self.settings.bot_prefix} models all")
         lines.append(f"Status: {self.settings.bot_prefix} status")
         return "\n".join(lines)
+
+    def model_group_connection_counts(
+        self,
+        groups: dict[str, list[ModelOption]],
+    ) -> dict[str, int]:
+        families: dict[str, set[str]] = defaultdict(set)
+        counts: dict[str, int] = {}
+        for provider in groups:
+            family = self.provider_family(provider)
+            families[family].add(provider)
+            counts[provider] = 1
+
+        for family, providers in families.items():
+            counts[family] = max(1, len(providers))
+
+        return counts
+
+    def model_group_header(
+        self,
+        provider: str,
+        connection_counts: dict[str, int],
+    ) -> str:
+        count = connection_counts.get(provider, 1)
+        noun = "connection" if count == 1 else "connections"
+        return f"{self.provider_display_name(provider)} - {count} {noun}"
 
     def compact_model_groups_by_family(
         self,

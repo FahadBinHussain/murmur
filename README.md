@@ -87,6 +87,7 @@ Examples:
 ```
 
 Model choices are remembered per Messenger thread. Chat model selection and image model selection are separate, but they use the same provider/connection/number syntax.
+Model lists collapse repeated provider connections by default; use `/ai models <provider> <connection>` when you need one exact connection's numbering.
 
 Responses include the selected provider and model:
 
