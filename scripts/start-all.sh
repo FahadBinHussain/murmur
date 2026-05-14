@@ -23,6 +23,7 @@ export OPENWEBUI_ACCESS_LOG="${OPENWEBUI_ACCESS_LOG:-false}"
 export FB_LOGIN_AUTO_REFRESH="${FB_LOGIN_AUTO_REFRESH:-false}"
 export FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS="${FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS:-900}"
 export FB_LOGIN_AUTO_REFRESH_STAMP="${FB_LOGIN_AUTO_REFRESH_STAMP:-/tmp/murmur-facebook-login-refresh-last}"
+export FB_LOGIN_BROWSER_ENGINE="${FB_LOGIN_BROWSER_ENGINE:-cloakbrowser}"
 export FB_LOGIN_HEADLESS="${FB_LOGIN_HEADLESS:-true}"
 export FB_LOGIN_EXPORT_PATH="${FB_LOGIN_EXPORT_PATH:-$FB_COOKIES_PATH}"
 export FB_LOGIN_PERSIST_DB="${FB_LOGIN_PERSIST_DB:-true}"
@@ -515,7 +516,7 @@ run_facebook_login_refresh() {
 
   echo "Facebook cookie expiry detected; attempting hosted browser login refresh."
   restore_facebook_profile_from_db_state || true
-  local refresh_cmd=("$python_bin" /app/murmur/scripts/facebook_login_refresh.py --persist-db --no-backup --no-verify)
+  local refresh_cmd=("$python_bin" /app/murmur/scripts/facebook_login_refresh.py --persist-db --no-backup)
   if [[ "${FB_LOGIN_PROFILE_PERSIST_DB,,}" == "true" ]]; then
     refresh_cmd+=(--persist-profile-db)
   fi

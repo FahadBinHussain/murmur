@@ -15,8 +15,12 @@ dependencies = [
 
 [project.optional-dependencies]
 facebook-login = [
+  "cloakbrowser>=0.3.28",
   "playwright>=1.45.0",
 ]
 
 [project.scripts]
 murmur = "murmur.app:main"
+
+[tool.setuptools.packages.find]
+include = ["murmur*"]

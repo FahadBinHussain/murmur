@@ -420,6 +420,7 @@ FB_LOGIN_EMAIL=your-facebook-email
 FB_LOGIN_PHONE=your-facebook-phone-or-email
 FB_LOGIN_PASSWORD=your-facebook-password
 FB_LOGIN_TOTP_SECRET=your-authenticator-secret
+FB_LOGIN_BROWSER_ENGINE=cloakbrowser
 ```
 
 Run the refresh:
@@ -428,7 +429,7 @@ Run the refresh:
 python .\scripts\facebook_login_refresh.py
 ```
 
-By default the helper opens Chromium with a persistent profile at `.murmur-facebook-profile`, prefers `FB_LOGIN_EMAIL` over `FB_LOGIN_PHONE`, exports fresh cookies to `FB_LOGIN_EXPORT_PATH` or `FB_COOKIES_PATH`, backs up the previous cookie file, and verifies the result with `fbchat-muqit`. It uses `FB_LOGIN_PROXY` when set, otherwise it falls back to `FB_PROXY`; set `FB_LOGIN_PROXY=direct` to force a direct browser login.
+By default the helper opens CloakBrowser/Chromium with a persistent profile at `.murmur-facebook-profile`, prefers `FB_LOGIN_EMAIL` over `FB_LOGIN_PHONE`, exports fresh cookies to `FB_LOGIN_EXPORT_PATH` or `FB_COOKIES_PATH`, backs up the previous cookie file, and verifies the result with `fbchat-muqit` before persisting it. It uses `FB_LOGIN_PROXY` when set, otherwise it falls back to the admin-saved `FB_PROXY` state and then the `FB_PROXY` environment variable; set `FB_LOGIN_PROXY=direct` to force a direct browser login. Set `FB_LOGIN_BROWSER_ENGINE=playwright` to use plain Playwright instead.
 
 ### Hosted auto-refresh
 
@@ -440,12 +441,14 @@ Required hosted secrets:
 FB_LOGIN_EMAIL=your-facebook-email
 FB_LOGIN_PASSWORD=your-facebook-password
 FB_LOGIN_TOTP_SECRET=your-authenticator-secret
+FB_LOGIN_BROWSER_ENGINE=cloakbrowser
 ```
 
 Recommended hosted settings:
 
 ```env
 FB_LOGIN_AUTO_REFRESH=true
+FB_LOGIN_BROWSER_ENGINE=cloakbrowser
 FB_LOGIN_HEADLESS=true
 FB_LOGIN_PERSIST_DB=true
 FB_LOGIN_PROFILE_VAULT_ENABLED=true
@@ -598,6 +601,7 @@ Direct PowerShell one-liner:
 | `FB_LOGIN_PASSWORD` | empty | Browser-login helper password for local or hosted auto-refresh. |
 | `FB_LOGIN_TOTP_SECRET` | empty | Local browser-login helper authenticator secret used to generate 2FA codes. |
 | `FB_LOGIN_URL` | `https://www.facebook.com/login` | Facebook login page opened by the helper. |
+| `FB_LOGIN_BROWSER_ENGINE` | `cloakbrowser` | Browser engine used by the helper. Use `cloakbrowser` or `playwright`. |
 | `FB_LOGIN_PROFILE_DIR` | `.murmur-facebook-profile` | Persistent local Chromium profile used by the helper. |
 | `FB_LOGIN_EXPORT_PATH` | `FB_COOKIES_PATH` | Cookie JSON path written by the helper. |
 | `FB_LOGIN_PROFILE_VAULT_ENABLED` | `true` | Enable encrypted browser-profile persistence in runtime state. |
@@ -612,7 +616,7 @@ Direct PowerShell one-liner:
 | `FB_LOGIN_VERIFY` | `true` | Verify the exported cookies with `fbchat-muqit`. |
 | `FB_LOGIN_PERSIST_DB` | `false` | Also persist exported cookies to Murmur runtime PostgreSQL state. |
 | `FB_LOGIN_BACKUP_EXISTING` | `true` | Back up the old cookie file before overwriting it. |
-| `FB_LOGIN_PROXY` | `FB_PROXY` | Browser proxy for local Facebook login. Use `direct` to disable. |
+| `FB_LOGIN_PROXY` | admin-saved `FB_PROXY`, then env `FB_PROXY` | Browser proxy for local Facebook login. Use `direct` to disable. |
 | `FB_LOGIN_VERIFY_PROXY` | `FB_LOGIN_PROXY` | Proxy used by the `fbchat-muqit` verification request. |
 | `FB_LOGIN_USER_AGENT` | `FB_USER_AGENT` | Browser and verification user-agent override. |
 | `FB_LOGIN_AUTO_REFRESH` | `false` | Run the browser-login helper automatically after known expired-cookie failures. |

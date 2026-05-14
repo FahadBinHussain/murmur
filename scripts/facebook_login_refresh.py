@@ -90,6 +90,41 @@ def fbchat_proxy(proxy_url: str | None) -> str | None:
     return proxy_url.strip()
 
 
+def load_db_proxy_state() -> dict[str, str]:
+    try:
+        from murmur.runtime_state import (
+            RuntimeStateMissing,
+            RuntimeStateNotConfigured,
+            load_facebook_proxy_state,
+        )
+    except Exception:
+        return {}
+
+    try:
+        return load_facebook_proxy_state()
+    except (RuntimeStateMissing, RuntimeStateNotConfigured):
+        return {}
+    except Exception as exc:
+        print(f"DB proxy state unavailable: {exc}")
+        return {}
+
+
+def select_login_proxy() -> tuple[str, str]:
+    login_proxy = os.getenv("FB_LOGIN_PROXY")
+    if login_proxy is not None and login_proxy.strip():
+        return login_proxy.strip(), "FB_LOGIN_PROXY"
+
+    db_proxy = load_db_proxy_state().get("FB_PROXY", "").strip()
+    if db_proxy:
+        return db_proxy, "DB FB_PROXY"
+
+    env_proxy = os.getenv("FB_PROXY", "").strip()
+    if env_proxy:
+        return env_proxy, "FB_PROXY"
+
+    return "", "direct"
+
+
 def playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
     if not proxy_url:
         return None
@@ -111,6 +146,15 @@ def playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
     if parsed.password:
         out["password"] = unquote(parsed.password)
     return out
+
+
+def normalize_browser_engine(value: str | None) -> str:
+    raw = (value or "playwright").strip().lower()
+    if raw in {"cloak", "cloakbrowser", "cloak-browser"}:
+        return "cloakbrowser"
+    if raw in {"playwright", "chromium"}:
+        return "playwright"
+    raise SystemExit("FB_LOGIN_BROWSER_ENGINE must be playwright or cloakbrowser.")
 
 
 def fbchat_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
@@ -645,8 +689,10 @@ def write_cookies(path: Path, cookies: list[dict[str, Any]], backup: bool) -> No
 
 
 async def verify_with_fbchat(path: Path, user_agent: str | None, proxy: str | None) -> None:
+    from murmur.fbchat_patch import apply_fbchat_patches
     from fbchat_muqit.state import State
 
+    apply_fbchat_patches()
     state = None
     try:
         state = await State.from_json_cookies(str(path), user_agent, proxy)
@@ -655,6 +701,28 @@ async def verify_with_fbchat(path: Path, user_agent: str | None, proxy: str | No
     finally:
         if state is not None:
             await state.close()
+
+
+async def verify_cookie_candidate(
+    cookies: list[dict[str, Any]],
+    path: Path,
+    user_agent: str | None,
+    proxy: str | None,
+) -> None:
+    verify_path = path.with_name(path.name + ".verify")
+    write_cookies(verify_path, cookies, backup=False)
+    try:
+        await verify_with_fbchat(verify_path, user_agent, proxy)
+    finally:
+        try:
+            verify_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def compact_exception(exc: BaseException) -> str:
+    text = str(exc).strip().replace("\n", " ")
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def persist_to_db(cookies: list[dict[str, Any]]) -> None:
@@ -680,6 +748,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--password", default=os.getenv("FB_LOGIN_PASSWORD", ""))
     parser.add_argument("--totp-secret", default=os.getenv("FB_LOGIN_TOTP_SECRET", ""))
     parser.add_argument("--login-url", default=os.getenv("FB_LOGIN_URL", "https://www.facebook.com/login"))
+    parser.add_argument("--browser-engine", default=os.getenv("FB_LOGIN_BROWSER_ENGINE", "playwright"))
     parser.add_argument("--profile-dir", type=Path, default=env_path("FB_LOGIN_PROFILE_DIR", ".murmur-facebook-profile"))
     parser.add_argument("--output", type=Path, default=env_path("FB_LOGIN_EXPORT_PATH", os.getenv("FB_COOKIES_PATH", "cookies.json")))
     parser.add_argument("--timeout", type=int, default=env_int("FB_LOGIN_TIMEOUT_SECONDS", 300))
@@ -700,43 +769,43 @@ def parse_args() -> argparse.Namespace:
 async def main_async() -> int:
     load_env()
     args = parse_args()
-
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        print("Playwright is not installed.")
-        print("Install locally with:")
-        print("  python -m pip install -e .[facebook-login]")
-        print("  python -m playwright install chromium")
-        return 2
+    browser_engine = normalize_browser_engine(args.browser_engine)
 
     login_identifier = (args.email or args.phone).strip()
     password = args.password
     totp_secret = str(args.totp_secret or "").strip()
-    proxy_url = os.getenv("FB_LOGIN_PROXY") or os.getenv("FB_PROXY") or ""
+    proxy_url, proxy_source = select_login_proxy()
     verify_proxy = fbchat_proxy(os.getenv("FB_LOGIN_VERIFY_PROXY") or proxy_url)
     user_agent = os.getenv("FB_LOGIN_USER_AGENT") or os.getenv("FB_USER_AGENT") or None
 
     print(f"Browser profile: {args.profile_dir}")
+    print(f"Browser engine: {browser_engine}")
     print(f"Cookie output: {args.output}")
     print(f"Login email/phone: {redact(login_identifier)}")
     print(f"Authenticator secret: {'set' if totp_secret else 'empty'}")
-    if proxy_url:
-        print(f"Browser proxy: {redacted_url(proxy_url)}")
+    print(f"Browser proxy: {redacted_url(proxy_url) if proxy_url else 'direct'}")
+    print(f"Browser proxy source: {proxy_source}")
     print("If Facebook asks for 2FA or checkpoint approval, finish it in the opened browser.")
 
-    async with async_playwright() as p:
+    if browser_engine == "cloakbrowser":
+        try:
+            from cloakbrowser import launch_persistent_context_async
+        except ImportError:
+            print("CloakBrowser is not installed.")
+            print("Install locally with:")
+            print("  python -m pip install -e .[facebook-login]")
+            return 2
+
         launch_args: dict[str, Any] = {
             "headless": args.headless,
             "viewport": {"width": 1280, "height": 900},
+            "humanize": True,
         }
-        proxy = playwright_proxy(proxy_url)
-        if proxy:
-            launch_args["proxy"] = proxy
+        if fbchat_proxy(proxy_url):
+            launch_args["proxy"] = proxy_url
         if user_agent:
             launch_args["user_agent"] = user_agent
-
-        context = await p.chromium.launch_persistent_context(str(args.profile_dir), **launch_args)
+        context = await launch_persistent_context_async(str(args.profile_dir), **launch_args)
         try:
             await bootstrap_context_cookies(context, args.output)
             page = context.pages[0] if context.pages else await context.new_page()
@@ -744,7 +813,21 @@ async def main_async() -> int:
             cookies = await facebook_cookies(context)
             if has_login_cookies(cookies):
                 print("Existing browser profile already has Facebook login cookies.")
-            else:
+
+                if not args.no_verify:
+                    try:
+                        await verify_cookie_candidate(cookies, args.output, user_agent, verify_proxy)
+                        print("Existing browser profile cookies verified with fbchat-muqit.")
+                    except Exception as exc:
+                        print(
+                            "Existing browser profile cookies failed fbchat-muqit verification: "
+                            f"{compact_exception(exc)}"
+                        )
+                        print("Clearing browser cookies and forcing a fresh Facebook login.")
+                        await context.clear_cookies()
+                        cookies = []
+
+            if not has_login_cookies(cookies):
                 await page.goto(args.login_url, wait_until="domcontentloaded")
                 cookies = await facebook_cookies(context)
 
@@ -766,15 +849,80 @@ async def main_async() -> int:
             print(f"Exported {len(cookies)} cookies. Required cookies present: c_user={'c_user' in names}, xs={'xs' in names}.")
         finally:
             await context.close()
+    else:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            print("Playwright is not installed.")
+            print("Install locally with:")
+            print("  python -m pip install -e .[facebook-login]")
+            print("  python -m playwright install chromium")
+            return 2
+
+        async with async_playwright() as p:
+            launch_args = {
+                "headless": args.headless,
+                "viewport": {"width": 1280, "height": 900},
+            }
+            proxy = playwright_proxy(proxy_url)
+            if proxy:
+                launch_args["proxy"] = proxy
+            if user_agent:
+                launch_args["user_agent"] = user_agent
+
+            context = await p.chromium.launch_persistent_context(str(args.profile_dir), **launch_args)
+            try:
+                await bootstrap_context_cookies(context, args.output)
+                page = context.pages[0] if context.pages else await context.new_page()
+
+                cookies = await facebook_cookies(context)
+                if has_login_cookies(cookies):
+                    print("Existing browser profile already has Facebook login cookies.")
+
+                    if not args.no_verify:
+                        try:
+                            await verify_cookie_candidate(cookies, args.output, user_agent, verify_proxy)
+                            print("Existing browser profile cookies verified with fbchat-muqit.")
+                        except Exception as exc:
+                            print(
+                                "Existing browser profile cookies failed fbchat-muqit verification: "
+                                f"{compact_exception(exc)}"
+                            )
+                            print("Clearing browser cookies and forcing a fresh Facebook login.")
+                            await context.clear_cookies()
+                            cookies = []
+
+                if not has_login_cookies(cookies):
+                    await page.goto(args.login_url, wait_until="domcontentloaded")
+                    cookies = await facebook_cookies(context)
+
+                if has_login_cookies(cookies):
+                    pass
+                elif login_identifier and password:
+                    filled = await fill_login_form(page, login_identifier, password)
+                    if filled:
+                        print("Submitted Facebook login form. Waiting for c_user/xs cookies...")
+                    else:
+                        print("Could not find the login form automatically. Use the browser manually.")
+                    cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
+                else:
+                    print("FB_LOGIN_EMAIL/FB_LOGIN_PHONE or FB_LOGIN_PASSWORD is empty. Use the browser manually.")
+                    cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
+
+                write_cookies(args.output, cookies, backup=not args.no_backup)
+                names = required_cookie_names(cookies)
+                print(f"Exported {len(cookies)} cookies. Required cookies present: c_user={'c_user' in names}, xs={'xs' in names}.")
+            finally:
+                await context.close()
+
+    if not args.no_verify:
+        await verify_with_fbchat(args.output, user_agent, verify_proxy)
 
     if args.persist_db:
         persist_to_db(cookies)
 
     if args.persist_profile_db:
         persist_profile_to_db(args.profile_dir)
-
-    if not args.no_verify:
-        await verify_with_fbchat(args.output, user_agent, verify_proxy)
 
     return 0
 

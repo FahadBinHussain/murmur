@@ -20,6 +20,7 @@ import fbchat_muqit.utils.stateHelper as fb_state_helper
 from dotenv import load_dotenv
 from fbchat_muqit import Client, EventType, Message
 
+from .fbchat_patch import apply_fbchat_patches
 from .admin_state import (
     read_thread_allowlist,
     read_thread_registry,
@@ -33,6 +34,8 @@ from .runtime_state import (
     RuntimeStateNotConfigured,
     load_facebook_proxy_state,
 )
+
+apply_fbchat_patches()
 
 
 DEFAULT_FB_UPLOAD_ENDPOINTS = [
