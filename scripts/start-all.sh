@@ -538,6 +538,15 @@ run_facebook_login_refresh() {
     return 0
   fi
 
+  if [[ "${FB_LOGIN_DIRECT_FALLBACK_ON_PROXY_FAILURE,,}" == "true" && "${FB_LOGIN_PROXY:-}" != "direct" ]]; then
+    echo "Facebook cookie auto-refresh failed through configured proxy; retrying browser refresh direct."
+    if FB_LOGIN_PROXY=direct "${refresh_cmd[@]}"; then
+      rm -f "$FB_LOGIN_AUTO_REFRESH_STAMP"
+      echo "Facebook cookie auto-refresh succeeded with direct browser fallback."
+      return 0
+    fi
+  fi
+
   mkdir -p "$(dirname "$FB_LOGIN_AUTO_REFRESH_STAMP")"
   date +%s > "$FB_LOGIN_AUTO_REFRESH_STAMP"
   echo "Facebook cookie auto-refresh failed."

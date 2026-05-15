@@ -4,6 +4,7 @@ import re
 import os
 import time
 import asyncio
+import json
 from typing import Any
 
 
@@ -14,26 +15,41 @@ def _jazoest(token: str) -> str:
     return "2" + str(sum(ord(char) for char in token))
 
 
+def _first_non_empty(pattern: str, html: str) -> str | None:
+    for value in re.findall(pattern, html):
+        if isinstance(value, tuple):
+            value = next((part for part in value if part), "")
+        value = str(value).strip()
+        if value:
+            return value
+    return None
+
+
 def _extract_tokens_from_html(html: str) -> tuple[Any, ...]:
     from fbchat_muqit.exception.errors import ValidationError
     from fbchat_muqit.utils import stateHelper
 
-    fb_dtsg_match = re.search(r'"DTSGInitialData".*?"token":"(.*?)"', html)
-    if not fb_dtsg_match:
-        raise ValidationError("'fb_dtsg' token not found.")
-    fb_dtsg = fb_dtsg_match.group(1)
+    fb_dtsg = _first_non_empty(r'"DTSGInitialData".*?"token":"(.*?)"', html)
+    if not fb_dtsg:
+        fb_dtsg = _first_non_empty(
+            r'"DTSGInitData"(?:\s*,\s*\[\])?(?:\s*,\s*)\{[^}]*'
+            r'"token"\s*:\s*"([^"]*)"',
+            html,
+        )
+    if not fb_dtsg:
+        fb_dtsg = _first_non_empty(r'name="fb_dtsg"\s+value="([^"]*)"', html)
+    if not fb_dtsg:
+        raise ValidationError("Non-empty 'fb_dtsg' token not found.")
 
     async_pattern = (
         r'"DTSGInitData"(?:\s*,\s*\[\])?(?:\s*,\s*)\{[^}]*'
-        r'"async_get_token"\s*:\s*"([^"]+)"[^}]*\}'
+        r'"async_get_token"\s*:\s*"([^"]*)"[^}]*\}'
     )
-    async_match = re.search(async_pattern, html)
-    if async_match:
-        fb_dtsg_ag = async_match.group(1)
-    else:
+    fb_dtsg_ag = _first_non_empty(async_pattern, html)
+    if not fb_dtsg_ag:
         fb_dtsg_ag = fb_dtsg
         stateHelper.logger.warning(
-            "fbchat-muqit token fallback: async_get_token missing; reusing fb_dtsg."
+            "fbchat-muqit token fallback: async_get_token missing or empty; reusing fb_dtsg."
         )
 
     lsd_token = None
@@ -56,11 +72,17 @@ def _extract_tokens_from_html(html: str) -> tuple[Any, ...]:
     )
     if mqtt_client_match:
         mqtt_client_id = mqtt_client_match.group(1)
+    if not mqtt_client_id:
+        from fbchat_muqit.muqit import generate_uuid
+
+        mqtt_client_id = generate_uuid()
 
     mqtt_app_id = None
     mqtt_app_match = re.search(r'\["MqttWebConfig".*?"appID"\s*:\s*(\d+)', html)
     if mqtt_app_match:
         mqtt_app_id = mqtt_app_match.group(1)
+    if not mqtt_app_id:
+        mqtt_app_id = os.getenv("FBCHAT_MQTT_APP_ID") or "219994525426954"
 
     user_app_id = None
     user_app_match = re.search(r'\["CurrentUserInitialData".*?"APP_ID"\s*:\s*"(\d+)"', html)
@@ -68,13 +90,24 @@ def _extract_tokens_from_html(html: str) -> tuple[Any, ...]:
         user_app_id = user_app_match.group(1)
 
     mqtt_endpoint = re.search(
-        r'"endpoint"\s*:\s*"([^"]*?region=([a-zA-Z0-9_-]+)[^"]*)"',
+        r'\["MqttWebConfig".*?"endpoint"\s*:\s*"([^"]+)"',
         html,
     )
     if not mqtt_endpoint:
-        raise ValueError("Mqtt Endpoint not found!")
-    endpoint = mqtt_endpoint.group(1).encode().decode("unicode_escape")
-    region = mqtt_endpoint.group(2)
+        mqtt_endpoint = re.search(
+            r'"endpoint"\s*:\s*"([^"]*?edge-chat[^"]*)"',
+            html,
+        )
+    if mqtt_endpoint:
+        endpoint = mqtt_endpoint.group(1).encode().decode("unicode_escape")
+        region_match = re.search(r"[?&]region=([a-zA-Z0-9_-]+)", endpoint)
+        region = region_match.group(1) if region_match else ""
+    else:
+        endpoint = "wss://edge-chat.facebook.com/chat"
+        region = os.getenv("FBCHAT_MQTT_REGION") or ""
+        stateHelper.logger.warning(
+            "fbchat-muqit MQTT endpoint fallback: using edge-chat.facebook.com."
+        )
 
     user_name = None
     user_name_match = re.search(r'"NAME"\s*:\s*"([^"]+)"', html)
@@ -129,9 +162,25 @@ def _bootstrap_urls() -> list[str]:
 def _bootstrap_timeout_seconds() -> int:
     raw = os.getenv("FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS") or os.getenv("FB_HTTP_TIMEOUT_SECONDS") or "25"
     try:
-        return max(5, min(int(raw), 30))
+        return max(5, min(int(raw), 60))
     except ValueError:
         return 25
+
+
+def _bootstrap_retries() -> int:
+    raw = os.getenv("FBCHAT_BOOTSTRAP_RETRIES") or "3"
+    try:
+        return max(1, min(int(raw), 10))
+    except ValueError:
+        return 3
+
+
+def _bootstrap_retry_delay_seconds() -> float:
+    raw = os.getenv("FBCHAT_BOOTSTRAP_RETRY_DELAY_SECONDS") or "2"
+    try:
+        return max(0.0, min(float(raw), 30.0))
+    except ValueError:
+        return 2.0
 
 
 def _html_markers(html: str) -> str:
@@ -144,6 +193,79 @@ def _html_markers(html: str) -> str:
         "login": "login_form" in html or "/login" in html.lower(),
     }
     return ", ".join(f"{key}={value}" for key, value in markers.items())
+
+
+def _configure_mqtt_options(self: Any) -> None:
+    from fbchat_muqit.muqit import generate_session_id, get_cookie_header
+
+    session_id = generate_session_id()
+    region = self._region
+    mqtt_client_id = self._mqttClientID
+    mqtt_app_id = self._mqttAppID
+
+    topics = [
+        "/legacy_web",
+        "/ls_req",
+        "/ls_resp",
+        "/t_ms",
+        "/rtc_multi",
+        "/thread_typing",
+        "/orca_typing_notifications",
+        "/orca_presence",
+        "/br_sr",
+        "/friend_request",
+        "/friending_state_change",
+        "/friend_requests_seen",
+        "/sr_res",
+        "/webrtc",
+        "/onevc",
+        "/notify_disconnect",
+        "/mercury",
+        "/inbox",
+        "/messaging_events",
+        "/orca_message_notifications",
+        "/pp",
+        "/webrtc_response",
+    ]
+    username = {
+        "u": self._state.user_id,
+        "s": session_id,
+        "chat_on": self._chat_on,
+        "fg": self._foreground,
+        "d": mqtt_client_id,
+        "aid": mqtt_app_id,
+        "st": topics,
+        "pm": [],
+        "cp": 3,
+        "ecp": 10,
+        "ct": "websocket",
+        "mqtt_sid": "",
+        "dc": "",
+        "no_auto_fg": True,
+        "gas": None,
+        "pack": [],
+        "p": None,
+        "aids": None,
+        "a": self._state._userAgent,
+    }
+    self._mqttClient._client.username_pw_set(json.dumps(username))
+
+    headers = {
+        "Cookie": get_cookie_header(
+            self._state._session, "https://edge-chat.facebook.com/chat"
+        ),
+        "User-Agent": self._state._userAgent,
+        "Origin": "https://www.facebook.com",
+        "Host": self.HOST,
+    }
+
+    query = f"sid={session_id}&cid={mqtt_client_id}"
+    if region:
+        query = f"region={region}&{query}"
+    self._mqttClient._client.ws_set_options(
+        path=f"/chat?{query}",
+        headers=headers,
+    )
 
 
 async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: str | None) -> tuple[str, str]:
@@ -192,65 +314,83 @@ async def _login_with_bootstrap_fallback(cls: Any, session: Any, jar: Any, user_
         logger.debug(f"Extracted user ID: {user_id}")
 
         last_error: Exception | None = None
-        for url in _bootstrap_urls():
-            html_content = None
-            try:
-                host, html_content = await asyncio.wait_for(
-                    _fetch_bootstrap_html(cls, session, url, user_agent),
-                    timeout=_bootstrap_timeout_seconds(),
-                )
-                logger.debug(
-                    f"Received bootstrap HTML from {url}: {len(html_content)} characters"
-                )
-                (
-                    fb_dtsg,
-                    fb_dtsg_ag,
-                    lsd,
-                    jazoest,
-                    jazoest_async,
-                    client_revision,
-                    mqtt_client_id,
-                    mqtt_app_id,
-                    user_app_id,
-                    endpoint,
-                    region,
-                    user_name,
-                ) = _extract_tokens_from_html(html_content)
-                out = cls(
-                    user_id=user_id,
-                    user_name=user_name,
-                    _host="www.facebook.com",
-                    _fb_dtsg=fb_dtsg,
-                    _fb_dtsg_ag=fb_dtsg_ag,
-                    _lsd=lsd,
-                    _jazoest=jazoest,
-                    _jazoest_async=jazoest_async,
-                    _revision=client_revision,
-                    _mqttClientID=mqtt_client_id,
-                    _mqttAppID=mqtt_app_id,
-                    _userAppID=user_app_id,
-                    _endpoint=endpoint,
-                    _region=region,
-                    _session=session,
-                    _is_logged=True,
-                    _jar=jar,
-                    _last_refresh=time.time(),
-                    _userAgent=user_agent or cls.BASE_HEADERS["User-Agent"],
-                )
-                logger.debug(f"Extracted tokens from bootstrap page: {url}")
-                return out
-            except Exception as exc:
-                last_error = exc
-                html_text = locals().get("html_content")
-                if isinstance(html_text, str):
-                    logger.warning(
-                        "fbchat-muqit bootstrap failed for "
-                        f"{url}: {exc}; html_len={len(html_text)}; markers={_html_markers(html_text)}"
+        checkpoint_error: Exception | None = None
+        for attempt in range(1, _bootstrap_retries() + 1):
+            for url in _bootstrap_urls():
+                html_content = None
+                try:
+                    host, html_content = await asyncio.wait_for(
+                        _fetch_bootstrap_html(cls, session, url, user_agent),
+                        timeout=_bootstrap_timeout_seconds(),
                     )
-                else:
-                    logger.warning(f"fbchat-muqit bootstrap failed for {url}: {exc}")
+                    logger.debug(
+                        f"Received bootstrap HTML from {url}: {len(html_content)} characters"
+                    )
+                    (
+                        fb_dtsg,
+                        fb_dtsg_ag,
+                        lsd,
+                        jazoest,
+                        jazoest_async,
+                        client_revision,
+                        mqtt_client_id,
+                        mqtt_app_id,
+                        user_app_id,
+                        endpoint,
+                        region,
+                        user_name,
+                    ) = _extract_tokens_from_html(html_content)
+                    out = cls(
+                        user_id=user_id,
+                        user_name=user_name,
+                        _host=host,
+                        _fb_dtsg=fb_dtsg,
+                        _fb_dtsg_ag=fb_dtsg_ag,
+                        _lsd=lsd,
+                        _jazoest=jazoest,
+                        _jazoest_async=jazoest_async,
+                        _revision=client_revision,
+                        _mqttClientID=mqtt_client_id,
+                        _mqttAppID=mqtt_app_id,
+                        _userAppID=user_app_id,
+                        _endpoint=endpoint,
+                        _region=region,
+                        _session=session,
+                        _is_logged=True,
+                        _jar=jar,
+                        _last_refresh=time.time(),
+                        _userAgent=user_agent or cls.BASE_HEADERS["User-Agent"],
+                    )
+                    logger.debug(f"Extracted tokens from bootstrap page: {url}")
+                    return out
+                except Exception as exc:
+                    last_error = exc
+                    html_text = locals().get("html_content")
+                    if isinstance(html_text, str):
+                        markers = _html_markers(html_text)
+                        if "checkpoint=True" in markers or "login=True" in markers:
+                            checkpoint_error = AuthenticationError(
+                                "Facebook returned checkpoint/login page; "
+                                "cookies are not fully authenticated."
+                            )
+                        logger.warning(
+                            "fbchat-muqit bootstrap failed for "
+                            f"{url} (attempt {attempt}/{_bootstrap_retries()}): "
+                            f"{exc}; html_len={len(html_text)}; markers={markers}"
+                        )
+                    else:
+                        logger.warning(
+                            "fbchat-muqit bootstrap failed for "
+                            f"{url} (attempt {attempt}/{_bootstrap_retries()}): {exc}"
+                        )
+            if attempt < _bootstrap_retries():
+                await asyncio.sleep(_bootstrap_retry_delay_seconds())
 
-        raise last_error or AuthenticationError("Failed to extract session data")
+        raise (
+            checkpoint_error
+            or last_error
+            or AuthenticationError("Failed to extract session data")
+        )
     except Exception as exc:
         logger.error(f"Failed to create State from session: {exc}")
         if isinstance(exc, FBChatError):
@@ -266,9 +406,11 @@ def apply_fbchat_patches() -> None:
         return
 
     from fbchat_muqit import state
+    from fbchat_muqit import muqit
     from fbchat_muqit.utils import stateHelper
 
     stateHelper.extract_tokens_from_html = _extract_tokens_from_html
     state.extract_tokens_from_html = _extract_tokens_from_html
     state.State.login = classmethod(_login_with_bootstrap_fallback)
+    muqit.Mqtt._configure_mqtt_options = _configure_mqtt_options
     _PATCHED = True

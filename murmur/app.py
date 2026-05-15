@@ -34,6 +34,7 @@ from .runtime_state import (
     RuntimeStateNotConfigured,
     load_facebook_proxy_state,
 )
+from .webshare_proxy import ensure_webshare_proxy_state, network_policy
 
 apply_fbchat_patches()
 
@@ -51,7 +52,26 @@ FACEBOOK_COOKIE_EXPIRED_SIGNATURES = (
     "failed to extract session data",
     "cookie json is missing required facebook session cookies",
     "invalid fbstate format",
+    "not logged in - please authenticate",
+    "please refresh your authentication cookies",
+    "facebook returned checkpoint/login page",
+    "cookies are not fully authenticated",
+    "code: 1357001",
+    "code: 1357004",
+)
+FACEBOOK_NETWORK_FAILURE_SIGNATURES = (
+    "timeouterror",
+    "timeout",
     "mqtt endpoint not found",
+    "proxy authentication required",
+    "clienthttpproxyerror",
+    "cannot connect",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "temporary failure",
+    "network is unreachable",
+    "ssl:",
 )
 
 
@@ -150,18 +170,30 @@ def env_bool(name: str, default: bool) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
-def facebook_cookie_expired_error(exc: BaseException) -> bool:
+def exception_chain_texts(exc: BaseException) -> list[str]:
+    texts: list[str] = []
     seen: set[int] = set()
     current: BaseException | None = exc
 
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        text = f"{type(current).__name__}: {current}".lower()
-        if any(signature in text for signature in FACEBOOK_COOKIE_EXPIRED_SIGNATURES):
-            return True
+        texts.append(f"{type(current).__name__}: {current}".lower())
         current = current.__cause__ or current.__context__
 
-    return False
+    return texts
+
+
+def facebook_network_failure_error(exc: BaseException) -> bool:
+    text = "\n".join(exception_chain_texts(exc))
+    return any(signature in text for signature in FACEBOOK_NETWORK_FAILURE_SIGNATURES)
+
+
+def facebook_cookie_expired_error(exc: BaseException) -> bool:
+    if facebook_network_failure_error(exc):
+        return False
+
+    text = "\n".join(exception_chain_texts(exc))
+    return any(signature in text for signature in FACEBOOK_COOKIE_EXPIRED_SIGNATURES)
 
 
 def parse_model_aliases(default_model: str) -> dict[str, str]:
@@ -222,6 +254,10 @@ def normalize_proxy(value: str | None) -> str | None:
     return value
 
 
+def proxy_direct_requested(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"direct", "none", "off", "false"}
+
+
 def load_runtime_proxy_state() -> dict[str, str]:
     if not env_bool("MURMUR_LOAD_PROXY_STATE", True):
         return {}
@@ -241,19 +277,27 @@ def setting_proxy(
         raw = proxy_state.get(key)
     else:
         raw = os.getenv(key)
+    if proxy_direct_requested(raw):
+        return None
     return normalize_proxy(raw) or fallback
 
 
 def load_settings() -> Settings:
     load_dotenv()
-    proxy_state = load_runtime_proxy_state()
+    facebook_network_policy = network_policy()
+    proxy_state = {} if facebook_network_policy == "direct" else load_runtime_proxy_state()
 
     port = os.getenv("PORT", "8080")
     openwebui_base_url = os.getenv("OPENWEBUI_BASE_URL") or f"http://127.0.0.1:{port}"
     openwebui_model = os.environ["OPENWEBUI_MODEL"]
-    fb_proxy = setting_proxy(proxy_state, "FB_PROXY")
-    fb_upload_proxy = setting_proxy(proxy_state, "FB_UPLOAD_PROXY", fb_proxy)
-    fb_mqtt_proxy = setting_proxy(proxy_state, "FB_MQTT_PROXY", fb_proxy)
+    if facebook_network_policy == "direct":
+        fb_proxy = None
+        fb_upload_proxy = None
+        fb_mqtt_proxy = None
+    else:
+        fb_proxy = setting_proxy(proxy_state, "FB_PROXY")
+        fb_upload_proxy = setting_proxy(proxy_state, "FB_UPLOAD_PROXY", fb_proxy)
+        fb_mqtt_proxy = setting_proxy(proxy_state, "FB_MQTT_PROXY", fb_proxy)
 
     allowed_thread_ids = {
         thread_id.strip()
@@ -721,15 +765,18 @@ class Murmur:
         self.client.logger.info(f"The Thread {threads} marked as Read.")
 
     def run(self) -> None:
+        asyncio.run(self.run_async())
+
+    async def run_async(self) -> None:
         if self.settings.openwebui_warmup:
             try:
-                asyncio.run(self.warmup_openwebui())
+                await self.warmup_openwebui()
             except Exception as exc:
                 print(f"Open WebUI warmup failed: {exc}")
-        asyncio.run(self.preflight_facebook_cookie_login())
-        self.client.run()
+        self.client._initial_state = await self.preflight_facebook_cookie_login()
+        await self.client._runner()
 
-    async def preflight_facebook_cookie_login(self) -> None:
+    async def preflight_facebook_cookie_login(self):
         state = None
         try:
             state = await fb_state.State.from_json_cookies(
@@ -739,9 +786,15 @@ class Murmur:
             )
             who = state.user_name or state.user_id
             print(f"Messenger cookie preflight verified as {who} ({state.user_id}).")
-        finally:
+            from fbchat_muqit.muqit import Mqtt
+
+            sequence_id = await Mqtt._fetch_sequence_id(state)
+            print(f"Messenger sequence preflight verified as {sequence_id}.")
+            return state
+        except Exception:
             if state is not None:
                 await state.close()
+            raise
 
     def configure_facebook_http_timeout(self) -> None:
         timeout_seconds = max(30, self.settings.fb_http_timeout_seconds)
@@ -3605,6 +3658,8 @@ class Murmur:
 
 def main() -> None:
     try:
+        load_dotenv()
+        asyncio.run(ensure_webshare_proxy_state())
         Murmur(load_settings()).run()
     except Exception as exc:
         if facebook_cookie_expired_error(exc):

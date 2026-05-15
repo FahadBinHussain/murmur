@@ -105,6 +105,8 @@ The all-in-one Docker deployment starts three processes:
 
 The public proxy forwards normal web traffic to Open WebUI and also hosts the optional local Cloudflare image adapter.
 
+The maintained Mermaid source for the current runtime flow is in [docs/current-flow.mmd](docs/current-flow.mmd).
+
 ```text
 Browser / HF Space URL
   -> Murmur public proxy
@@ -286,17 +288,35 @@ MURMUR_LOAD_PROXY_STATE=true
 FB_COOKIES_PATH=cookies.json
 FB_COOKIES_JSON_B64=
 FB_USER_AGENT=
+FB_NETWORK_POLICY=auto
 FB_PROXY=
 FB_UPLOAD_PROXY=
-FB_MQTT_PROXY=
+FB_MQTT_PROXY=direct
+WEBSHARE_API_KEY=
+WEBSHARE_API_BASE_URL=https://proxy.webshare.io/api/v2
+WEBSHARE_PROXY_MODE=direct
+WEBSHARE_PROXY_PAGE_SIZE=25
+WEBSHARE_PROXY_COUNTRIES=
+WEBSHARE_BACKBONE_HOST=p.webshare.io
+WEBSHARE_BACKBONE_PORT=80
+WEBSHARE_PROXY_TEST_URL=https://www.facebook.com/
+WEBSHARE_PROXY_TEST_TIMEOUT_SECONDS=15
+WEBSHARE_PROXY_TEST_CONCURRENCY=5
+WEBSHARE_KEEP_LAST_ON_ROTATION_FAILURE=true
+WEBSHARE_API_TIMEOUT_SECONDS=20
 FB_HTTP_TIMEOUT_SECONDS=120
+FBCHAT_BOOTSTRAP_RETRIES=3
+FBCHAT_BOOTSTRAP_RETRY_DELAY_SECONDS=2
+FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS=45
+FBCHAT_MQTT_APP_ID=219994525426954
+FBCHAT_MQTT_REGION=
 FB_MQTT_WATCHDOG_SECONDS=15
 FB_UPLOAD_RETRIES=3
 ```
 
 Use `ALLOWED_THREAD_IDS` or the admin console thread gate in production so Murmur only answers in threads you control.
 
-The admin console can also save Facebook proxy URLs to runtime state. Keep the login/upload proxy stable, and use a separate realtime MQTT proxy when the Messenger listener is the failing part.
+The admin console can also save Facebook proxy URLs to runtime state. For Webshare-managed rotation, set `WEBSHARE_API_KEY` and `FB_NETWORK_POLICY=webshare`; Murmur will test the stored proxy, fetch valid Webshare proxies when it fails, and save the first Facebook-reachable proxy back to runtime state. Set `FB_MQTT_PROXY=direct` when the proxy breaks realtime, while keeping `FB_PROXY` and `FB_UPLOAD_PROXY` proxied for Facebook HTTP and attachment uploads.
 
 Messenger one-to-one user messages may be limited by end-to-end encryption. Group chats, room chats, and pages are usually better test targets for `fbchat-muqit`.
 
@@ -430,6 +450,8 @@ python .\scripts\facebook_login_refresh.py
 ```
 
 By default the helper opens CloakBrowser/Chromium with a persistent profile at `.murmur-facebook-profile`, prefers `FB_LOGIN_EMAIL` over `FB_LOGIN_PHONE`, exports fresh cookies to `FB_LOGIN_EXPORT_PATH` or `FB_COOKIES_PATH`, backs up the previous cookie file, and verifies the result with `fbchat-muqit` before persisting it. It uses `FB_LOGIN_PROXY` when set, otherwise it falls back to the admin-saved `FB_PROXY` state and then the `FB_PROXY` environment variable; set `FB_LOGIN_PROXY=direct` to force a direct browser login. Set `FB_LOGIN_BROWSER_ENGINE=playwright` to use plain Playwright instead.
+
+When `FB_NETWORK_POLICY=webshare` and `WEBSHARE_API_KEY` is set, the helper runs the same Webshare proxy manager before opening the browser, so hosted refresh, login verification, uploads, and realtime Messenger use the same rotated Facebook proxy state.
 
 ### Hosted auto-refresh
 
@@ -586,10 +608,28 @@ Direct PowerShell one-liner:
 | `FB_COOKIES_PATH` | `cookies.json` | Path to Facebook cookies JSON. |
 | `FB_COOKIES_JSON_B64` | empty | Optional bootstrap base64 cookies JSON for hosted deployments. |
 | `FB_USER_AGENT` | library default | Browser user-agent paired with exported cookies. |
+| `FB_NETWORK_POLICY` | `auto` | Facebook network mode: `auto`, `direct`, or `webshare`. `webshare` requires `WEBSHARE_API_KEY` and never silently falls back to direct. |
 | `FB_PROXY` | empty | Proxy for Facebook HTTP/login requests. |
 | `FB_UPLOAD_PROXY` | `FB_PROXY` | Proxy for Messenger attachment uploads. |
-| `FB_MQTT_PROXY` | `FB_PROXY` | Proxy for Messenger realtime MQTT. |
+| `FB_MQTT_PROXY` | `direct` | Proxy for Messenger realtime MQTT. Use `direct` to keep realtime off the login/upload proxy. |
+| `WEBSHARE_API_KEY` | empty | Webshare API token used to fetch and rotate valid proxies. The first key must be created in the Webshare dashboard. |
+| `WEBSHARE_API_BASE_URL` | `https://proxy.webshare.io/api/v2` | Webshare API base URL. |
+| `WEBSHARE_PROXY_MODE` | `direct` | Webshare proxy-list mode requested from the API. `direct` uses individual proxy hosts and ports; `backbone` uses Webshare's stable gateway. |
+| `WEBSHARE_PROXY_PAGE_SIZE` | `25` | Number of Webshare proxy records to inspect per rotation attempt. |
+| `WEBSHARE_PROXY_COUNTRIES` | empty | Optional comma-separated country-code filter for Webshare candidates. |
+| `WEBSHARE_BACKBONE_HOST` | `p.webshare.io` | Webshare backbone/rotating gateway host. |
+| `WEBSHARE_BACKBONE_PORT` | `80` | Webshare backbone/rotating gateway port for username/password auth. |
+| `WEBSHARE_PROXY_TEST_URL` | `https://www.facebook.com/` | URL used to check whether a candidate proxy can reach Facebook. |
+| `WEBSHARE_PROXY_TEST_TIMEOUT_SECONDS` | `15` | Per-proxy connectivity-test timeout. |
+| `WEBSHARE_PROXY_TEST_CONCURRENCY` | `5` | Number of Webshare candidates to test in parallel during rotation. |
+| `WEBSHARE_KEEP_LAST_ON_ROTATION_FAILURE` | `true` | Keep the last configured Facebook proxy if Webshare rotation tests fail, so startup does not hide the real Facebook/auth error behind a proxy-test outage. |
+| `WEBSHARE_API_TIMEOUT_SECONDS` | `20` | Webshare API request timeout. |
 | `FB_HTTP_TIMEOUT_SECONDS` | `120` | Facebook HTTP timeout. |
+| `FBCHAT_BOOTSTRAP_RETRIES` | `3` | Retry Messenger/Facebook bootstrap token extraction before treating cookies as bad. |
+| `FBCHAT_BOOTSTRAP_RETRY_DELAY_SECONDS` | `2` | Delay between bootstrap retry rounds. |
+| `FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS` | `45` | Per-bootstrap-page timeout for token extraction. |
+| `FBCHAT_MQTT_APP_ID` | `219994525426954` | Fallback Messenger Web MQTT app id when Facebook omits `MqttWebConfig`. |
+| `FBCHAT_MQTT_REGION` | empty | Optional fallback Messenger MQTT region. Usually leave blank. |
 | `FB_MQTT_WATCHDOG_SECONDS` | `15` | Restart listener if MQTT stops silently. |
 | `FB_UPLOAD_RETRIES` | `3` | Attachment upload retry count. |
 | `FB_UPLOAD_ENDPOINTS` | Facebook and Messenger upload hosts | Upload endpoints tried in order. |
@@ -613,10 +653,13 @@ Direct PowerShell one-liner:
 | `FB_LOGIN_PROFILE_VAULT_MAX_BYTES` | `209715200` | Maximum compressed profile size accepted for DB storage. |
 | `FB_LOGIN_HEADLESS` | `false` | Run helper browser headless. Keep `false` for checkpoints and 2FA. |
 | `FB_LOGIN_TIMEOUT_SECONDS` | `300` | Time to wait for `c_user` and `xs` cookies after login starts. |
+| `FB_LOGIN_NAV_TIMEOUT_SECONDS` | `120` | Browser navigation timeout for the login helper. |
 | `FB_LOGIN_VERIFY` | `true` | Verify the exported cookies with `fbchat-muqit`. |
+| `FB_LOGIN_CLEAR_ON_VERIFY_FAILURE` | `false` | Clear browser cookies after a non-network verification failure. Keep this disabled to preserve trusted profile state during checkpoint or reCAPTCHA recovery. |
 | `FB_LOGIN_PERSIST_DB` | `false` | Also persist exported cookies to Murmur runtime PostgreSQL state. |
 | `FB_LOGIN_BACKUP_EXISTING` | `true` | Back up the old cookie file before overwriting it. |
 | `FB_LOGIN_PROXY` | admin-saved `FB_PROXY`, then env `FB_PROXY` | Browser proxy for local Facebook login. Use `direct` to disable. |
+| `FB_LOGIN_DIRECT_FALLBACK_ON_PROXY_FAILURE` | `true` | Hosted auto-refresh retries the browser login without `FB_LOGIN_PROXY` if the configured proxy refresh fails. Messenger traffic still uses the configured Facebook proxy. |
 | `FB_LOGIN_VERIFY_PROXY` | `FB_LOGIN_PROXY` | Proxy used by the `fbchat-muqit` verification request. |
 | `FB_LOGIN_USER_AGENT` | `FB_USER_AGENT` | Browser and verification user-agent override. |
 | `FB_LOGIN_AUTO_REFRESH` | `false` | Run the browser-login helper automatically after known expired-cookie failures. |

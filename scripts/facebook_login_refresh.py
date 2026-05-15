@@ -82,6 +82,44 @@ def redacted_url(value: str | None) -> str:
     return f"{parsed.scheme}://{auth}@{host}"
 
 
+NETWORK_VERIFY_FAILURE_SIGNATURES = (
+    "timeouterror",
+    "timeout",
+    "mqtt endpoint not found",
+    "proxy authentication required",
+    "clienthttpproxyerror",
+    "cannot connect",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "temporary failure",
+    "network is unreachable",
+    "ssl:",
+)
+
+
+def exception_chain_text(exc: BaseException) -> str:
+    seen: set[int] = set()
+    parts: list[str] = []
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}".lower())
+        current = current.__cause__ or current.__context__
+    return "\n".join(parts)
+
+
+def verification_network_failure(exc: BaseException) -> bool:
+    text = exception_chain_text(exc)
+    return any(signature in text for signature in NETWORK_VERIFY_FAILURE_SIGNATURES)
+
+
+def should_clear_cookies_after_verify_failure(exc: BaseException) -> bool:
+    if verification_network_failure(exc):
+        return False
+    return env_bool("FB_LOGIN_CLEAR_ON_VERIFY_FAILURE", False)
+
+
 def fbchat_proxy(proxy_url: str | None) -> str | None:
     if not proxy_url:
         return None
@@ -110,6 +148,10 @@ def load_db_proxy_state() -> dict[str, str]:
 
 
 def select_login_proxy() -> tuple[str, str]:
+    network_policy = (os.getenv("FB_NETWORK_POLICY") or "").strip().lower()
+    if network_policy in {"direct", "none", "off", "false"}:
+        return "", "FB_NETWORK_POLICY=direct"
+
     login_proxy = os.getenv("FB_LOGIN_PROXY")
     if login_proxy is not None and login_proxy.strip():
         return login_proxy.strip(), "FB_LOGIN_PROXY"
@@ -123,6 +165,25 @@ def select_login_proxy() -> tuple[str, str]:
         return env_proxy, "FB_PROXY"
 
     return "", "direct"
+
+
+async def prepare_webshare_proxy_state() -> None:
+    try:
+        from murmur.webshare_proxy import (
+            ensure_webshare_proxy_state,
+            network_policy,
+            webshare_api_key,
+        )
+    except Exception as exc:
+        print(f"Webshare proxy manager unavailable: {compact_exception(exc)}")
+        return
+
+    policy = network_policy()
+    if policy == "direct":
+        return
+    if policy == "auto" and not webshare_api_key():
+        return
+    await ensure_webshare_proxy_state()
 
 
 def playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
@@ -349,14 +410,18 @@ def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
 
 async def click_submit_or_continue(page) -> bool:
     selectors = [
-        'button:has-text("Continue")',
-        'div[role="button"]:has-text("Continue")',
+        'button[name="login"]',
+        'input[name="login"]',
+        'button:has-text("Log in")',
+        'div[role="button"]:has-text("Log in")',
+        'button:has-text("Login")',
+        'div[role="button"]:has-text("Login")',
+        'button[type="submit"]',
+        'input[type="submit"]',
         'button:has-text("Submit")',
         'button:has-text("Confirm")',
-        'button[name="login"]',
-        'button[type="submit"]',
-        'input[name="login"]',
-        'input[type="submit"]',
+        'button:has-text("Continue")',
+        'div[role="button"]:has-text("Continue")',
     ]
     for scope in page_scopes(page):
         for selector in selectors:
@@ -368,6 +433,48 @@ async def click_submit_or_continue(page) -> bool:
                 return True
             except Exception:
                 continue
+    return False
+
+
+async def click_cookie_consent_continue(page) -> bool:
+    cookie_markers = [
+        "Allow the use of cookies",
+        "We use cookies and similar technologies",
+        "cookies from Facebook on this browser",
+    ]
+    for scope in page_scopes(page):
+        try:
+            body = await scope.locator("body").inner_text(timeout=500)
+        except Exception:
+            body = ""
+        if not any(marker.lower() in body.lower() for marker in cookie_markers):
+            continue
+
+        for selector in [
+            'button:has-text("Allow all cookies")',
+            'div[role="button"]:has-text("Allow all cookies")',
+            'button:has-text("Accept all")',
+            'div[role="button"]:has-text("Accept all")',
+            'button:has-text("Continue")',
+            'div[role="button"]:has-text("Continue")',
+        ]:
+            try:
+                locator = scope.locator(selector)
+                count = await locator.count()
+            except Exception:
+                continue
+            # Facebook can render both profile Continue and cookie Continue.
+            # The consent action usually appears lower in the DOM, so prefer the last visible match.
+            for index in range(count - 1, -1, -1):
+                target = locator.nth(index)
+                try:
+                    if not await target.is_visible(timeout=250):
+                        continue
+                    await target.click(timeout=1500)
+                    print("Clicked Facebook cookie consent step.")
+                    return True
+                except Exception:
+                    continue
     return False
 
 
@@ -553,10 +660,11 @@ async def fill_login_form(page, identifier: str, password: str) -> bool:
         ],
     )
 
-    if email_box is None or password_box is None:
+    if password_box is None:
         return False
 
-    await email_box.fill(identifier, timeout=2000)
+    if email_box is not None:
+        await email_box.fill(identifier, timeout=2000)
     await password_box.fill(password, timeout=2000)
 
     if not await click_submit_or_continue(page):
@@ -623,12 +731,19 @@ async def wait_for_login(
     totp_secret: str,
     login_identifier: str = "",
     password: str = "",
+    headless: bool = False,
+    require_verified: bool = False,
+    verify_output_path: Path | None = None,
+    verify_user_agent: str | None = None,
+    verify_proxy: str | None = None,
 ) -> list[dict[str, Any]]:
     deadline = time.monotonic() + timeout_seconds
     last_totp_code: str | None = None
     last_status_log = 0.0
     login_resubmits = 0
     last_login_submit = 0.0
+    last_verify_attempt = 0.0
+    last_verify_error: BaseException | None = None
     while time.monotonic() < deadline:
         try:
             cookies = await facebook_cookies(context)
@@ -637,12 +752,43 @@ async def wait_for_login(
                 raise RuntimeError("Browser closed before Facebook login cookies were exported.") from exc
             raise
         if has_login_cookies(cookies):
-            return cookies
+            if not require_verified:
+                return cookies
+            if time.monotonic() - last_verify_attempt > 15:
+                last_verify_attempt = time.monotonic()
+                try:
+                    await verify_cookie_candidate(
+                        cookies,
+                        verify_output_path or (ROOT / "cookies.json"),
+                        verify_user_agent,
+                        verify_proxy,
+                    )
+                    return cookies
+                except Exception as exc:
+                    last_verify_error = exc
+                    print(
+                        "Facebook cookies are present but fbchat-muqit verification still fails: "
+                        f"{compact_exception(exc)}"
+                    )
         if await facebook_captcha_detected(page):
             await facebook_page_debug(page)
+            screenshot_path = ROOT / "output" / "facebook_login_refresh_captcha.png"
+            try:
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                print(f"Saved reCAPTCHA screenshot: {screenshot_path}")
+            except Exception as exc:
+                print(f"Could not save reCAPTCHA screenshot: {exc}")
+            retry_hint = (
+                "Run the same command with --headed, solve the visible challenge once, "
+                "and let the script persist the refreshed trusted profile."
+                if headless
+                else "Solve the visible challenge in the browser and let the script continue."
+            )
             raise RuntimeError(
-                "Facebook login blocked by reCAPTCHA. "
-                "Hosted auto-refresh cannot solve this challenge without an already trusted profile."
+                "Facebook login blocked by reCAPTCHA during fresh login. "
+                f"{retry_hint} Hosted auto-refresh cannot solve this challenge "
+                "without an already trusted profile."
             )
         if time.monotonic() - last_status_log > 20:
             try:
@@ -653,7 +799,9 @@ async def wait_for_login(
             last_status_log = time.monotonic()
         last_totp_code = await submit_totp_if_needed(page, totp_secret, last_totp_code)
         await click_authentication_app_option(page)
-        await click_safe_facebook_step(page)
+        if await click_cookie_consent_continue(page):
+            await asyncio.sleep(2)
+            continue
         if (
             login_identifier
             and password
@@ -666,6 +814,7 @@ async def wait_for_login(
             print(f"Resubmitted Facebook login form after redirect ({login_resubmits}/3).")
             await asyncio.sleep(3)
             continue
+        await click_safe_facebook_step(page)
         await asyncio.sleep(2)
     screenshot_path = ROOT / "output" / "facebook_login_refresh_timeout.png"
     try:
@@ -674,6 +823,16 @@ async def wait_for_login(
         print(f"Saved timeout screenshot: {screenshot_path}")
     except Exception as exc:
         print(f"Could not save timeout screenshot: {exc}")
+    if require_verified:
+        last_error = (
+            f" Last verification error: {compact_exception(last_verify_error)}."
+            if last_verify_error
+            else ""
+        )
+        raise TimeoutError(
+            "Timed out waiting for Facebook cookies to pass fbchat-muqit verification."
+            f"{last_error} Finish any checkpoint, reCAPTCHA, or 2FA in the browser, then run again."
+        )
     raise TimeoutError(
         "Timed out waiting for Facebook login cookies c_user and xs. "
         "Finish any checkpoint or 2FA in the browser, then run again."
@@ -690,14 +849,19 @@ def write_cookies(path: Path, cookies: list[dict[str, Any]], backup: bool) -> No
 
 async def verify_with_fbchat(path: Path, user_agent: str | None, proxy: str | None) -> None:
     from murmur.fbchat_patch import apply_fbchat_patches
+    from fbchat_muqit.muqit import Mqtt
     from fbchat_muqit.state import State
 
     apply_fbchat_patches()
     state = None
     try:
         state = await State.from_json_cookies(str(path), user_agent, proxy)
+        sequence_id = await Mqtt._fetch_sequence_id(state)
         who = state.user_name or state.user_id
-        print(f"Verified with fbchat-muqit as {who} ({state.user_id}).")
+        print(
+            f"Verified with fbchat-muqit as {who} ({state.user_id}); "
+            f"sequence_id={sequence_id}."
+        )
     finally:
         if state is not None:
             await state.close()
@@ -723,6 +887,18 @@ async def verify_cookie_candidate(
 def compact_exception(exc: BaseException) -> str:
     text = str(exc).strip().replace("\n", " ")
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def configure_page_timeouts(page: Any, timeout_seconds: int) -> None:
+    timeout_ms = max(1000, timeout_seconds * 1000)
+    try:
+        page.set_default_timeout(timeout_ms)
+    except Exception:
+        pass
+    try:
+        page.set_default_navigation_timeout(timeout_ms)
+    except Exception:
+        pass
 
 
 def persist_to_db(cookies: list[dict[str, Any]]) -> None:
@@ -752,6 +928,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-dir", type=Path, default=env_path("FB_LOGIN_PROFILE_DIR", ".murmur-facebook-profile"))
     parser.add_argument("--output", type=Path, default=env_path("FB_LOGIN_EXPORT_PATH", os.getenv("FB_COOKIES_PATH", "cookies.json")))
     parser.add_argument("--timeout", type=int, default=env_int("FB_LOGIN_TIMEOUT_SECONDS", 300))
+    parser.add_argument("--nav-timeout", type=int, default=env_int("FB_LOGIN_NAV_TIMEOUT_SECONDS", 120))
     parser.add_argument("--headless", action="store_true", default=env_bool("FB_LOGIN_HEADLESS", False))
     parser.add_argument("--headed", action="store_false", dest="headless")
     parser.add_argument("--no-verify", action="store_true", default=not env_bool("FB_LOGIN_VERIFY", True))
@@ -774,6 +951,7 @@ async def main_async() -> int:
     login_identifier = (args.email or args.phone).strip()
     password = args.password
     totp_secret = str(args.totp_secret or "").strip()
+    await prepare_webshare_proxy_state()
     proxy_url, proxy_source = select_login_proxy()
     verify_proxy = fbchat_proxy(os.getenv("FB_LOGIN_VERIFY_PROXY") or proxy_url)
     user_agent = os.getenv("FB_LOGIN_USER_AGENT") or os.getenv("FB_USER_AGENT") or None
@@ -809,7 +987,9 @@ async def main_async() -> int:
         try:
             await bootstrap_context_cookies(context, args.output)
             page = context.pages[0] if context.pages else await context.new_page()
+            configure_page_timeouts(page, args.nav_timeout)
 
+            require_verified_login = False
             cookies = await facebook_cookies(context)
             if has_login_cookies(cookies):
                 print("Existing browser profile already has Facebook login cookies.")
@@ -823,15 +1003,52 @@ async def main_async() -> int:
                             "Existing browser profile cookies failed fbchat-muqit verification: "
                             f"{compact_exception(exc)}"
                         )
-                        print("Clearing browser cookies and forcing a fresh Facebook login.")
-                        await context.clear_cookies()
-                        cookies = []
+                        if should_clear_cookies_after_verify_failure(exc):
+                            print("Clearing browser cookies and forcing a fresh Facebook login.")
+                            await context.clear_cookies()
+                            cookies = []
+                        elif verification_network_failure(exc):
+                            print(
+                                "Keeping browser cookies because verification failed like a "
+                                "network/proxy problem, not a cookie-expiry problem."
+                            )
+                            raise
+                        else:
+                            print(
+                                "Keeping browser cookies and profile trust state. "
+                                "Opening Facebook so the existing profile can finish reauthentication."
+                            )
+                            require_verified_login = True
+                            await page.goto(
+                                args.login_url,
+                                wait_until="domcontentloaded",
+                                timeout=max(1000, args.nav_timeout * 1000),
+                            )
 
             if not has_login_cookies(cookies):
-                await page.goto(args.login_url, wait_until="domcontentloaded")
+                await page.goto(
+                    args.login_url,
+                    wait_until="domcontentloaded",
+                    timeout=max(1000, args.nav_timeout * 1000),
+                )
                 cookies = await facebook_cookies(context)
 
-            if has_login_cookies(cookies):
+            if has_login_cookies(cookies) and require_verified_login:
+                print("Waiting for browser session to pass fbchat-muqit verification...")
+                cookies = await wait_for_login(
+                    context,
+                    page,
+                    args.timeout,
+                    totp_secret,
+                    login_identifier,
+                    password,
+                    args.headless,
+                    require_verified=True,
+                    verify_output_path=args.output,
+                    verify_user_agent=user_agent,
+                    verify_proxy=verify_proxy,
+                )
+            elif has_login_cookies(cookies):
                 pass
             elif login_identifier and password:
                 filled = await fill_login_form(page, login_identifier, password)
@@ -839,10 +1056,26 @@ async def main_async() -> int:
                     print("Submitted Facebook login form. Waiting for c_user/xs cookies...")
                 else:
                     print("Could not find the login form automatically. Use the browser manually.")
-                cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
+                cookies = await wait_for_login(
+                    context,
+                    page,
+                    args.timeout,
+                    totp_secret,
+                    login_identifier,
+                    password,
+                    args.headless,
+                )
             else:
                 print("FB_LOGIN_EMAIL/FB_LOGIN_PHONE or FB_LOGIN_PASSWORD is empty. Use the browser manually.")
-                cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
+                cookies = await wait_for_login(
+                    context,
+                    page,
+                    args.timeout,
+                    totp_secret,
+                    login_identifier,
+                    password,
+                    args.headless,
+                )
 
             write_cookies(args.output, cookies, backup=not args.no_backup)
             names = required_cookie_names(cookies)
@@ -874,7 +1107,9 @@ async def main_async() -> int:
             try:
                 await bootstrap_context_cookies(context, args.output)
                 page = context.pages[0] if context.pages else await context.new_page()
+                configure_page_timeouts(page, args.nav_timeout)
 
+                require_verified_login = False
                 cookies = await facebook_cookies(context)
                 if has_login_cookies(cookies):
                     print("Existing browser profile already has Facebook login cookies.")
@@ -888,15 +1123,52 @@ async def main_async() -> int:
                                 "Existing browser profile cookies failed fbchat-muqit verification: "
                                 f"{compact_exception(exc)}"
                             )
-                            print("Clearing browser cookies and forcing a fresh Facebook login.")
-                            await context.clear_cookies()
-                            cookies = []
+                            if should_clear_cookies_after_verify_failure(exc):
+                                print("Clearing browser cookies and forcing a fresh Facebook login.")
+                                await context.clear_cookies()
+                                cookies = []
+                            elif verification_network_failure(exc):
+                                print(
+                                    "Keeping browser cookies because verification failed like a "
+                                    "network/proxy problem, not a cookie-expiry problem."
+                                )
+                                raise
+                            else:
+                                print(
+                                    "Keeping browser cookies and profile trust state. "
+                                    "Opening Facebook so the existing profile can finish reauthentication."
+                                )
+                                require_verified_login = True
+                                await page.goto(
+                                    args.login_url,
+                                    wait_until="domcontentloaded",
+                                    timeout=max(1000, args.nav_timeout * 1000),
+                                )
 
                 if not has_login_cookies(cookies):
-                    await page.goto(args.login_url, wait_until="domcontentloaded")
+                    await page.goto(
+                        args.login_url,
+                        wait_until="domcontentloaded",
+                        timeout=max(1000, args.nav_timeout * 1000),
+                    )
                     cookies = await facebook_cookies(context)
 
-                if has_login_cookies(cookies):
+                if has_login_cookies(cookies) and require_verified_login:
+                    print("Waiting for browser session to pass fbchat-muqit verification...")
+                    cookies = await wait_for_login(
+                        context,
+                        page,
+                        args.timeout,
+                        totp_secret,
+                        login_identifier,
+                        password,
+                        args.headless,
+                        require_verified=True,
+                        verify_output_path=args.output,
+                        verify_user_agent=user_agent,
+                        verify_proxy=verify_proxy,
+                    )
+                elif has_login_cookies(cookies):
                     pass
                 elif login_identifier and password:
                     filled = await fill_login_form(page, login_identifier, password)
@@ -904,10 +1176,26 @@ async def main_async() -> int:
                         print("Submitted Facebook login form. Waiting for c_user/xs cookies...")
                     else:
                         print("Could not find the login form automatically. Use the browser manually.")
-                    cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
+                    cookies = await wait_for_login(
+                        context,
+                        page,
+                        args.timeout,
+                        totp_secret,
+                        login_identifier,
+                        password,
+                        args.headless,
+                    )
                 else:
                     print("FB_LOGIN_EMAIL/FB_LOGIN_PHONE or FB_LOGIN_PASSWORD is empty. Use the browser manually.")
-                    cookies = await wait_for_login(context, page, args.timeout, totp_secret, login_identifier, password)
+                    cookies = await wait_for_login(
+                        context,
+                        page,
+                        args.timeout,
+                        totp_secret,
+                        login_identifier,
+                        password,
+                        args.headless,
+                    )
 
                 write_cookies(args.output, cookies, backup=not args.no_backup)
                 names = required_cookie_names(cookies)

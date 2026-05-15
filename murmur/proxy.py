@@ -487,6 +487,8 @@ def normalize_admin_proxy(raw_proxy: str) -> str:
     proxy = raw_proxy.strip()
     if not proxy:
         return ""
+    if proxy.lower() in {"direct", "none", "off", "false"}:
+        return "direct"
     if "://" not in proxy:
         proxy = f"http://{proxy}"
 
