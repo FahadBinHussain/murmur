@@ -672,8 +672,51 @@ async def fill_login_form(page, identifier: str, password: str) -> bool:
     return True
 
 
+async def facebook_totp_page(page) -> bool:
+    url = (page.url or "").lower()
+    auth_url_markers = (
+        "two_step_verification",
+        "two_factor",
+        "checkpoint",
+        "approvals",
+        "login/reauth",
+    )
+    if any(marker in url for marker in auth_url_markers):
+        return True
+
+    auth_text_markers = (
+        "go to your authentication app",
+        "authentication app",
+        "authenticator app",
+        "two-factor authentication",
+        "enter the 6-digit code",
+        "enter a code from your authentication app",
+        "code generator",
+    )
+    home_text_markers = (
+        "what's on your mind",
+        "facebook menu",
+        "your shortcuts",
+        "messenger,",
+        "search messenger",
+    )
+    for scope in page_scopes(page):
+        try:
+            text = await scope.locator("body").inner_text(timeout=500)
+        except Exception:
+            continue
+        normalized = " ".join(text.lower().split())
+        if any(marker in normalized for marker in home_text_markers):
+            return False
+        if any(marker in normalized for marker in auth_text_markers):
+            return True
+    return False
+
+
 async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -> str | None:
     if not totp_secret:
+        return last_code
+    if not await facebook_totp_page(page):
         return last_code
     for scope in page_scopes(page):
         login_password = await first_visible(
