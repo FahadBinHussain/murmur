@@ -746,3 +746,9 @@ The project intentionally keeps most application logic in `murmur/app.py`, the p
 ## License
 
 This repository depends on upstream projects with their own licenses. Review the licenses for Open WebUI and fbchat-muqit before redistribution.
+
+## Contributors
+
+<a href="https://github.com/FahadBinHussain/murmur/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=FahadBinHussain/murmur" alt="Contributors" />
+</a>
