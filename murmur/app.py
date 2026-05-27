@@ -20,6 +20,7 @@ import fbchat_muqit.utils.stateHelper as fb_state_helper
 from dotenv import load_dotenv
 from fbchat_muqit import Client, EventType, Message
 
+from .bnp_notifications import BnpNotificationWorker
 from .fbchat_patch import apply_fbchat_patches
 from .admin_state import (
     read_thread_allowlist,
@@ -378,6 +379,7 @@ class Murmur:
         self.openwebui_token: str | None = None
         self.mqtt_watchdog_task: asyncio.Task | None = None
         self.thread_registry_refresh_task: asyncio.Task | None = None
+        self.bnp_notification_task: asyncio.Task | None = None
         self.response_tasks: set[asyncio.Task] = set()
         self.file_upload_lock = asyncio.Lock()
         self.fb_user_names: dict[str, str] = {}
@@ -402,6 +404,7 @@ class Murmur:
         self.patch_facebook_event_logs()
         self.client.event(EventType.LISTENING)(self.on_listening)
         self.client.event(EventType.MESSAGE)(self.on_message)
+        self.bnp_notification_worker = BnpNotificationWorker(self.client)
 
     def patch_facebook_event_logs(self) -> None:
         if not self.settings.fb_log_names:
@@ -946,6 +949,19 @@ class Murmur:
             self.thread_registry_refresh_task = asyncio.create_task(
                 self.refresh_thread_registry()
             )
+        if (
+            self.bnp_notification_worker.enabled
+            and (
+                self.bnp_notification_task is None
+                or self.bnp_notification_task.done()
+            )
+        ):
+            self.bnp_notification_task = asyncio.create_task(
+                self.bnp_notification_worker.run()
+            )
+            self.bnp_notification_task.add_done_callback(
+                self.log_bnp_notification_task_error
+            )
 
     async def watch_mqtt_listener(self) -> None:
         await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)
@@ -1000,6 +1016,15 @@ class Murmur:
             task.result()
         except Exception as exc:
             print(f"Unhandled Murmur response task failed: {exc}")
+
+    def log_bnp_notification_task_error(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+
+        try:
+            task.result()
+        except Exception as exc:
+            print(f"Unhandled BNP Messenger notification task failed: {exc}")
 
     async def answer_message(self, message: Message, request: PromptRequest) -> None:
         bot_response = None

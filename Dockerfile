@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:main
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -7,7 +7,7 @@ ENV PORT=7860
 WORKDIR /app/murmur
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends xvfb xauth \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt pyproject.toml README.md ./
@@ -21,4 +21,4 @@ COPY scripts ./scripts
 
 EXPOSE 7860
 
-CMD ["bash", "/app/murmur/scripts/start-all.sh"]
+CMD ["bash", "/app/murmur/scripts/start-hf.sh"]
