@@ -26,6 +26,13 @@ class LobeSyncConfig:
 
 
 @dataclass(frozen=True)
+class LobeFileAttachment:
+    name: str
+    content_type: str
+    content: bytes
+
+
+@dataclass(frozen=True)
 class LobeChatExchange:
     thread_id: str
     thread_name: str
@@ -38,6 +45,7 @@ class LobeChatExchange:
     provider: str
     model: str
     gateway: str
+    assistant_files: tuple[LobeFileAttachment, ...] = ()
 
 
 class LobeSyncer:
@@ -307,6 +315,105 @@ class LobeSyncer:
             metadata={**base_metadata, "mirroredRole": "assistant"},
             created_at=assistant_created_at,
         )
+        if exchange.assistant_files:
+            self.upsert_message_files(
+                cursor,
+                user_id=user_id,
+                message_id=assistant_message_id,
+                exchange=exchange,
+                base_metadata=base_metadata,
+            )
+
+    def upsert_message_files(
+        self,
+        cursor: Any,
+        *,
+        user_id: str,
+        message_id: str,
+        exchange: LobeChatExchange,
+        base_metadata: dict[str, Any],
+    ) -> None:
+        for index, attachment in enumerate(exchange.assistant_files, start=1):
+            content = attachment.content
+            file_hash = hashlib.sha256(content).hexdigest()
+            content_type = attachment.content_type or "application/octet-stream"
+            url = self.data_url(content, content_type)
+            file_id = f"file_murmur_{self.slug_id(message_id, file_hash, str(index), length=24)}"
+            metadata = {
+                **base_metadata,
+                "sourceMessageId": exchange.source_message_id,
+                "mirroredRole": "assistant",
+                "mirroredAttachment": "image",
+                "originalName": attachment.name,
+            }
+
+            cursor.execute(
+                """
+                INSERT INTO global_files (
+                  hash_id, file_type, size, url, metadata, creator,
+                  created_at, accessed_at
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, NOW(), NOW())
+                ON CONFLICT (hash_id) DO UPDATE
+                SET file_type = EXCLUDED.file_type,
+                    size = EXCLUDED.size,
+                    url = EXCLUDED.url,
+                    metadata = COALESCE(global_files.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                    accessed_at = NOW()
+                """,
+                (
+                    file_hash,
+                    content_type,
+                    len(content),
+                    url,
+                    self.json_param(metadata),
+                    user_id,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO files (
+                  id, user_id, file_type, name, size, url, metadata,
+                  file_hash, client_id, source,
+                  created_at, updated_at, accessed_at
+                )
+                VALUES (
+                  %s, %s, %s, %s, %s, %s, %s::jsonb,
+                  %s, %s, %s,
+                  NOW(), NOW(), NOW()
+                )
+                ON CONFLICT (id) DO UPDATE
+                SET file_type = EXCLUDED.file_type,
+                    name = EXCLUDED.name,
+                    size = EXCLUDED.size,
+                    url = EXCLUDED.url,
+                    metadata = COALESCE(files.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                    file_hash = EXCLUDED.file_hash,
+                    source = EXCLUDED.source,
+                    updated_at = NOW(),
+                    accessed_at = NOW()
+                """,
+                (
+                    file_id,
+                    user_id,
+                    content_type,
+                    attachment.name,
+                    len(content),
+                    url,
+                    self.json_param(metadata),
+                    file_hash,
+                    file_id,
+                    "murmur",
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO messages_files (file_id, message_id, user_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (file_id, message_id) DO NOTHING
+                """,
+                (file_id, message_id, user_id),
+            )
 
     def upsert_message(
         self,
@@ -401,6 +508,12 @@ class LobeSyncer:
         import json
 
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def data_url(self, content: bytes, content_type: str) -> str:
+        import base64
+
+        encoded = base64.b64encode(content).decode("ascii")
+        return f"data:{content_type};base64,{encoded}"
 
     def slug_id(self, *parts: str, length: int = 24) -> str:
         raw = "\0".join(str(part) for part in parts)

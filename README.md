@@ -29,14 +29,14 @@ Murmur is a bridge, not a second AI platform.
 - AI provider keys and model routing belong to the configured gateway.
 - LiteLLM mode uses `/v1/chat/completions`, `/v1/images/generations`, and `/v1/models`.
 - OpenWebUI mode uses `/api/chat/completions`, `/api/v1/images/generations`, `/api/models`, and `/openai/*` model endpoints.
-- Lobe mirroring writes successful chat exchanges into Lobe's Postgres tables, without making Lobe the active model backend.
+- Lobe mirroring writes successful chat and image exchanges into Lobe's Postgres tables, without making Lobe the active model backend.
 - Per-thread model choices are stored in Murmur memory while the worker is running.
 
 ## Features
 
 - Messenger listener and sender through `fbchat-muqit`
 - Chat and image generation through LiteLLM or OpenWebUI
-- Optional Lobe mirror so Messenger chats appear in Lobe under readable topic names
+- Optional Lobe mirror so Messenger chats and generated images appear in Lobe under readable topic names
 - Symmetric per-thread chat and image model selection
 - Short per-thread memory before sending chat completions
 - Long Messenger replies split into deliverable chunks
@@ -308,7 +308,7 @@ Add `MURMUR_STATE_DATABASE_URL` if cookie/profile state should survive rebuilds 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LOBE_SYNC_ENABLED` | `false` | Mirror successful chat replies into Lobe. |
+| `LOBE_SYNC_ENABLED` | `false` | Mirror successful chat and image replies into Lobe. |
 | `LOBE_DATABASE_URL` | empty | Lobe Postgres database URL. |
 | `LOBE_SYNC_USER_EMAIL` | empty | Lobe account email to attach mirrored topics to. |
 | `LOBE_SYNC_USER_ID` | empty | Optional direct Lobe user id override. |

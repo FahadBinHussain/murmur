@@ -3,6 +3,7 @@ import base64
 import binascii
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -35,7 +36,7 @@ from .runtime_state import (
     RuntimeStateNotConfigured,
     load_facebook_proxy_state,
 )
-from .lobe_sync import LobeChatExchange, LobeSyncConfig, LobeSyncer
+from .lobe_sync import LobeChatExchange, LobeFileAttachment, LobeSyncConfig, LobeSyncer
 from .webshare_proxy import ensure_webshare_proxy_state, network_policy
 
 apply_fbchat_patches()
@@ -1832,6 +1833,9 @@ class Murmur:
             return await self.generate_image_response(
                 message.thread_id,
                 image_prompt,
+                source_message_id=message.id,
+                source_sender_id=message.sender_id,
+                source_sender_name=self.facebook_user_label(message.sender_id),
             )
 
         if command in {"see", "vision", "look"}:
@@ -3688,6 +3692,9 @@ class Murmur:
         self,
         thread_id: str,
         prompt: str,
+        source_message_id: str | None = None,
+        source_sender_id: str | None = None,
+        source_sender_name: str | None = None,
     ) -> BotResponse:
         model = self.current_image_model(thread_id)
         paths = await self.request_image_generation(prompt, model)
@@ -3697,11 +3704,90 @@ class Murmur:
         header = self.response_header(provider, model_label)
         if size:
             header = f"{header[:-1]}{size}]"
+        await self.sync_lobe_image(
+            thread_id=thread_id,
+            user_prompt=f"image {prompt}",
+            assistant_answer=header,
+            image_paths=paths,
+            source_message_id=source_message_id,
+            source_sender_id=source_sender_id,
+            source_sender_name=source_sender_name,
+            provider=provider,
+            model=model_label,
+        )
         return BotResponse(
             text=header,
             file_paths=paths,
             cleanup_paths=paths,
         )
+
+    async def sync_lobe_image(
+        self,
+        *,
+        thread_id: str,
+        user_prompt: str,
+        assistant_answer: str,
+        image_paths: list[str],
+        source_message_id: str | None,
+        source_sender_id: str | None,
+        source_sender_name: str | None,
+        provider: str,
+        model: str,
+    ) -> None:
+        if not self.lobe_sync.enabled:
+            return
+
+        try:
+            attachments = await asyncio.to_thread(
+                self.lobe_image_attachments,
+                image_paths,
+            )
+            thread_name = self.lobe_thread_name(thread_id)
+            await self.lobe_sync.sync_exchange(
+                LobeChatExchange(
+                    thread_id=thread_id,
+                    thread_name=thread_name,
+                    topic_title=self.lobe_topic_title(thread_name),
+                    user_prompt=user_prompt,
+                    assistant_answer=assistant_answer,
+                    source_message_id=source_message_id,
+                    sender_id=source_sender_id,
+                    sender_name=source_sender_name,
+                    provider=self.provider_display_name(provider),
+                    model=self.model_short_id(model),
+                    gateway=self.gateway_provider_id(),
+                    assistant_files=tuple(attachments),
+                )
+            )
+        except Exception as exc:
+            print(f"Lobe image sync failed for Messenger thread {thread_id}: {exc}")
+
+    def lobe_image_attachments(self, image_paths: list[str]) -> list[LobeFileAttachment]:
+        attachments: list[LobeFileAttachment] = []
+        for image_path in image_paths:
+            path = Path(image_path)
+            content = path.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()[:12]
+            content_type = self.image_content_type(path, content)
+            suffix = ".jpg" if content_type == "image/jpeg" else ".png"
+            attachments.append(
+                LobeFileAttachment(
+                    name=f"murmur-image-{digest}{suffix}",
+                    content_type=content_type,
+                    content=content,
+                )
+            )
+        return attachments
+
+    def image_content_type(self, path: Path, content: bytes) -> str:
+        if content.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        guessed, _ = mimetypes.guess_type(path.name)
+        if guessed and guessed.startswith("image/"):
+            return guessed
+        return "image/png"
 
     async def request_image_generation(
         self,
