@@ -5,33 +5,41 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      - key: WEBUI_SECRET_KEY
+      - key: MURMUR_COOKIE_STATE_SECRET
         generateValue: true
-      - key: WEBUI_ADMIN_EMAIL
+      - key: MURMUR_ADMIN_USERNAME
         sync: false
-      - key: WEBUI_ADMIN_PASSWORD
+      - key: MURMUR_ADMIN_PASSWORD
         sync: false
-      - key: ENABLE_SIGNUP
-        value: "false"
-      - key: DEFAULT_USER_ROLE
-        value: pending
-      - key: ENV
-        value: prod
-      - key: DATABASE_URL
+      - key: MURMUR_STATE_DATABASE_URL
         sync: false
-      - key: PGSSLMODE
-        value: require
-      - key: VECTOR_DB
-        value: pgvector
-      - key: PGVECTOR_DB_URL
+      - key: MURMUR_AI_BACKEND
+        value: litellm
+      - key: LITELLM_BASE_URL
         sync: false
-      - key: PGVECTOR_CREATE_EXTENSION
-        value: "false"
-      - key: OPENAI_API_BASE_URL
+      - key: LITELLM_API_KEY
         sync: false
-      - key: OPENAI_API_KEY
+      - key: LITELLM_MODEL
+        sync: false
+      - key: OPENWEBUI_BASE_URL
+        sync: false
+      - key: OPENWEBUI_API_KEY
         sync: false
       - key: OPENWEBUI_MODEL
+        sync: false
+      - key: OPENWEBUI_WARMUP
+        value: "false"
+      - key: OPENWEBUI_WARMUP_CHAT
+        value: "false"
+      - key: LOBE_SYNC_ENABLED
+        value: "false"
+      - key: LOBE_DATABASE_URL
+        sync: false
+      - key: LOBE_SYNC_USER_EMAIL
+        sync: false
+      - key: LOBE_SYNC_USER_ID
+        sync: false
+      - key: IMAGE_GENERATION_MODEL
         sync: false
       - key: FB_COOKIES_JSON_B64
         sync: false

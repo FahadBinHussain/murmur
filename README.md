@@ -7,15 +7,15 @@ suggested_hardware: cpu-basic
 
 # Murmur
 
-Murmur is a Facebook Messenger bridge for [Open WebUI](https://github.com/open-webui/open-webui), using [fbchat-muqit](https://github.com/togashigreat/fbchat-muqit) for Messenger transport.
+Murmur is a Facebook Messenger bridge for LiteLLM, OpenWebUI, Lobe chat mirroring, and compatible model gateways, using [fbchat-muqit](https://github.com/togashigreat/fbchat-muqit) for Messenger transport.
 
-It lets a Messenger thread talk to the same model router, provider connections, image generation settings, authentication, and persistence that Open WebUI already manages.
+It keeps Messenger handling, thread access, cookie refresh, and short per-thread memory inside Murmur. Model routing, provider keys, chat completion, and image generation stay in the external gateway.
 
 ```text
 Facebook Messenger
   -> fbchat-muqit
   -> Murmur
-  -> Open WebUI
+  -> selected AI backend
   -> Murmur
   -> fbchat-muqit
   -> Facebook Messenger
@@ -23,27 +23,22 @@ Facebook Messenger
 
 ## Project Boundary
 
-Murmur is designed to be a bridge, not a second AI platform.
+Murmur is a bridge, not a second AI platform.
 
 - Messenger transport belongs to `fbchat-muqit`.
-- AI chat and image entry points belong to Open WebUI.
-- Provider keys are synced into Open WebUI Connections.
-- Per-thread model selection stores Open WebUI model IDs.
-- Raw upstream errors are surfaced back through Messenger when possible.
-
-There is one intentional adapter exception: Cloudflare Workers AI image generation. Open WebUI expects an OpenAI-compatible image endpoint, while Cloudflare image models use Cloudflare's `/ai/run/{model}` API. Murmur can expose a small local OpenAI-compatible image adapter so Open WebUI can call Cloudflare image models. Chat still goes through Open WebUI.
+- AI provider keys and model routing belong to the configured gateway.
+- LiteLLM mode uses `/v1/chat/completions`, `/v1/images/generations`, and `/v1/models`.
+- OpenWebUI mode uses `/api/chat/completions`, `/api/v1/images/generations`, `/api/models`, and `/openai/*` model endpoints.
+- Lobe mirroring writes successful chat exchanges into Lobe's Postgres tables, without making Lobe the active model backend.
+- Per-thread model choices are stored in Murmur memory while the worker is running.
 
 ## Features
 
 - Messenger listener and sender through `fbchat-muqit`
-- Open WebUI chat bridge through `/api/chat/completions`
-- Open WebUI image bridge through `/api/v1/images/generations`
-- Bundled all-in-one Docker image based on the official Open WebUI image
-- External Open WebUI mode for separate deployments
-- Open WebUI JWT sign-in fallback when no API key is configured
-- Provider connection sync for OpenAI-compatible providers
+- Chat and image generation through LiteLLM or OpenWebUI
+- Optional Lobe mirror so Messenger chats appear in Lobe under readable topic names
 - Symmetric per-thread chat and image model selection
-- Short per-thread memory before sending messages to Open WebUI
+- Short per-thread memory before sending chat completions
 - Long Messenger replies split into deliverable chunks
 - Optional allowed-thread allowlist and admin thread gate
 - Optional Facebook HTTP, MQTT, and upload proxies
@@ -58,16 +53,17 @@ The canonical Messenger command prefix is `/ai`.
 ```text
 Chat
 /ai <message>
-/ai model <provider> [connection] <number>
+/ai model <number|model-id>
 
 Image
 /ai image <prompt>
-/ai image model <provider> [connection] <number>
+/ai image models
+/ai image model <number|model-id>
 
 Models
 /ai models
-/ai models all
-/ai models <provider> [connection]
+/ai models free
+/ai providers
 /ai status
 ```
 
@@ -78,44 +74,41 @@ Examples:
 ```text
 /ai explain this in one sentence
 /ai models
-/ai models all
-/ai models openrouter 2
-/ai model openrouter 2 1
+/ai model 12
 /ai image a brutalist library in heavy rain
-/ai image model cloudflare 1 12
+/ai image models
+/ai image model 44
 /ai status
 ```
 
-Model choices are remembered per Messenger thread. Chat model selection and image model selection are separate, but they use the same provider/connection/number syntax.
-Model lists collapse repeated provider connections by default; use `/ai models <provider> <connection>` when you need one exact connection's numbering.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for chat models and `/ai image models` for image-capable models.
 
 Responses include the selected provider and model:
 
 ```text
-[openrouter 2 - deepseek/deepseek-chat-v3-0324:free]
+[LiteLLM gateway - deepseek/deepseek-chat-v3-0324:free]
 ```
+
+If `MURMUR_AI_BACKEND=openwebui`, the header uses `Open WebUI` or the selected OpenWebUI connection/provider instead.
 
 ## Architecture
 
-The all-in-one Docker deployment starts three processes:
+The hosted Docker deployment starts two processes:
 
-- Open WebUI on an internal port
 - Murmur's public proxy on the public port
 - Murmur's Messenger listener
 
-The public proxy forwards normal web traffic to Open WebUI and also hosts the optional local Cloudflare image adapter.
-
-The maintained Mermaid source for the current runtime flow is in [docs/current-flow.mmd](docs/current-flow.mmd).
+The public proxy shows Murmur's status/admin surface at the root URL. The maintained Mermaid source for the current runtime flow is in [docs/current-flow.mmd](docs/current-flow.mmd).
 
 ```text
 Browser / HF Space URL
   -> Murmur public proxy
-  -> Open WebUI
+  -> Murmur status/admin
 
 Messenger event
   -> fbchat-muqit
   -> Murmur listener
-  -> Open WebUI API
+  -> selected backend API
   -> fbchat-muqit
 ```
 
@@ -123,8 +116,9 @@ Messenger event
 
 - Python 3.10+
 - Facebook cookies usable by `fbchat-muqit`
-- Open WebUI API key or Open WebUI admin email/password
-- At least one model/provider configured in Open WebUI
+- A LiteLLM or OpenWebUI URL
+- A backend API key when the backend requires one
+- At least one chat model configured in the selected backend
 
 For hosted deployments, use a dedicated Facebook account. `fbchat-muqit` is unofficial, and Facebook can change or restrict behavior without notice.
 
@@ -144,14 +138,41 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Minimal external Open WebUI configuration:
+Minimal LiteLLM configuration:
 
 ```env
-OPENWEBUI_BASE_URL=https://your-openwebui.example.com
-OPENWEBUI_API_KEY=your-openwebui-api-key
-OPENWEBUI_MODEL=your-model-id
+MURMUR_AI_BACKEND=litellm
+LITELLM_BASE_URL=https://your-litellm.example.com/v1
+LITELLM_API_KEY=your-gateway-key
+LITELLM_MODEL=your-chat-model-id
+IMAGE_GENERATION_MODEL=your-image-model-id
 FB_COOKIES_PATH=cookies.json
 ```
+
+`LITELLM_BASE_URL` may include or omit the trailing `/v1`; Murmur normalizes it.
+
+Optional OpenWebUI configuration:
+
+```env
+MURMUR_AI_BACKEND=openwebui
+OPENWEBUI_BASE_URL=https://your-openwebui.example.com
+OPENWEBUI_API_KEY=your-openwebui-key
+OPENWEBUI_MODEL=your-chat-model-id
+IMAGE_GENERATION_MODEL=your-image-model-id
+```
+
+If `OPENWEBUI_API_KEY` is empty, Murmur can sign in with `OPENWEBUI_LOGIN_EMAIL` and `OPENWEBUI_LOGIN_PASSWORD`.
+
+Optional Lobe mirror configuration:
+
+```env
+LOBE_SYNC_ENABLED=true
+LOBE_DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB
+LOBE_SYNC_USER_EMAIL=you@example.com
+LOBE_SYNC_TOPIC_PREFIX=Messenger
+```
+
+The Lobe user must already exist, usually by signing in to Lobe once. Murmur creates or reuses one `Murmur` Lobe agent/session, then mirrors each Messenger thread as a topic named like `Thread name | Messenger`.
 
 Run Murmur:
 
@@ -161,7 +182,7 @@ python -m murmur
 
 ## Docker
 
-Build the all-in-one image:
+Build the image:
 
 ```bash
 docker build -t murmur .
@@ -173,98 +194,35 @@ Run it:
 docker run --env-file .env -p 7860:7860 -v ./cookies.json:/app/murmur/cookies.json:ro murmur
 ```
 
-Open WebUI is exposed on port `7860`.
+Open the status/admin surface at `http://localhost:7860`.
 
-## Provider Connections
+## Backend Boundary
 
-Murmur syncs provider keys into Open WebUI Connections at startup. The provider shape is consistent:
+Murmur does not manage upstream AI provider keys. Configure OpenRouter, Gemini, Cloudflare, image providers, and other model backends in LiteLLM or OpenWebUI.
 
-```env
-OPENWEBUI_PROVIDER_SYNC=true
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,pollinations
+Murmur reads the selected backend's model list and sends chat/image requests back through the same backend. LiteLLM is the default backend; OpenWebUI remains supported through `MURMUR_AI_BACKEND=openwebui`.
 
-OPENROUTER_API_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_API_KEY_1=sk-or-v1-...
-OPENROUTER_API_KEY_2=sk-or-v1-...
-OPENROUTER_API_KEY_3=sk-or-v1-...
-OPENROUTER_API_KEY_4=sk-or-v1-...
-OPENROUTER_API_KEY_5=sk-or-v1-...
-
-POLLINATIONS_API_BASE_URL=https://gen.pollinations.ai/v1
-POLLINATIONS_API_KEY_1=sk_...
-POLLINATIONS_API_KEY_2=sk_...
-POLLINATIONS_API_KEY_3=sk_...
-POLLINATIONS_API_KEY_4=sk_...
-POLLINATIONS_API_KEY_5=sk_...
-
-CF_ACCOUNT_ID=your-cloudflare-account-id
-CF_API_TOKEN=your-cloudflare-workers-ai-token
-CLOUDFLARE_API_BASE_URL=
-CLOUDFLARE_MODEL_IDS=@cf/openai/gpt-oss-20b,@cf/black-forest-labs/flux-1-schnell
-CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS=true
-```
-
-At runtime these become separate Open WebUI connections:
-
-```text
-openrouter 1
-openrouter 2
-openrouter 3
-openrouter 4
-openrouter 5
-cloudflare 1
-pollinations 1
-pollinations 2
-pollinations 3
-pollinations 4
-pollinations 5
-```
-
-Future OpenAI-compatible providers use the same pattern:
-
-```env
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,pollinations,gemini,mistral
-
-GEMINI_API_BASE_URL=https://your-openai-compatible-gemini-gateway/v1
-GEMINI_API_KEY_1=...
-
-MISTRAL_API_BASE_URL=https://your-openai-compatible-mistral-gateway/v1
-MISTRAL_API_KEY_1=...
-```
+Lobe mirroring is separate from the selected backend. Keep `MURMUR_AI_BACKEND=litellm` while setting `LOBE_SYNC_ENABLED=true` if LiteLLM should answer Messenger and Lobe should only show the resulting threads.
 
 ## Image Generation
 
-Open WebUI is the image-generation entry point:
+Image generation uses the selected backend:
 
 ```text
 Murmur
-  -> Open WebUI /api/v1/images/generations
+  -> LiteLLM /v1/images/generations
+  or OpenWebUI /api/v1/images/generations
 ```
 
-For providers that expose an OpenAI-compatible image API, point Open WebUI image settings at that provider.
-
-For Cloudflare Workers AI image models, Murmur can expose a local adapter:
+`/ai image models` filters backend model lists by image-generation metadata when available and known image model IDs as a fallback. If the backend returns plain model IDs with no capability metadata, Murmur can still accept an exact image model ID through `/ai image model <model-id>`.
 
 ```env
-IMAGE_PROXY_API_KEY=random-local-image-proxy-key
-IMAGE_PROXY_BASE_PATH=/murmur-image-openai/v1
-ENABLE_IMAGE_GENERATION=true
-IMAGE_GENERATION_ENGINE=openai
-IMAGE_GENERATION_MODEL=@cf/black-forest-labs/flux-1-schnell
+IMAGE_GENERATION_MODEL=
 IMAGE_SIZE=1024x1024
 IMAGE_STEPS=4
 ```
 
-That route is:
-
-```text
-Murmur
-  -> Open WebUI image endpoint
-  -> Murmur local image adapter
-  -> Cloudflare Workers AI
-```
-
-This adapter exists only because Open WebUI does not natively speak Cloudflare's image generation API shape.
+The local Cloudflare image adapter in `murmur/proxy.py` is legacy and disabled by default. Leave it off when LiteLLM or OpenWebUI already owns image routing.
 
 ## Messenger Configuration
 
@@ -279,476 +237,124 @@ MURMUR_THREAD_REGISTRY_PATH=/tmp/murmur-threads.json
 MURMUR_THREAD_ALLOWLIST_PATH=/tmp/murmur-thread-allowlist.json
 MURMUR_THREAD_FETCH_LIMIT=100
 MURMUR_PERSIST_COOKIES_TO_DB=true
-MURMUR_STATE_DATABASE_URL=
-MURMUR_STATE_TABLE=murmur_runtime_state
-MURMUR_COOKIE_STATE_ENCRYPT=true
-MURMUR_COOKIE_STATE_SECRET=
-MURMUR_LOAD_PROXY_STATE=true
-
-FB_COOKIES_PATH=cookies.json
-FB_COOKIES_JSON_B64=
-FB_USER_AGENT=
-FB_NETWORK_POLICY=auto
-FB_PROXY=
-FB_UPLOAD_PROXY=
-FB_MQTT_PROXY=direct
-WEBSHARE_API_KEY=
-WEBSHARE_API_BASE_URL=https://proxy.webshare.io/api/v2
-WEBSHARE_PROXY_MODE=direct
-WEBSHARE_PROXY_PAGE_SIZE=25
-WEBSHARE_PROXY_COUNTRIES=
-WEBSHARE_BACKBONE_HOST=p.webshare.io
-WEBSHARE_BACKBONE_PORT=80
-WEBSHARE_PROXY_TEST_URL=https://www.facebook.com/
-WEBSHARE_PROXY_TEST_TIMEOUT_SECONDS=15
-WEBSHARE_PROXY_TEST_CONCURRENCY=5
-WEBSHARE_KEEP_LAST_ON_ROTATION_FAILURE=true
-WEBSHARE_API_TIMEOUT_SECONDS=20
-FB_HTTP_TIMEOUT_SECONDS=120
-FBCHAT_BOOTSTRAP_RETRIES=3
-FBCHAT_BOOTSTRAP_RETRY_DELAY_SECONDS=2
-FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS=45
-FBCHAT_MQTT_APP_ID=219994525426954
-FBCHAT_MQTT_REGION=
-FB_MQTT_WATCHDOG_SECONDS=15
-FB_UPLOAD_RETRIES=3
 ```
 
-Use `ALLOWED_THREAD_IDS` or the admin console thread gate in production so Murmur only answers in threads you control.
+Murmur can run in all threads or only selected thread IDs. `ALLOWED_THREAD_IDS` is the startup allowlist; the admin console can manage the persisted allowlist while the app is running.
 
-The admin console can also save Facebook proxy URLs to runtime state. For Webshare-managed rotation, set `WEBSHARE_API_KEY` and `FB_NETWORK_POLICY=webshare`; Murmur will test the stored proxy, fetch valid Webshare proxies when it fails, and save the first Facebook-reachable proxy back to runtime state. Set `FB_MQTT_PROXY=direct` when the proxy breaks realtime, while keeping `FB_PROXY` and `FB_UPLOAD_PROXY` proxied for Facebook HTTP and attachment uploads.
+## Hosted State
 
-Messenger one-to-one user messages may be limited by end-to-end encryption. Group chats, room chats, and pages are usually better test targets for `fbchat-muqit`.
+For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads and trusted browser profiles survive rebuilds, configure PostgreSQL with `MURMUR_STATE_DATABASE_URL`.
 
-Logging out of Facebook can invalidate the cookies in `cookies.json` or `FB_COOKIES_JSON_B64`. If Murmur suddenly cannot log in after a logout, export a fresh cookie file.
+Murmur writes encrypted cookie state and an encrypted browser-profile vault to `MURMUR_STATE_TABLE`. Startup restores the profile, then reads cookie state before falling back to `FB_COOKIES_JSON_B64`.
+
+```env
+MURMUR_STATE_DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB
+MURMUR_STATE_TABLE=murmur_runtime_state
+MURMUR_COOKIE_STATE_ENCRYPT=true
+MURMUR_COOKIE_STATE_SECRET=long-random-secret
+```
 
 ## Admin Console
 
-The all-in-one public proxy includes a small admin console at:
-
-```text
-/murmur-admin
-```
-
-It is protected with a signed-cookie login page. By default it uses:
-
-```text
-username: WEBUI_ADMIN_EMAIL
-password: WEBUI_ADMIN_PASSWORD
-```
-
-You can override those credentials:
+The admin console is available at `/murmur-admin` by default.
 
 ```env
 MURMUR_ADMIN_CONSOLE=true
 MURMUR_ADMIN_PATH=/murmur-admin
-MURMUR_ADMIN_USERNAME=admin@example.com
+MURMUR_ADMIN_USERNAME=admin
 MURMUR_ADMIN_PASSWORD=strong-admin-password
-MURMUR_ADMIN_SESSION_SECONDS=86400
-MURMUR_ADMIN_SESSION_SECRET=
-MURMUR_ADMIN_COOKIE_SECURE=
-MURMUR_ADMIN_BASIC_AUTH=false
+MURMUR_ADMIN_SESSION_SECRET=another-long-random-secret
 ```
 
-The console has two runtime tools:
+Use it to upload fresh Facebook cookies, restart the listener, and manage allowed Messenger threads.
 
-- Thread Access shows the Messenger threads Murmur has discovered and lets you choose exactly where the bot may answer.
-- Facebook Cookies uploads a fresh Facebook cookie JSON file, writes it to `FB_COOKIES_PATH`, syncs the latest encrypted cookie state to PostgreSQL when configured, and restarts only the Murmur Messenger listener.
-- Runtime Status shows listener paths and includes a manual Messenger listener restart button.
+## Deployment Notes
 
-Thread access changes are stored in `MURMUR_THREAD_ALLOWLIST_PATH` and are picked up by the listener on the next message. The thread list is stored in `MURMUR_THREAD_REGISTRY_PATH`; it is filled from recent inbox refreshes and from threads that send messages while Murmur is online. Open WebUI does not restart for admin console changes.
-
-For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads and trusted browser profiles survive rebuilds without changing Space secrets on every upload, configure PostgreSQL with `DATABASE_URL` or `MURMUR_STATE_DATABASE_URL`. Murmur writes encrypted cookie state and an encrypted browser-profile vault to `MURMUR_STATE_TABLE`; startup restores the profile, then reads cookie state before falling back to `FB_COOKIES_JSON_B64`.
-
-## Hugging Face Spaces
-
-The repository is ready for Docker Spaces:
-
-```yaml
-sdk: docker
-app_port: 7860
-suggested_hardware: cpu-basic
-```
-
-Recommended Space variables/secrets:
+Hugging Face Spaces should use the Docker SDK. Required hosted variables are:
 
 ```env
-WEBUI_SECRET_KEY=long-random-secret
-WEBUI_ADMIN_EMAIL=admin@example.com
-WEBUI_ADMIN_PASSWORD=strong-admin-password
-ENABLE_SIGNUP=false
-DEFAULT_USER_ROLE=pending
-
-OPENWEBUI_MODEL=openrouter_1.openai/gpt-oss-20b:free
-OPENWEBUI_MODEL_ALIASES=free=openrouter_1.openai/gpt-oss-20b:free
-
-OPENWEBUI_PROVIDER_SYNC=true
-OPENWEBUI_PROVIDER_FAMILIES=openrouter,cloudflare,pollinations
-OPENROUTER_API_KEY_1=sk-or-v1-...
-POLLINATIONS_API_KEY_1=sk_...
-CF_ACCOUNT_ID=your-cloudflare-account-id
-CF_API_TOKEN=your-cloudflare-workers-ai-token
-
-FB_COOKIES_JSON_B64=optional-bootstrap-base64-cookies-json
-FB_USER_AGENT=browser-user-agent-used-for-cookie-export
-MURMUR_PERSIST_COOKIES_TO_DB=true
-MURMUR_STATE_TABLE=murmur_runtime_state
-MURMUR_COOKIE_STATE_ENCRYPT=true
+LITELLM_BASE_URL=
+LITELLM_API_KEY=
+LITELLM_MODEL=
+IMAGE_GENERATION_MODEL=
+FB_COOKIES_JSON_B64=
+MURMUR_COOKIE_STATE_SECRET=
+MURMUR_ADMIN_USERNAME=
+MURMUR_ADMIN_PASSWORD=
 ```
 
-Optional persistence can be configured with PostgreSQL:
+Add `MURMUR_STATE_DATABASE_URL` if cookie/profile state should survive rebuilds without replacing secrets.
 
-```env
-DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB
-PGSSLMODE=require
-VECTOR_DB=pgvector
-PGVECTOR_DB_URL=postgresql://USER:PASSWORD@HOST/DB
-PGVECTOR_CREATE_EXTENSION=false
-```
+## Environment Reference
 
-If hosted Facebook login fails, test the same cookies locally first. If local login works, the hosted issue is likely network, IP, or proxy related. If local login fails too, rotate the cookies.
+### Gateway
 
-## Render
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LITELLM_BASE_URL` | required | Gateway base URL. May include or omit `/v1`. |
+| `LITELLM_API_BASE_URL` | empty | Alternate gateway base URL name. |
+| `OPENAI_API_BASE_URL` | empty | Compatibility fallback for OpenAI-style deployments. |
+| `LITELLM_API_KEY` | empty | Bearer token for the gateway. |
+| `LITELLM_MODEL` | required | Default chat model ID. |
+| `LITELLM_MODEL_ALIASES` | `default=LITELLM_MODEL` | Comma-separated `alias=model-id` values. |
+| `LITELLM_PREFERRED_CHAT_MODELS` | empty | Optional fallback chat models after retryable upstream errors. |
+| `LITELLM_WARMUP` | `true` | Warm the gateway before Messenger starts. |
+| `LITELLM_WARMUP_CHAT` | `true` | Send a tiny startup chat request. |
+| `IMAGE_GENERATION_MODEL` | empty | Default image model ID. |
+| `IMAGE_SIZE` | empty | Optional image size, for example `1024x1024`. |
+| `IMAGE_STEPS` | empty | Optional image step count for providers that support it. |
 
-Use this repository as a Docker Web Service. The service starts a public proxy immediately, waits for Open WebUI health, syncs provider connections, then starts the Messenger listener.
+### Lobe Mirror
 
-Render environment variables follow the same shape as Hugging Face Spaces. If using Neon PostgreSQL, create the vector extension once:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-```
-
-For Neon/Open WebUI v0.9, prefer `PGSSLMODE=require` as a separate variable. Do not add `?sslmode=require` or `&channel_binding=require` to the database URLs.
-
-## Cookie Utilities
-
-### Browser-assisted refresh
-
-Murmur includes a local helper for refreshing Facebook cookies through a real browser session. It can type the configured email or phone and password, generate an authenticator code from a local TOTP secret, then waits while you finish any Facebook checkpoint in the opened browser.
-
-Install the optional local dependency once:
-
-```powershell
-python -m pip install -e .[facebook-login]
-python -m playwright install chromium
-```
-
-Set these in `.env`:
-
-```env
-FB_LOGIN_EMAIL=your-facebook-email
-FB_LOGIN_PHONE=your-facebook-phone-or-email
-FB_LOGIN_PASSWORD=your-facebook-password
-FB_LOGIN_TOTP_SECRET=your-authenticator-secret
-FB_LOGIN_BROWSER_ENGINE=cloakbrowser
-```
-
-Run the refresh:
-
-```powershell
-python .\scripts\facebook_login_refresh.py
-```
-
-By default the helper opens CloakBrowser/Chromium with a persistent profile at `.murmur-facebook-profile`, prefers `FB_LOGIN_EMAIL` over `FB_LOGIN_PHONE`, exports fresh cookies to `FB_LOGIN_EXPORT_PATH` or `FB_COOKIES_PATH`, backs up the previous cookie file, and verifies the result with `fbchat-muqit` before persisting it. It uses `FB_LOGIN_PROXY` when set, otherwise it falls back to the admin-saved `FB_PROXY` state and then the `FB_PROXY` environment variable; set `FB_LOGIN_PROXY=direct` to force a direct browser login. Set `FB_LOGIN_BROWSER_ENGINE=playwright` to use plain Playwright instead.
-
-When `FB_NETWORK_POLICY=webshare` and `WEBSHARE_API_KEY` is set, the helper runs the same Webshare proxy manager before opening the browser, so hosted refresh, login verification, uploads, and realtime Messenger use the same rotated Facebook proxy state.
-
-### Hosted auto-refresh
-
-When `FB_LOGIN_AUTO_REFRESH=true`, Murmur exits with a dedicated code for known expired-cookie login failures and the supervisor runs the same browser-login helper before restarting the Messenger listener. This is intended for hosted deployments where the local machine will not be online.
-
-Required hosted secrets:
-
-```env
-FB_LOGIN_EMAIL=your-facebook-email
-FB_LOGIN_PASSWORD=your-facebook-password
-FB_LOGIN_TOTP_SECRET=your-authenticator-secret
-FB_LOGIN_BROWSER_ENGINE=cloakbrowser
-```
-
-Recommended hosted settings:
-
-```env
-FB_LOGIN_AUTO_REFRESH=true
-FB_LOGIN_BROWSER_ENGINE=cloakbrowser
-FB_LOGIN_HEADLESS=true
-FB_LOGIN_PERSIST_DB=true
-FB_LOGIN_PROFILE_VAULT_ENABLED=true
-FB_LOGIN_PROFILE_VAULT_RESTORE=true
-FB_LOGIN_PROFILE_PERSIST_DB=true
-FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES=true
-FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS=900
-```
-
-Only cookie-login failures trigger the hosted refresh path. Other Messenger or network failures continue through the normal restart loop.
-
-### Trusted browser-profile vault
-
-Fresh hosted Facebook login can trigger extra challenges. The stronger hosted path is to reuse a browser profile that Facebook already trusts.
-
-Murmur can pack `.murmur-facebook-profile`, remove volatile cache files, encrypt the zip payload with `MURMUR_COOKIE_STATE_SECRET` or `WEBUI_SECRET_KEY`, and store it in PostgreSQL. On hosted startup it restores that profile before the Messenger listener starts. After a successful browser refresh, it writes both fresh cookies and the updated profile back to PostgreSQL.
-
-Persist the current local trusted profile:
-
-```powershell
-python -m murmur.runtime_state persist-profile
-```
-
-Restore it locally for testing:
-
-```powershell
-python -m murmur.runtime_state restore-profile --overwrite
-```
-
-Useful vault settings:
-
-```env
-FB_LOGIN_PROFILE_DIR=.murmur-facebook-profile
-FB_LOGIN_PROFILE_VAULT_ENABLED=true
-FB_LOGIN_PROFILE_VAULT_RESTORE=true
-FB_LOGIN_PROFILE_VAULT_OVERWRITE=false
-FB_LOGIN_PROFILE_PERSIST_DB=true
-FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES=true
-FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES=true
-FB_LOGIN_PROFILE_VAULT_MAX_BYTES=209715200
-```
-
-Generate a base64 cookie payload from `cookies.json`:
-
-```powershell
-.\scripts\cookies-b64.ps1
-```
-
-Copy it directly to the clipboard:
-
-```powershell
-.\scripts\cookies-b64.ps1 -Copy
-```
-
-CMD wrapper:
-
-```cmd
-.\scripts\cookies-b64.cmd
-```
-
-Direct PowerShell one-liner:
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.json"))
-```
-
-## Configuration Reference
-
-### Open WebUI
-
-| Variable | Default | Description |
-|---|---|---|
-| `OPENWEBUI_BASE_URL` | bundled Open WebUI | External Open WebUI URL. Leave empty in all-in-one Docker. |
-| `OPENWEBUI_API_KEY` | empty | Open WebUI API key. |
-| `OPENWEBUI_LOGIN_EMAIL` | `WEBUI_ADMIN_EMAIL` | Login email for JWT auth fallback. |
-| `OPENWEBUI_LOGIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | Login password for JWT auth fallback. |
-| `OPENWEBUI_MODEL` | required | Default chat model ID from Open WebUI. |
-| `OPENWEBUI_MODEL_ALIASES` | `default=OPENWEBUI_MODEL` | Comma-separated `alias=model-id` values. |
-| `OPENWEBUI_WARMUP` | `true` | Warm Open WebUI before Messenger starts. |
-| `OPENWEBUI_WARMUP_CHAT` | `true` | Send a tiny startup chat request. |
-| `OPENWEBUI_ACCESS_LOG` | `false` | Enable Uvicorn access logs for Open WebUI. |
-
-### Bundled Open WebUI
-
-| Variable | Default | Description |
-|---|---|---|
-| `WEBUI_SECRET_KEY` | required for hosted deployments | Open WebUI secret key. |
-| `WEBUI_ADMIN_EMAIL` | empty | Admin account email used by Open WebUI and Murmur JWT fallback. |
-| `WEBUI_ADMIN_PASSWORD` | empty | Admin account password used by Open WebUI and Murmur JWT fallback. |
-| `ENABLE_SIGNUP` | `false` recommended | Open WebUI signup toggle. |
-| `DEFAULT_USER_ROLE` | `pending` recommended | Default role for new Open WebUI users. |
-| `ENABLE_OLLAMA_API` | `false` | Disable unused Ollama checks in this all-in-one deployment. |
-| `ENABLE_BASE_MODELS_CACHE` | `true` | Cache Open WebUI base model list after startup. |
-| `ENV` | `prod` | Open WebUI runtime environment. |
-| `USER_AGENT` | `Murmur/0.1` | User-agent for outbound Open WebUI/provider requests. |
-| `WEBUI_URL` | empty | Public Open WebUI URL for hosted deployments. |
-| `CORS_ALLOW_ORIGIN` | empty | Allowed CORS origin for hosted deployments. |
-
-### Providers
-
-| Variable | Default | Description |
-|---|---|---|
-| `OPENWEBUI_PROVIDER_SYNC` | `true` | Sync provider keys into Open WebUI Connections. |
-| `OPENWEBUI_PROVIDER_FAMILIES` | `openrouter` when OpenRouter keys exist | Comma-separated provider families. |
-| `<PROVIDER>_API_BASE_URL` | provider-specific | OpenAI-compatible provider base URL. |
-| `<PROVIDER>_API_KEY_1` ... `<PROVIDER>_API_KEY_20` | empty | Numbered provider keys. |
-| `<PROVIDER>_MODEL_IDS` | empty | Optional explicit model allowlist. |
-| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL. |
-| `OPENROUTER_API_KEY_1` ... `OPENROUTER_API_KEY_5` | empty | OpenRouter key slots. |
-| `POLLINATIONS_API_BASE_URL` | `https://gen.pollinations.ai/v1` | Pollinations OpenAI-compatible base URL. |
-| `POLLINATIONS_API_KEY_1` ... `POLLINATIONS_API_KEY_5` | empty | Pollinations key slots. Use server-side `sk_` keys. |
-| `CF_ACCOUNT_ID` | empty | Cloudflare account ID. |
-| `CF_API_TOKEN` | empty | Cloudflare Workers AI token. |
-| `CLOUDFLARE_API_BASE_URL` | derived from `CF_ACCOUNT_ID` | Cloudflare OpenAI-compatible chat base URL. |
-| `CLOUDFLARE_MODEL_IDS` | empty | Explicit Cloudflare models to expose. |
-| `CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS` | `true` | Hide experimental models during Cloudflare metadata lookup. |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LOBE_SYNC_ENABLED` | `false` | Mirror successful chat replies into Lobe. |
+| `LOBE_DATABASE_URL` | empty | Lobe Postgres database URL. |
+| `LOBE_SYNC_USER_EMAIL` | empty | Lobe account email to attach mirrored topics to. |
+| `LOBE_SYNC_USER_ID` | empty | Optional direct Lobe user id override. |
+| `LOBE_SYNC_AGENT_TITLE` | `Murmur` | Lobe agent/session display title. |
+| `LOBE_SYNC_AGENT_SLUG` | `murmur` | Stable Lobe agent slug. |
+| `LOBE_SYNC_SESSION_TITLE` | `Murmur` | Stable Lobe session title. |
+| `LOBE_SYNC_SESSION_SLUG` | `murmur` | Stable Lobe session slug. |
+| `LOBE_SYNC_TOPIC_PREFIX` | `Messenger` | Suffix for topic names, for example `Cat fren | Messenger`. |
 
 ### Messenger
 
-| Variable | Default | Description |
-|---|---|---|
-| `BOT_PREFIX` | `/ai` | Messenger command prefix. |
-| `RESPOND_ONLY_ON_PREFIX` | `true` | Only respond to prefixed messages. |
-| `RESPOND_TO_BOT_REPLIES` | `true` | Respond to replies on bot messages without prefix. |
-| `ALLOWED_THREAD_IDS` | empty | Comma-separated Messenger thread allowlist. |
-| `MURMUR_THREAD_REGISTRY_PATH` | `/tmp/murmur-threads.json` | Runtime registry of discovered Messenger threads for the admin console. |
-| `MURMUR_THREAD_ALLOWLIST_PATH` | `/tmp/murmur-thread-allowlist.json` | Runtime thread allowlist written by the admin console. |
-| `MURMUR_THREAD_FETCH_LIMIT` | `100` | Recent Messenger threads to fetch after login for the admin console registry. |
-| `MURMUR_PERSIST_COOKIES_TO_DB` | `true` | Sync uploaded admin cookies to PostgreSQL runtime state when configured. |
-| `MURMUR_STATE_DATABASE_URL` | `DATABASE_URL` | Optional separate PostgreSQL URL for Murmur runtime state. |
-| `MURMUR_STATE_TABLE` | `murmur_runtime_state` | PostgreSQL table for Murmur runtime state. Created automatically. |
-| `MURMUR_COOKIE_STATE_ENCRYPT` | `true` | Encrypt stored cookie JSON before writing it to PostgreSQL. |
-| `MURMUR_COOKIE_STATE_SECRET` | `WEBUI_SECRET_KEY` | Optional separate encryption secret for cookie state. |
-| `MURMUR_LOAD_PROXY_STATE` | `true` | Load admin-saved Facebook proxy runtime state from PostgreSQL. |
-| `FB_COOKIES_PATH` | `cookies.json` | Path to Facebook cookies JSON. |
-| `FB_COOKIES_JSON_B64` | empty | Optional bootstrap base64 cookies JSON for hosted deployments. |
-| `FB_USER_AGENT` | library default | Browser user-agent paired with exported cookies. |
-| `FB_NETWORK_POLICY` | `auto` | Facebook network mode: `auto`, `direct`, or `webshare`. `webshare` requires `WEBSHARE_API_KEY` and never silently falls back to direct. |
-| `FB_PROXY` | empty | Proxy for Facebook HTTP/login requests. |
-| `FB_UPLOAD_PROXY` | `FB_PROXY` | Proxy for Messenger attachment uploads. |
-| `FB_MQTT_PROXY` | `direct` | Proxy for Messenger realtime MQTT. Use `direct` to keep realtime off the login/upload proxy. |
-| `WEBSHARE_API_KEY` | empty | Webshare API token used to fetch and rotate valid proxies. The first key must be created in the Webshare dashboard. |
-| `WEBSHARE_API_BASE_URL` | `https://proxy.webshare.io/api/v2` | Webshare API base URL. |
-| `WEBSHARE_PROXY_MODE` | `direct` | Webshare proxy-list mode requested from the API. `direct` uses individual proxy hosts and ports; `backbone` uses Webshare's stable gateway. |
-| `WEBSHARE_PROXY_PAGE_SIZE` | `25` | Number of Webshare proxy records to inspect per rotation attempt. |
-| `WEBSHARE_PROXY_COUNTRIES` | empty | Optional comma-separated country-code filter for Webshare candidates. |
-| `WEBSHARE_BACKBONE_HOST` | `p.webshare.io` | Webshare backbone/rotating gateway host. |
-| `WEBSHARE_BACKBONE_PORT` | `80` | Webshare backbone/rotating gateway port for username/password auth. |
-| `WEBSHARE_PROXY_TEST_URL` | `https://www.facebook.com/` | URL used to check whether a candidate proxy can reach Facebook. |
-| `WEBSHARE_PROXY_TEST_TIMEOUT_SECONDS` | `15` | Per-proxy connectivity-test timeout. |
-| `WEBSHARE_PROXY_TEST_CONCURRENCY` | `5` | Number of Webshare candidates to test in parallel during rotation. |
-| `WEBSHARE_KEEP_LAST_ON_ROTATION_FAILURE` | `true` | Keep the last configured Facebook proxy if Webshare rotation tests fail, so startup does not hide the real Facebook/auth error behind a proxy-test outage. |
-| `WEBSHARE_API_TIMEOUT_SECONDS` | `20` | Webshare API request timeout. |
-| `FB_HTTP_TIMEOUT_SECONDS` | `120` | Facebook HTTP timeout. |
-| `FBCHAT_BOOTSTRAP_RETRIES` | `3` | Retry Messenger/Facebook bootstrap token extraction before treating cookies as bad. |
-| `FBCHAT_BOOTSTRAP_RETRY_DELAY_SECONDS` | `2` | Delay between bootstrap retry rounds. |
-| `FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS` | `45` | Per-bootstrap-page timeout for token extraction. |
-| `FBCHAT_MQTT_APP_ID` | `219994525426954` | Fallback Messenger Web MQTT app id when Facebook omits `MqttWebConfig`. |
-| `FBCHAT_MQTT_REGION` | empty | Optional fallback Messenger MQTT region. Usually leave blank. |
-| `FB_MQTT_WATCHDOG_SECONDS` | `15` | Restart listener if MQTT stops silently. |
-| `FB_UPLOAD_RETRIES` | `3` | Attachment upload retry count. |
-| `FB_UPLOAD_ENDPOINTS` | Facebook and Messenger upload hosts | Upload endpoints tried in order. |
-| `FB_LOG_NAMES` | `true` | Resolve Messenger IDs to names in logs. |
-| `FB_LOG_NAMES_KEEP_IDS` | `true` | Keep IDs beside resolved names. |
-| `FB_LOG_NAME_CACHE_PATH` | temp file | JSON cache for resolved Messenger names. |
-| `FB_LOGIN_PHONE` | empty | Browser-login helper phone/email fallback. |
-| `FB_LOGIN_EMAIL` | empty | Browser-login helper email. Preferred over `FB_LOGIN_PHONE`. |
-| `FB_LOGIN_PASSWORD` | empty | Browser-login helper password for local or hosted auto-refresh. |
-| `FB_LOGIN_TOTP_SECRET` | empty | Local browser-login helper authenticator secret used to generate 2FA codes. |
-| `FB_LOGIN_URL` | `https://www.facebook.com/login` | Facebook login page opened by the helper. |
-| `FB_LOGIN_BROWSER_ENGINE` | `cloakbrowser` | Browser engine used by the helper. Use `cloakbrowser` or `playwright`. |
-| `FB_LOGIN_PROFILE_DIR` | `.murmur-facebook-profile` | Persistent local Chromium profile used by the helper. |
-| `FB_LOGIN_EXPORT_PATH` | `FB_COOKIES_PATH` | Cookie JSON path written by the helper. |
-| `FB_LOGIN_PROFILE_VAULT_ENABLED` | `true` | Enable encrypted browser-profile persistence in runtime state. |
-| `FB_LOGIN_PROFILE_VAULT_RESTORE` | `true` | Restore the stored profile before hosted Murmur starts and before hosted refresh attempts. |
-| `FB_LOGIN_PROFILE_VAULT_OVERWRITE` | `false` | Overwrite a non-empty local profile directory when restoring the vault. |
-| `FB_LOGIN_PROFILE_PERSIST_DB` | `true` | Persist the browser profile after a successful browser-login refresh. |
-| `FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES` | `true` | Seed an empty restored profile with latest cookie state before opening Facebook. |
-| `FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES` | `true` | Allow profile bootstrap to read encrypted cookie state from PostgreSQL. |
-| `FB_LOGIN_PROFILE_VAULT_MAX_BYTES` | `209715200` | Maximum compressed profile size accepted for DB storage. |
-| `FB_LOGIN_HEADLESS` | `false` | Run helper browser headless. Keep `false` for checkpoints and 2FA. |
-| `FB_LOGIN_TIMEOUT_SECONDS` | `300` | Time to wait for `c_user` and `xs` cookies after login starts. |
-| `FB_LOGIN_NAV_TIMEOUT_SECONDS` | `120` | Browser navigation timeout for the login helper. |
-| `FB_LOGIN_VERIFY` | `true` | Verify the exported cookies with `fbchat-muqit`. |
-| `FB_LOGIN_CLEAR_ON_VERIFY_FAILURE` | `false` | Clear browser cookies after a non-network verification failure. Keep this disabled to preserve trusted profile state during checkpoint or reCAPTCHA recovery. |
-| `FB_LOGIN_PERSIST_DB` | `false` | Also persist exported cookies to Murmur runtime PostgreSQL state. |
-| `FB_LOGIN_BACKUP_EXISTING` | `true` | Back up the old cookie file before overwriting it. |
-| `FB_LOGIN_PROXY` | admin-saved `FB_PROXY`, then env `FB_PROXY` | Browser proxy for local Facebook login. Use `direct` to disable. |
-| `FB_LOGIN_DIRECT_FALLBACK_ON_PROXY_FAILURE` | `true` | Hosted auto-refresh retries the browser login without `FB_LOGIN_PROXY` if the configured proxy refresh fails. Messenger traffic still uses the configured Facebook proxy. |
-| `FB_LOGIN_VERIFY_PROXY` | `FB_LOGIN_PROXY` | Proxy used by the `fbchat-muqit` verification request. |
-| `FB_LOGIN_USER_AGENT` | `FB_USER_AGENT` | Browser and verification user-agent override. |
-| `FB_LOGIN_AUTO_REFRESH` | `false` | Run the browser-login helper automatically after known expired-cookie failures. |
-| `FB_LOGIN_AUTO_REFRESH_COOLDOWN_SECONDS` | `900` | Minimum seconds between hosted auto-refresh attempts. |
-| `FB_LOGIN_AUTO_REFRESH_STAMP` | `/tmp/murmur-facebook-login-refresh-last` | Timestamp file used for auto-refresh cooldown. |
-| `MURMUR_FACEBOOK_COOKIE_EXPIRED_EXIT_CODE` | `42` | Process exit code used when Murmur detects an expired Facebook cookie session. |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FB_COOKIES_PATH` | `cookies.json` | Cookie file consumed by `fbchat-muqit`. |
+| `FB_COOKIES_JSON_B64` | empty | Base64-encoded cookie JSON for hosted deployments. |
+| `FB_USER_AGENT` | empty | Optional Facebook user-agent override. |
+| `BOT_PREFIX` | `/ai` | Command prefix. |
+| `MAX_HISTORY_MESSAGES` | `12` | Per-thread short memory size. |
+| `MAX_REPLY_CHARS` | `1800` | Messenger reply chunk size. |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Gateway request timeout. |
+| `SYSTEM_PROMPT` | helpful assistant prompt | System message sent to the gateway. |
 
-### Runtime
+### State And Admin
 
-| Variable | Default | Description |
-|---|---|---|
-| `MAX_HISTORY_MESSAGES` | `12` | Short per-thread memory window. |
-| `MAX_REPLY_CHARS` | `1800` | Split Messenger replies above this size. |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | Open WebUI request timeout. |
-| `SYSTEM_PROMPT` | helpful assistant prompt | System message sent to Open WebUI. |
-| `MURMUR_RESTART_SECONDS` | `60` | Delay before restarting the Messenger listener. |
-| `MURMUR_PID_FILE` | `/tmp/murmur.pid` | PID file used by the admin console to restart the listener. |
-| `MURMUR_RESTART_NOW_FILE` | `/tmp/murmur-restart-now` | Marker file for fast admin-requested restarts. |
-
-### Admin Console
-
-| Variable | Default | Description |
-|---|---|---|
-| `MURMUR_ADMIN_CONSOLE` | `true` | Enable the admin console. |
-| `MURMUR_ADMIN_PATH` | `/murmur-admin` | Admin console URL path. |
-| `MURMUR_ADMIN_USERNAME` | `WEBUI_ADMIN_EMAIL` or `admin` | Admin login username. |
-| `MURMUR_ADMIN_PASSWORD` | `WEBUI_ADMIN_PASSWORD` | Admin login password. Required when enabled. |
-| `MURMUR_ADMIN_SESSION_SECONDS` | `86400` | Admin session lifetime. |
-| `MURMUR_ADMIN_SESSION_SECRET` | `WEBUI_SECRET_KEY` | Optional separate secret for signed admin sessions. |
-| `MURMUR_ADMIN_COOKIE_SECURE` | auto | Force secure admin session cookies on or off. |
-| `MURMUR_ADMIN_BASIC_AUTH` | `false` | Optional legacy Basic Auth fallback. Keep disabled for the login page flow. |
-
-### Images
-
-| Variable | Default | Description |
-|---|---|---|
-| `IMAGE_PROXY_API_KEY` | `IMAGES_OPENAI_API_KEY` or `CF_API_TOKEN` | Bearer token Open WebUI uses for the local image adapter. |
-| `IMAGE_PROXY_BASE_PATH` | `/murmur-image-openai/v1` | Local adapter path. |
-| `ENABLE_IMAGE_GENERATION` | auto-enabled for Cloudflare adapter | Open WebUI image generation toggle. |
-| `IMAGE_GENERATION_ENGINE` | `openai` | Open WebUI image engine. |
-| `IMAGE_GENERATION_MODEL` | empty | Default image model. |
-| `IMAGES_OPENAI_API_BASE_URL` | local adapter when enabled | OpenAI-compatible image API base URL used by Open WebUI. |
-| `IMAGES_OPENAI_API_KEY` | `IMAGE_PROXY_API_KEY` | OpenAI-compatible image API key used by Open WebUI. |
-| `IMAGE_SIZE` | `1024x1024` | Image size. |
-| `IMAGE_STEPS` | `4` | Cloudflare image diffusion steps. |
-
-### Persistence
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | Open WebUI default SQLite | PostgreSQL URL for Open WebUI persistence. |
-| `PGSSLMODE` | empty | PostgreSQL SSL mode, for example `require`. |
-| `VECTOR_DB` | Open WebUI default | Vector database backend, for example `pgvector`. |
-| `PGVECTOR_DB_URL` | empty | PostgreSQL URL for pgvector storage. |
-| `PGVECTOR_CREATE_EXTENSION` | `true` upstream default | Whether Open WebUI should create the pgvector extension. |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MURMUR_STATE_DATABASE_URL` | empty | PostgreSQL URL for runtime state. |
+| `MURMUR_STATE_TABLE` | `murmur_runtime_state` | Runtime state table name. |
+| `MURMUR_COOKIE_STATE_SECRET` | empty | Encryption secret for cookies/profile state. |
+| `MURMUR_ADMIN_CONSOLE` | `true` | Enable admin console. |
+| `MURMUR_ADMIN_PATH` | `/murmur-admin` | Admin console path. |
+| `MURMUR_ADMIN_USERNAME` | `admin` | Admin username. |
+| `MURMUR_ADMIN_PASSWORD` | empty | Admin password. |
+| `MURMUR_ADMIN_SESSION_SECRET` | empty | Optional separate signed-session secret. |
 
 ## Security Notes
 
-- Never commit `.env`, `cookies.json`, API keys, or Facebook cookies.
-- Use a dedicated Facebook account.
-- Do not log out of the Facebook session that produced the cookies unless you are ready to export new cookies.
-- Keep the admin console protected with a strong password, especially on public hosts.
-- Keep `RESPOND_ONLY_ON_PREFIX=true` unless you want automatic replies.
-- Set `ALLOWED_THREAD_IDS` for production.
-- Disable Open WebUI signup on public deployments.
-- Treat hosted Facebook failures as network/proxy issues only after local cookie login succeeds.
+- Keep the Space private if it has live Messenger cookies.
+- Use a strong `MURMUR_COOKIE_STATE_SECRET`.
+- Use a strong admin password.
+- Do not paste cookies, API keys, or profile archives into public logs.
 
-## Development
+## Development Notes
 
-Run a syntax check:
-
-```bash
-python -m compileall murmur
-```
-
-Run Murmur locally:
-
-```bash
-python -m murmur
-```
-
-The project intentionally keeps most application logic in `murmur/app.py`, the public proxy and image adapter in `murmur/proxy.py`, startup orchestration in `scripts/start-all.sh`, and log cleanup in `murmur/log_filter.py`.
+The project keeps most application logic in `murmur/app.py`, the public proxy and optional local image adapter in `murmur/proxy.py`, startup orchestration in `scripts/start-hf.sh`, and log cleanup in `murmur/log_filter.py`.
 
 ## License
 
-This repository depends on upstream projects with their own licenses. Review the licenses for Open WebUI and fbchat-muqit before redistribution.
-
-## Contributors
-
-<a href="https://github.com/FahadBinHussain/murmur/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=FahadBinHussain/murmur" alt="Contributors" />
-</a>
+Review the licenses for `fbchat-muqit` and any gateway/provider you connect before redistribution.

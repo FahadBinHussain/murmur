@@ -1,7 +1,7 @@
 [project]
-name = "murmur-openwebui"
+name = "murmur"
 version = "0.1.0"
-description = "Facebook Messenger AI bridge for Open WebUI"
+description = "Facebook Messenger AI bridge for LiteLLM, OpenWebUI, and Lobe mirroring"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -5,7 +5,9 @@ import os
 import time
 import asyncio
 import json
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 
 _PATCHED = False
@@ -152,17 +154,17 @@ def _bootstrap_urls() -> list[str]:
     if urls:
         return urls
     return [
+        "https://www.facebook.com/",
+        "https://www.facebook.com/messages/t/",
         "https://www.messenger.com/",
         "https://www.messenger.com/t/",
-        "https://www.facebook.com/messages/t/",
-        "https://www.facebook.com/",
     ]
 
 
 def _bootstrap_timeout_seconds() -> int:
     raw = os.getenv("FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS") or os.getenv("FB_HTTP_TIMEOUT_SECONDS") or "25"
     try:
-        return max(5, min(int(raw), 60))
+        return max(5, min(int(raw), 180))
     except ValueError:
         return 25
 
@@ -266,6 +268,68 @@ def _configure_mqtt_options(self: Any) -> None:
         path=f"/chat?{query}",
         headers=headers,
     )
+
+
+def _facebook_http_timeout_seconds() -> int:
+    raw = os.getenv("FB_HTTP_TIMEOUT_SECONDS") or os.getenv("FBCHAT_BOOTSTRAP_TIMEOUT_SECONDS") or "120"
+    try:
+        return max(30, min(int(raw), 300))
+    except ValueError:
+        return 120
+
+
+def _configure_http_session_timeout() -> None:
+    import aiohttp
+    from fbchat_muqit import state as fb_state
+    from fbchat_muqit.utils import stateHelper as fb_state_helper
+
+    timeout_seconds = _facebook_http_timeout_seconds()
+    timeout = aiohttp.ClientTimeout(
+        total=timeout_seconds,
+        connect=timeout_seconds,
+        sock_connect=timeout_seconds,
+        sock_read=timeout_seconds,
+    )
+
+    def get_session(cookie_jar=None, proxy=None):
+        proxy_arg = None
+        if proxy:
+            scheme = urlparse(proxy).scheme.lower()
+            if scheme in {"http", "https"}:
+                proxy_arg = proxy
+                connector = aiohttp.TCPConnector(
+                    family=socket.AF_INET,
+                    ttl_dns_cache=300,
+                    enable_cleanup_closed=True,
+                )
+            else:
+                from aiohttp_socks import ProxyConnector
+
+                connector = ProxyConnector.from_url(proxy)
+        else:
+            connector = aiohttp.TCPConnector(
+                family=socket.AF_INET,
+                ttl_dns_cache=300,
+                enable_cleanup_closed=True,
+            )
+
+        session = aiohttp.ClientSession(
+            cookie_jar=cookie_jar,
+            connector=connector,
+            timeout=timeout,
+        )
+        if proxy_arg:
+            original_request = session._request
+
+            async def proxied_request(method, url, **kwargs):
+                kwargs.setdefault("proxy", proxy_arg)
+                return await original_request(method, url, **kwargs)
+
+            session._request = proxied_request
+        return session
+
+    fb_state.get_session = get_session
+    fb_state_helper.get_session = get_session
 
 
 async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: str | None) -> tuple[str, str]:
@@ -413,4 +477,5 @@ def apply_fbchat_patches() -> None:
     state.extract_tokens_from_html = _extract_tokens_from_html
     state.State.login = classmethod(_login_with_bootstrap_fallback)
     muqit.Mqtt._configure_mqtt_options = _configure_mqtt_options
+    _configure_http_session_timeout()
     _PATCHED = True

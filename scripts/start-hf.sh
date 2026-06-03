@@ -26,17 +26,22 @@ export FB_LOGIN_PROFILE_VAULT_OVERWRITE="${FB_LOGIN_PROFILE_VAULT_OVERWRITE:-fal
 export FB_LOGIN_PROFILE_PERSIST_DB="${FB_LOGIN_PROFILE_PERSIST_DB:-true}"
 export FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES="${FB_LOGIN_PROFILE_BOOTSTRAP_COOKIES:-true}"
 export FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES="${FB_LOGIN_PROFILE_BOOTSTRAP_DB_COOKIES:-true}"
-export OPENWEBUI_WARMUP="${OPENWEBUI_WARMUP:-false}"
-export OPENWEBUI_WARMUP_CHAT="${OPENWEBUI_WARMUP_CHAT:-false}"
+export MURMUR_AI_BACKEND="${MURMUR_AI_BACKEND:-litellm}"
+export LITELLM_WARMUP="${LITELLM_WARMUP:-false}"
+export LITELLM_WARMUP_CHAT="${LITELLM_WARMUP_CHAT:-false}"
 
-if [[ -z "${OPENWEBUI_BASE_URL:-}" ]]; then
-  echo "OPENWEBUI_BASE_URL is empty; Murmur will expose health/admin routes, but chat/image requests need an external backend compatible with Murmur's current API calls."
+gateway_base_for_proxy="${LITELLM_BASE_URL:-${LITELLM_API_BASE_URL:-${OPENAI_API_BASE_URL:-}}}"
+if [[ "${MURMUR_AI_BACKEND,,}" == "openwebui" ]]; then
+  gateway_base_for_proxy="${OPENWEBUI_BASE_URL:-$gateway_base_for_proxy}"
+fi
+if [[ -z "$gateway_base_for_proxy" ]]; then
+  echo "Selected AI backend base URL is empty; Murmur will expose health/admin routes, but chat/image requests need a configured backend."
 fi
 
-export PROXY_TARGET_BASE_URL="${PROXY_TARGET_BASE_URL:-${OPENWEBUI_BASE_URL:-http://127.0.0.1:9}}"
+export PROXY_TARGET_BASE_URL="${PROXY_TARGET_BASE_URL:-${gateway_base_for_proxy:-http://127.0.0.1:9}}"
 
-image_generation_model="${IMAGE_GENERATION_MODEL:-${CLOUDFLARE_IMAGE_MODEL:-}}"
-if [[ -n "${CF_ACCOUNT_ID:-}" && -n "${CF_API_TOKEN:-}" && "$image_generation_model" == @cf/* ]]; then
+image_generation_model="${IMAGE_GENERATION_MODEL:-}"
+if [[ "${MURMUR_ENABLE_IMAGE_PROXY:-false}" == "true" && -n "${CF_ACCOUNT_ID:-}" && -n "${CF_API_TOKEN:-}" && "$image_generation_model" == @cf/* ]]; then
   export IMAGE_PROXY_BASE_PATH="${IMAGE_PROXY_BASE_PATH:-/murmur-image-openai/v1}"
   export IMAGE_PROXY_API_KEY="${IMAGE_PROXY_API_KEY:-${IMAGES_OPENAI_API_KEY:-${CF_API_TOKEN}}}"
   export IMAGES_OPENAI_API_KEY="${IMAGES_OPENAI_API_KEY:-${IMAGE_PROXY_API_KEY}}"
@@ -166,12 +171,30 @@ run_facebook_login_refresh() {
     return 0
   fi
 
+  if [[ "${FB_LOGIN_FORCE_FRESH_FALLBACK,,}" != "false" && "${FB_LOGIN_CLEAR_ON_VERIFY_FAILURE,,}" != "true" ]]; then
+    echo "Facebook cookie auto-refresh did not verify saved cookies; retrying with stale cookies cleared."
+    if FB_LOGIN_CLEAR_ON_VERIFY_FAILURE=true "${refresh_cmd[@]}"; then
+      rm -f "$FB_LOGIN_AUTO_REFRESH_STAMP"
+      echo "Facebook cookie auto-refresh succeeded after clearing stale cookies."
+      return 0
+    fi
+  fi
+
   if [[ "${FB_LOGIN_DIRECT_FALLBACK_ON_PROXY_FAILURE,,}" == "true" && "${FB_LOGIN_PROXY:-}" != "direct" ]]; then
     echo "Facebook cookie auto-refresh failed through configured proxy; retrying browser refresh direct."
     if FB_LOGIN_PROXY=direct "${refresh_cmd[@]}"; then
       rm -f "$FB_LOGIN_AUTO_REFRESH_STAMP"
       echo "Facebook cookie auto-refresh succeeded with direct browser fallback."
       return 0
+    fi
+
+    if [[ "${FB_LOGIN_FORCE_FRESH_FALLBACK,,}" != "false" && "${FB_LOGIN_CLEAR_ON_VERIFY_FAILURE,,}" != "true" ]]; then
+      echo "Facebook direct browser refresh did not verify saved cookies; retrying direct with stale cookies cleared."
+      if FB_LOGIN_PROXY=direct FB_LOGIN_CLEAR_ON_VERIFY_FAILURE=true "${refresh_cmd[@]}"; then
+        rm -f "$FB_LOGIN_AUTO_REFRESH_STAMP"
+        echo "Facebook cookie auto-refresh succeeded with direct fresh-login fallback."
+        return 0
+      fi
     fi
   fi
 

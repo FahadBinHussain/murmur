@@ -76,11 +76,7 @@ def admin_console_enabled() -> bool:
 
 
 def admin_username() -> str:
-    return (
-        os.getenv("MURMUR_ADMIN_USERNAME")
-        or os.getenv("WEBUI_ADMIN_EMAIL")
-        or "admin"
-    )
+    return os.getenv("MURMUR_ADMIN_USERNAME") or os.getenv("WEBUI_ADMIN_EMAIL") or "admin"
 
 
 def admin_password() -> str:
@@ -93,9 +89,53 @@ def no_store_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
         "Pragma": "no-cache",
         "X-Robots-Tag": "noindex, nofollow",
     }
+    if env_bool("MURMUR_CLEAR_LEGACY_SITE_DATA", True):
+        headers["Clear-Site-Data"] = '"cache", "storage"'
     if extra:
         headers.update(extra)
     return headers
+
+
+def legacy_site_cleanup_script() -> str:
+    if not env_bool("MURMUR_CLEAR_LEGACY_SITE_DATA", True):
+        return ""
+    return """<script>
+(async () => {
+  try {
+    if ("serviceWorker" in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+    }
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    }
+  } catch (_) {}
+})();
+</script>"""
+
+
+def backend_proxy_prefixes() -> list[str]:
+    raw = os.getenv("MURMUR_BACKEND_PROXY_PREFIXES", "/api,/openai,/ollama")
+    prefixes = []
+    for item in raw.split(","):
+        prefix = item.strip()
+        if not prefix:
+            continue
+        if not prefix.startswith("/"):
+            prefix = f"/{prefix}"
+        prefix = prefix.rstrip("/")
+        if prefix and prefix != "/":
+            prefixes.append(prefix)
+    return prefixes
+
+
+def path_matches_prefix(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+def should_proxy_backend_path(path: str) -> bool:
+    return any(path_matches_prefix(path, prefix) for prefix in backend_proxy_prefixes())
 
 
 def admin_session_cookie_name() -> str:
@@ -133,6 +173,7 @@ def admin_redirect_location(
     error: str = "",
     login_error: str = "",
 ) -> str:
+    path = "/" if request.path == "/" else admin_base_path()
     query: dict[str, str] = {}
     sign = request.query.get("__sign", "")
     if sign:
@@ -145,7 +186,7 @@ def admin_redirect_location(
         query["login_error"] = compact_log_value(login_error, 1200)
 
     suffix = f"?{urlencode(query)}" if query else ""
-    return f"{admin_base_path()}{suffix}"
+    return f"{path}{suffix}"
 
 
 def admin_redirect_response(request: web.Request, **params: str) -> web.Response:
@@ -153,6 +194,10 @@ def admin_redirect_response(request: web.Request, **params: str) -> web.Response
         admin_redirect_location(request, **params),
         headers=no_store_headers(),
     )
+
+
+def admin_session_cookie_path(request: web.Request) -> str:
+    return "/"
 
 
 def b64url_encode(raw: bytes) -> str:
@@ -258,7 +303,7 @@ def admin_missing_config_response() -> web.Response | None:
     if admin_password() and admin_session_secret():
         return None
     return web.Response(
-        text="Murmur admin console is missing MURMUR_ADMIN_PASSWORD or WEBUI_ADMIN_PASSWORD.",
+        text="Murmur admin console is missing MURMUR_ADMIN_PASSWORD.",
         status=503,
         headers=no_store_headers(),
     )
@@ -653,6 +698,7 @@ def admin_login_html(csrf_token: str, error: str = "", username: str = "") -> st
     token = html.escape(csrf_token)
     error_html = f'<div class="notice error">{html.escape(error)}</div>' if error else ""
     username_value = html.escape(username)
+    cleanup_script = legacy_site_cleanup_script()
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -734,6 +780,7 @@ def admin_login_html(csrf_token: str, error: str = "", username: str = "") -> st
       <button type="submit">Sign In</button>
     </form>
   </main>
+  {cleanup_script}
 </body>
 </html>"""
 
@@ -761,6 +808,7 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
         f'<div class="notice success">{html.escape(message)}</div>' if message else ""
     )
     error_html = f'<div class="notice error">{html.escape(error)}</div>' if error else ""
+    cleanup_script = legacy_site_cleanup_script()
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -901,6 +949,7 @@ def admin_html(csrf_token: str, message: str = "", error: str = "") -> str:
     </form>
     </section>
   </main>
+  {cleanup_script}
 </body>
 </html>"""
 
@@ -940,7 +989,7 @@ async def admin_login_post(request: web.Request, form) -> web.Response:
         admin_session_cookie_name(),
         make_admin_session(username),
         max_age=admin_session_seconds(),
-        path=admin_base_path(),
+        path=admin_session_cookie_path(request),
         httponly=True,
         secure=admin_cookie_secure(request),
         samesite="Strict",
@@ -1054,7 +1103,7 @@ async def admin_post(request: web.Request, form=None) -> web.Response:
 
 async def maybe_handle_admin_console(request: web.Request) -> web.Response | None:
     base_path = admin_base_path()
-    if request.path not in {base_path, f"{base_path}/"}:
+    if request.path not in {"/", base_path, f"{base_path}/"}:
         return None
 
     if not admin_console_enabled():
@@ -1064,7 +1113,7 @@ async def maybe_handle_admin_console(request: web.Request) -> web.Response | Non
     if config_error is not None:
         return config_error
 
-    if request.method == "GET":
+    if request.method in {"GET", "HEAD"}:
         if admin_authenticated(request):
             return await admin_get(request)
         return web.Response(
@@ -1244,7 +1293,7 @@ async def proxy_http(request: web.Request) -> web.Response:
             )
     except (ClientError, asyncio.TimeoutError):
         return web.Response(
-            text="Open WebUI is still starting. Try again in a moment.",
+            text="Configured backend is still starting. Try again in a moment.",
             status=503,
         )
 
@@ -1284,7 +1333,7 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
 
         await asyncio.gather(client_to_backend(), backend_to_client())
     except (ClientError, asyncio.TimeoutError):
-        await ws_response.close(message=b"Open WebUI is still starting")
+        await ws_response.close(message=b"Configured backend is still starting")
     finally:
         if backend_ws is not None:
             with suppress(Exception):
@@ -1302,6 +1351,18 @@ async def handle(request: web.Request) -> web.StreamResponse:
     if image_proxy_response is not None:
         return image_proxy_response
 
+    if request.path == "/health":
+        return await proxy_http(request)
+
+    if not should_proxy_backend_path(request.path):
+        if request.method in {"GET", "HEAD"}:
+            return web.HTTPSeeOther("/", headers=no_store_headers())
+        return web.json_response(
+            {"error": {"message": "Not found."}},
+            status=404,
+            headers=no_store_headers(),
+        )
+
     if request.headers.get("upgrade", "").lower() == "websocket":
         return await proxy_websocket(request)
     return await proxy_http(request)
@@ -1309,7 +1370,8 @@ async def handle(request: web.Request) -> web.StreamResponse:
 
 async def session_context(app: web.Application):
     app["session"] = aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)
+        auto_decompress=False,
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
     )
     yield
     await app["session"].close()

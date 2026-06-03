@@ -136,7 +136,7 @@ def encode_json_state(payload: Any) -> tuple[str, str]:
     secret = cookie_state_secret()
     if not secret:
         raise RuntimeStateError(
-            "missing MURMUR_COOKIE_STATE_SECRET or WEBUI_SECRET_KEY for encrypted cookie state"
+            "missing MURMUR_COOKIE_STATE_SECRET for encrypted cookie state"
         )
 
     from cryptography.fernet import Fernet
@@ -152,7 +152,7 @@ def encode_binary_state(raw: bytes, plain_encoding: str, encrypted_encoding: str
     secret = cookie_state_secret()
     if not secret:
         raise RuntimeStateError(
-            "missing MURMUR_COOKIE_STATE_SECRET or WEBUI_SECRET_KEY for encrypted runtime state"
+            "missing MURMUR_COOKIE_STATE_SECRET for encrypted runtime state"
         )
 
     from cryptography.fernet import Fernet
@@ -174,7 +174,7 @@ def decode_json_state(value: str, encoding: str) -> str:
         secret = cookie_state_secret()
         if not secret:
             raise RuntimeStateError(
-                "missing MURMUR_COOKIE_STATE_SECRET or WEBUI_SECRET_KEY for encrypted cookie state"
+                "missing MURMUR_COOKIE_STATE_SECRET for encrypted cookie state"
             )
 
         from cryptography.fernet import Fernet
@@ -196,7 +196,7 @@ def decode_binary_state(
         secret = cookie_state_secret()
         if not secret:
             raise RuntimeStateError(
-                "missing MURMUR_COOKIE_STATE_SECRET or WEBUI_SECRET_KEY for encrypted runtime state"
+                "missing MURMUR_COOKIE_STATE_SECRET for encrypted runtime state"
             )
 
         from cryptography.fernet import Fernet

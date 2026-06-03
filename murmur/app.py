@@ -12,7 +12,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque
-from urllib.parse import unquote, urlencode, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 import fbchat_muqit.state as fb_state
@@ -35,6 +35,7 @@ from .runtime_state import (
     RuntimeStateNotConfigured,
     load_facebook_proxy_state,
 )
+from .lobe_sync import LobeChatExchange, LobeSyncConfig, LobeSyncer
 from .webshare_proxy import ensure_webshare_proxy_state, network_policy
 
 apply_fbchat_patches()
@@ -80,7 +81,7 @@ class UserVisibleError(RuntimeError):
     pass
 
 
-class OpenWebUIResponseError(UserVisibleError):
+class GatewayResponseError(UserVisibleError):
     def __init__(
         self,
         message: str,
@@ -99,6 +100,13 @@ class OpenWebUIResponseError(UserVisibleError):
 
 @dataclass(frozen=True)
 class Settings:
+    ai_backend: str
+    litellm_base_url: str
+    litellm_api_key: str | None
+    litellm_model: str
+    litellm_model_aliases: dict[str, str]
+    litellm_warmup: bool
+    litellm_warmup_chat: bool
     openwebui_base_url: str
     openwebui_api_key: str | None
     openwebui_login_email: str | None
@@ -107,6 +115,15 @@ class Settings:
     openwebui_model_aliases: dict[str, str]
     openwebui_warmup: bool
     openwebui_warmup_chat: bool
+    lobe_sync_enabled: bool
+    lobe_database_url: str
+    lobe_user_email: str | None
+    lobe_user_id: str | None
+    lobe_agent_title: str
+    lobe_agent_slug: str
+    lobe_session_title: str
+    lobe_session_slug: str
+    lobe_topic_prefix: str
     image_generation_model: str | None
     image_size: str | None
     image_steps: int | None
@@ -138,6 +155,7 @@ class Settings:
 class PromptRequest:
     text: str
     is_prefixed: bool
+    display_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,9 +215,11 @@ def facebook_cookie_expired_error(exc: BaseException) -> bool:
     return any(signature in text for signature in FACEBOOK_COOKIE_EXPIRED_SIGNATURES)
 
 
-def parse_model_aliases(default_model: str) -> dict[str, str]:
+def parse_model_aliases(default_model: str, env_name: str) -> dict[str, str]:
+    if not default_model:
+        return {}
     aliases = {"default": default_model}
-    raw_aliases = os.getenv("OPENWEBUI_MODEL_ALIASES", "")
+    raw_aliases = os.getenv(env_name, "")
 
     for item in raw_aliases.replace("\n", ",").split(","):
         item = item.strip()
@@ -208,8 +228,7 @@ def parse_model_aliases(default_model: str) -> dict[str, str]:
 
         if "=" not in item:
             raise ValueError(
-                "OPENWEBUI_MODEL_ALIASES must use alias=model pairs, "
-                f"got {item!r}"
+                f"{env_name} must use alias=model pairs, got {item!r}"
             )
 
         alias, model = item.split("=", 1)
@@ -217,11 +236,21 @@ def parse_model_aliases(default_model: str) -> dict[str, str]:
         model = model.strip()
         if not alias or not model:
             raise ValueError(
-                "OPENWEBUI_MODEL_ALIASES must use non-empty alias=model pairs"
+                f"{env_name} must use non-empty alias=model pairs"
             )
         aliases[alias] = model
 
     return aliases
+
+
+def normalize_ai_backend(value: str | None) -> str:
+    backend = (value or "litellm").strip().lower()
+    backend = re.sub(r"[^a-z0-9]+", "_", backend).strip("_")
+    if backend in {"openwebui", "open_webui", "open_web_ui", "webui"}:
+        return "openwebui"
+    if backend in {"litellm", "lite_llm", "openai", "openai_compatible"}:
+        return "litellm"
+    raise ValueError("MURMUR_AI_BACKEND must be either litellm or openwebui")
 
 
 def env_int(name: str) -> int | None:
@@ -237,6 +266,16 @@ def env_csv(name: str, default: list[str]) -> list[str]:
         return list(default)
     items = [item.strip() for item in value.replace("\n", ",").split(",")]
     return [item for item in items if item]
+
+
+def normalize_litellm_base_url(value: str | None) -> str:
+    raw = (value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.path.rstrip("/").endswith("/v1"):
+        return raw
+    return f"{raw}/v1"
 
 
 def env_proxy(name: str) -> str | None:
@@ -287,10 +326,25 @@ def load_settings() -> Settings:
     load_dotenv()
     facebook_network_policy = network_policy()
     proxy_state = {} if facebook_network_policy == "direct" else load_runtime_proxy_state()
+    ai_backend = normalize_ai_backend(os.getenv("MURMUR_AI_BACKEND"))
+
+    litellm_base_url = normalize_litellm_base_url(
+        os.getenv("LITELLM_BASE_URL")
+        or os.getenv("LITELLM_API_BASE_URL")
+        or os.getenv("OPENAI_API_BASE_URL")
+    )
+    litellm_model = os.getenv("LITELLM_MODEL", "")
+    if ai_backend == "litellm" and not litellm_model:
+        litellm_model = os.environ["LITELLM_MODEL"]
 
     port = os.getenv("PORT", "8080")
-    openwebui_base_url = os.getenv("OPENWEBUI_BASE_URL") or f"http://127.0.0.1:{port}"
-    openwebui_model = os.environ["OPENWEBUI_MODEL"]
+    openwebui_base_url = (
+        os.getenv("OPENWEBUI_BASE_URL") or f"http://127.0.0.1:{port}"
+    ).rstrip("/")
+    openwebui_model = os.getenv("OPENWEBUI_MODEL", "")
+    if ai_backend == "openwebui" and not openwebui_model:
+        openwebui_model = os.environ["OPENWEBUI_MODEL"]
+
     if facebook_network_policy == "direct":
         fb_proxy = None
         fb_upload_proxy = None
@@ -306,8 +360,21 @@ def load_settings() -> Settings:
         if thread_id.strip()
     }
 
+    thread_registry_file = os.getenv("MURMUR_THREAD_REGISTRY_PATH") or str(
+        thread_registry_path()
+    )
     return Settings(
-        openwebui_base_url=openwebui_base_url.rstrip("/"),
+        ai_backend=ai_backend,
+        litellm_base_url=litellm_base_url,
+        litellm_api_key=os.getenv("LITELLM_API_KEY") or None,
+        litellm_model=litellm_model,
+        litellm_model_aliases=parse_model_aliases(
+            litellm_model,
+            "LITELLM_MODEL_ALIASES",
+        ),
+        litellm_warmup=env_bool("LITELLM_WARMUP", True),
+        litellm_warmup_chat=env_bool("LITELLM_WARMUP_CHAT", True),
+        openwebui_base_url=openwebui_base_url,
         openwebui_api_key=os.getenv("OPENWEBUI_API_KEY") or None,
         openwebui_login_email=os.getenv("OPENWEBUI_LOGIN_EMAIL")
         or os.getenv("WEBUI_ADMIN_EMAIL")
@@ -316,12 +383,22 @@ def load_settings() -> Settings:
         or os.getenv("WEBUI_ADMIN_PASSWORD")
         or None,
         openwebui_model=openwebui_model,
-        openwebui_model_aliases=parse_model_aliases(openwebui_model),
+        openwebui_model_aliases=parse_model_aliases(
+            openwebui_model,
+            "OPENWEBUI_MODEL_ALIASES",
+        ),
         openwebui_warmup=env_bool("OPENWEBUI_WARMUP", True),
         openwebui_warmup_chat=env_bool("OPENWEBUI_WARMUP_CHAT", True),
-        image_generation_model=os.getenv("IMAGE_GENERATION_MODEL")
-        or os.getenv("CLOUDFLARE_IMAGE_MODEL")
-        or None,
+        lobe_sync_enabled=env_bool("LOBE_SYNC_ENABLED", False),
+        lobe_database_url=os.getenv("LOBE_DATABASE_URL", "").strip(),
+        lobe_user_email=os.getenv("LOBE_SYNC_USER_EMAIL") or None,
+        lobe_user_id=os.getenv("LOBE_SYNC_USER_ID") or None,
+        lobe_agent_title=os.getenv("LOBE_SYNC_AGENT_TITLE", "Murmur"),
+        lobe_agent_slug=os.getenv("LOBE_SYNC_AGENT_SLUG", "murmur"),
+        lobe_session_title=os.getenv("LOBE_SYNC_SESSION_TITLE", "Murmur"),
+        lobe_session_slug=os.getenv("LOBE_SYNC_SESSION_SLUG", "murmur"),
+        lobe_topic_prefix=os.getenv("LOBE_SYNC_TOPIC_PREFIX", "Messenger"),
+        image_generation_model=os.getenv("IMAGE_GENERATION_MODEL") or None,
         image_size=os.getenv("IMAGE_SIZE") or None,
         image_steps=env_int("IMAGE_STEPS"),
         fb_cookies_path=os.getenv("FB_COOKIES_PATH", "cookies.json"),
@@ -346,8 +423,7 @@ def load_settings() -> Settings:
         max_reply_chars=int(os.getenv("MAX_REPLY_CHARS", "1800")),
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "120")),
         allowed_thread_ids=allowed_thread_ids,
-        thread_registry_path=os.getenv("MURMUR_THREAD_REGISTRY_PATH")
-        or str(thread_registry_path()),
+        thread_registry_path=thread_registry_file,
         thread_allowlist_path=os.getenv("MURMUR_THREAD_ALLOWLIST_PATH")
         or str(thread_allowlist_path()),
         system_prompt=os.getenv(
@@ -371,12 +447,26 @@ class Murmur:
         self.thread_model_aliases: dict[str, str] = {}
         self.thread_image_models: dict[str, str] = {}
         self.thread_image_model_aliases: dict[str, str] = {}
+        self.thread_image_model_options: dict[str, list[ModelOption]] = {}
         self.thread_model_options: dict[str, list[ModelOption]] = {}
         self.thread_providers: dict[str, str] = {}
         self.thread_provider_options: dict[str, list[str]] = {}
         self.thread_provider_model_options: dict[str, dict[str, list[ModelOption]]] = {}
         self.resolved_model_cache: dict[str, str] = {}
         self.openwebui_token: str | None = None
+        self.lobe_sync = LobeSyncer(
+            LobeSyncConfig(
+                enabled=settings.lobe_sync_enabled,
+                database_url=settings.lobe_database_url,
+                user_email=settings.lobe_user_email,
+                user_id=settings.lobe_user_id,
+                agent_title=settings.lobe_agent_title,
+                agent_slug=settings.lobe_agent_slug,
+                session_title=settings.lobe_session_title,
+                session_slug=settings.lobe_session_slug,
+                topic_prefix=settings.lobe_topic_prefix,
+            )
+        )
         self.mqtt_watchdog_task: asyncio.Task | None = None
         self.thread_registry_refresh_task: asyncio.Task | None = None
         self.bnp_notification_task: asyncio.Task | None = None
@@ -493,6 +583,7 @@ class Murmur:
         name: object = None,
         thread_type: object = None,
         last_sender_id: object = None,
+        participants: object = None,
     ) -> None:
         thread_id_text = self.facebook_id(thread_id)
         if not thread_id_text:
@@ -512,8 +603,58 @@ class Murmur:
             entry["last_sender_id"] = sender_id_text
             if self.fb_user_names.get(sender_id_text):
                 entry["last_sender_name"] = self.fb_user_names[sender_id_text]
+        participant_entries = self.facebook_participant_entries(participants)
+        if not participant_entries and name_text:
+            participant_entries = [{"id": thread_id_text, "name": name_text}]
+        if participant_entries:
+            entry["participants"] = participant_entries
         entry["last_seen"] = int(time.time())
         self.write_thread_registry()
+
+    def facebook_participant_entries(self, participants: object) -> list[dict[str, str]]:
+        entries: list[dict[str, str]] = []
+        seen: set[str] = set()
+        if not participants:
+            return entries
+
+        if isinstance(participants, (list, tuple, set)):
+            participant_values = participants
+        else:
+            participant_values = [participants]
+
+        for participant in participant_values:
+            if isinstance(participant, dict):
+                participant_id = self.facebook_id(
+                    participant.get("id")
+                    or participant.get("uid")
+                    or participant.get("user_id")
+                )
+                name = str(
+                    participant.get("name")
+                    or participant.get("short_name")
+                    or ""
+                ).strip()
+            else:
+                participant_id = self.facebook_id(
+                    getattr(participant, "id", "")
+                    or getattr(participant, "uid", "")
+                    or getattr(participant, "user_id", "")
+                    or participant
+                )
+                name = str(
+                    getattr(participant, "name", "")
+                    or getattr(participant, "short_name", "")
+                    or ""
+                ).strip()
+
+            if not participant_id or participant_id in seen:
+                continue
+            seen.add(participant_id)
+            entry = {"id": participant_id}
+            if name and name != participant_id:
+                entry["name"] = name
+            entries.append(entry)
+        return entries
 
     def write_thread_registry(self) -> None:
         try:
@@ -599,16 +740,17 @@ class Murmur:
 
         changed = False
         for thread in threads:
+            participants = getattr(thread, "all_participants", ()) or ()
             self.remember_thread_registry_entry(
                 getattr(thread, "thread_id", thread_id),
                 getattr(thread, "name", ""),
                 getattr(thread, "thread_type", None),
+                participants=participants,
             )
             changed |= self.remember_facebook_thread_name(
                 getattr(thread, "thread_id", thread_id),
                 getattr(thread, "name", ""),
             )
-            participants = getattr(thread, "all_participants", ()) or ()
             if not participants:
                 changed |= self.remember_facebook_user_name(
                     getattr(thread, "thread_id", ""),
@@ -639,6 +781,7 @@ class Murmur:
                 thread_id,
                 name,
                 getattr(thread, "thread_type", None),
+                participants=getattr(thread, "all_participants", ()) or (),
             )
             changed_names |= self.remember_facebook_thread_name(thread_id, name)
             for participant in getattr(thread, "all_participants", ()) or ():
@@ -688,6 +831,61 @@ class Murmur:
         if self.settings.fb_log_names_keep_ids:
             return f"{name} ({item_id})"
         return name
+
+    def facebook_thread_name(self, thread_id: object) -> str:
+        thread_id_text = self.facebook_id(thread_id)
+        if not thread_id_text:
+            return "unknown thread"
+        entry = self.thread_registry.get(thread_id_text, {})
+        name = self.fb_thread_names.get(thread_id_text) or str(
+            entry.get("name") or ""
+        ).strip()
+        return name or "Messenger thread"
+
+    def facebook_thread_people_names(
+        self,
+        thread_id: object,
+        max_people: int = 12,
+    ) -> str:
+        thread_id_text = self.facebook_id(thread_id)
+        entry = self.thread_registry.get(thread_id_text, {})
+        participants = entry.get("participants", [])
+        names: list[str] = []
+        seen: set[str] = set()
+
+        if isinstance(participants, list):
+            for participant in participants:
+                if isinstance(participant, dict):
+                    participant_id = self.facebook_id(participant.get("id"))
+                    name = str(
+                        participant.get("name")
+                        or self.fb_user_names.get(participant_id)
+                        or ""
+                    ).strip()
+                else:
+                    participant_id = self.facebook_id(participant)
+                    name = self.fb_user_names.get(participant_id, "")
+
+                label = name or participant_id
+                if not label or label in seen:
+                    continue
+                seen.add(label)
+                names.append(label)
+
+        if not names:
+            last_sender_name = str(entry.get("last_sender_name") or "").strip()
+            last_sender_id = self.facebook_id(entry.get("last_sender_id"))
+            fallback = last_sender_name or self.fb_user_names.get(last_sender_id, "")
+            if fallback:
+                names.append(fallback)
+
+        if not names:
+            return ""
+
+        visible = names[:max_people]
+        if len(names) > max_people:
+            visible.append(f"+{len(names) - max_people} more")
+        return ", ".join(visible)
 
     async def log_facebook_listening_event(self) -> None:
         return
@@ -771,11 +969,11 @@ class Murmur:
         asyncio.run(self.run_async())
 
     async def run_async(self) -> None:
-        if self.settings.openwebui_warmup:
+        if self.gateway_warmup_enabled():
             try:
-                await self.warmup_openwebui()
+                await self.warmup_gateway()
             except Exception as exc:
-                print(f"Open WebUI warmup failed: {exc}")
+                print(f"{self.gateway_label()} warmup failed: {exc}")
         self.client._initial_state = await self.preflight_facebook_cookie_login()
         await self.client._runner()
 
@@ -848,38 +1046,86 @@ class Murmur:
         fb_state.get_session = get_session
         fb_state_helper.get_session = get_session
 
-    async def warmup_openwebui(self) -> None:
-        print("Warming Open WebUI before Messenger listener starts...")
+    def use_openwebui(self) -> bool:
+        return self.settings.ai_backend == "openwebui"
+
+    def gateway_provider_id(self) -> str:
+        return "openwebui" if self.use_openwebui() else "litellm"
+
+    def gateway_label(self) -> str:
+        return "Open WebUI" if self.use_openwebui() else "LiteLLM gateway"
+
+    def gateway_default_label(self) -> str:
+        return f"{self.gateway_label()} configured default"
+
+    def gateway_warmup_enabled(self) -> bool:
+        if self.use_openwebui():
+            return self.settings.openwebui_warmup
+        return self.settings.litellm_warmup
+
+    def gateway_warmup_chat_enabled(self) -> bool:
+        if self.use_openwebui():
+            return self.settings.openwebui_warmup_chat
+        return self.settings.litellm_warmup_chat
+
+    def default_chat_model(self) -> str:
+        return (
+            self.settings.openwebui_model
+            if self.use_openwebui()
+            else self.settings.litellm_model
+        )
+
+    def model_aliases(self) -> dict[str, str]:
+        return (
+            self.settings.openwebui_model_aliases
+            if self.use_openwebui()
+            else self.settings.litellm_model_aliases
+        )
+
+    def preferred_chat_models_env(self) -> str:
+        return (
+            "OPENWEBUI_PREFERRED_CHAT_MODELS"
+            if self.use_openwebui()
+            else "LITELLM_PREFERRED_CHAT_MODELS"
+        )
+
+    def gateway_model_paths(self) -> tuple[str, ...]:
+        if self.use_openwebui():
+            return ("/api/models", "/api/v1/models")
+        return ("/models",)
+
+    async def warmup_gateway(self) -> None:
+        print(f"Warming {self.gateway_label()} before Messenger listener starts...")
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         ) as session:
-            headers = await self.openwebui_headers(session)
+            headers = await self.gateway_headers(session)
 
-            for path in ("/api/models", "/api/v1/models"):
+            for path in self.gateway_model_paths():
                 try:
                     async with session.get(
-                        f"{self.settings.openwebui_base_url}{path}",
+                        self.gateway_url(path),
                         headers=headers,
                     ) as response:
                         if response.status < 400:
                             await response.json(content_type=None)
-                            print(f"Open WebUI model endpoint warmed via {path}.")
+                            print(f"{self.gateway_label()} model endpoint warmed via {path}.")
                             break
                         body = await response.text()
-                        print(f"Open WebUI model warmup {path} returned {response.status}: {body[:200]}")
+                        print(f"{self.gateway_label()} model warmup {path} returned {response.status}: {body[:200]}")
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    print(f"Open WebUI model warmup {path} failed: {exc}")
+                    print(f"{self.gateway_label()} model warmup {path} failed: {exc}")
 
-            if self.settings.openwebui_warmup_chat:
+            if self.gateway_warmup_chat_enabled():
                 try:
-                    await self.ask_openwebui(
+                    await self.ask_gateway(
                         "__warmup__",
                         "Reply with OK.",
-                        self.settings.openwebui_model,
+                        self.default_chat_model(),
                     )
-                    print("Open WebUI chat completion warmed.")
+                    print(f"{self.gateway_label()} chat completion warmed.")
                 except Exception as exc:
-                    print(f"Open WebUI chat warmup failed: {exc}")
+                    print(f"{self.gateway_label()} chat warmup failed: {exc}")
 
     def configure_mqtt_proxy(self) -> None:
         if not self.settings.fb_mqtt_proxy:
@@ -1030,6 +1276,7 @@ class Murmur:
         bot_response = None
         control_response = None
         prompt = request.text
+        display_prompt = request.display_text or prompt
         model = self.current_model(message.thread_id)
 
         try:
@@ -1045,6 +1292,7 @@ class Murmur:
                         control_response = chat_command.response
                     elif chat_command.prompt is not None:
                         prompt = chat_command.prompt
+                        display_prompt = chat_command.prompt
 
                 if chat_command is None:
                     bot_response = await self.handle_media_command(message, prompt)
@@ -1063,6 +1311,7 @@ class Murmur:
                     )
                     if one_shot_model is not None:
                         prompt, model = one_shot_model
+                        display_prompt = prompt
 
             if bot_response is not None:
                 pass
@@ -1070,7 +1319,15 @@ class Murmur:
                 answer = control_response
                 bot_response = BotResponse(text=answer)
             else:
-                answer = await self.ask_openwebui(message.thread_id, prompt, model)
+                answer = await self.ask_gateway(
+                    message.thread_id,
+                    prompt,
+                    model,
+                    display_prompt=display_prompt,
+                    source_message_id=message.id,
+                    source_sender_id=message.sender_id,
+                    source_sender_name=self.facebook_user_label(message.sender_id),
+                )
                 bot_response = BotResponse(text=answer)
         except Exception as exc:
             print(f"Failed to answer message {message.id}: {exc}")
@@ -1321,23 +1578,29 @@ class Murmur:
         prefix = self.settings.bot_prefix
         if prefix and text.lower().startswith(prefix.lower()):
             prompt = text[len(prefix) :].strip()
-            return PromptRequest(prompt or "Hello", is_prefixed=True)
+            prompt = prompt or "Hello"
+            return PromptRequest(prompt, is_prefixed=True, display_text=prompt)
 
         inline_prompt = self.inline_prefix_prompt(text, prefix)
         if inline_prompt is not None:
-            return PromptRequest(inline_prompt, is_prefixed=True)
+            return PromptRequest(
+                inline_prompt,
+                is_prefixed=True,
+                display_text=inline_prompt,
+            )
 
         if text.lower() in {"/help", "help"}:
-            return PromptRequest("help", is_prefixed=True)
+            return PromptRequest("help", is_prefixed=True, display_text=text)
 
         if self.settings.respond_to_bot_replies and self.is_reply_to_bot(message):
             return PromptRequest(
                 self.reply_prompt(message, text),
                 is_prefixed=False,
+                display_text=text,
             )
 
         if not self.settings.respond_only_on_prefix:
-            return PromptRequest(text, is_prefixed=False)
+            return PromptRequest(text, is_prefixed=False, display_text=text)
 
         return None
 
@@ -1523,8 +1786,9 @@ class Murmur:
                 return BotResponse(
                     text=(
                         f"Usage: {self.settings.bot_prefix} image <prompt>\n"
-                        f"Or: {self.settings.bot_prefix} image openrouter 2 1 <prompt>\n"
-                        f"Set image model: {self.settings.bot_prefix} image model openrouter 2 1"
+                        f"List image models: {self.settings.bot_prefix} image models\n"
+                        f"Or: {self.settings.bot_prefix} image <model number> <prompt>\n"
+                        f"Set image model: {self.settings.bot_prefix} image model <number>"
                     )
                 )
             image_args = parts[1].strip()
@@ -1534,7 +1798,7 @@ class Murmur:
                     image_args.split()[1:]
                 )
                 return BotResponse(
-                    text=await self.model_list_message(
+                    text=await self.image_model_list_message(
                         message.thread_id,
                         include_all=include_all,
                         free_only=free_only,
@@ -1571,21 +1835,21 @@ class Murmur:
             )
 
         if command in {"see", "vision", "look"}:
-            return BotResponse(text=self.openwebui_only_message("vision"))
+            return BotResponse(text=self.gateway_only_message("vision"))
 
         return None
 
-    def openwebui_only_message(self, feature: str) -> str:
+    def gateway_only_message(self, feature: str) -> str:
         return (
             f"{feature.capitalize()} is disabled in Murmur until it can be "
-            "bridged through Open WebUI. Murmur is bridge-only."
+            f"bridged through {self.gateway_label()}. Murmur is bridge-only."
         )
 
     def user_facing_error(self, exc: Exception) -> str:
         if isinstance(exc, UserVisibleError):
             return str(exc)
         message = str(exc).strip()
-        if message.startswith("Open WebUI "):
+        if message.startswith(("LiteLLM gateway ", "Open WebUI ")):
             return message
         return "I hit an error while thinking. Check the bot logs."
 
@@ -1597,16 +1861,17 @@ class Murmur:
                 "",
                 "Chat",
                 f"{prefix} <message>",
-                f"{prefix} model <provider> [connection] <number>",
+                f"{prefix} model <number|model-id>",
                 "",
                 "Image",
                 f"{prefix} image <prompt>",
-                f"{prefix} image model <provider> [connection] <number>",
+                f"{prefix} image models",
+                f"{prefix} image model <number|model-id>",
                 "",
                 "Models",
                 f"{prefix} models",
-                f"{prefix} models all",
-                f"{prefix} models <provider> [connection]",
+                f"{prefix} models free",
+                f"{prefix} providers",
                 f"{prefix} status",
             ]
         )
@@ -1620,18 +1885,20 @@ class Murmur:
         image_provider = (
             self.provider_for_selected_model(thread_id, image_model)
             if image_model
-            else "openwebui"
+            else self.gateway_provider_id()
         )
         image_model_label = (
             self.model_short_id(image_model)
             if image_model
-            else "Open WebUI configured default"
+            else self.gateway_default_label()
         )
-        image_size = self.settings.image_size or "Open WebUI configured default"
+        image_size = self.settings.image_size or self.gateway_default_label()
         return "\n".join(
             [
                 "Status",
-                "Bridge: Open WebUI",
+                f"Bridge: {self.gateway_label()}",
+                f"Lobe mirror: {self.lobe_sync.status_label()}",
+                f"OpenWebUI route: {'active' if self.use_openwebui() else 'kept, inactive'}",
                 "",
                 "Chat",
                 f"Provider: {self.provider_display_name(chat_provider)}",
@@ -1649,14 +1916,14 @@ class Murmur:
     def image_model_status(self, thread_id: str) -> str:
         model = self.current_image_model(thread_id)
         if not model:
-            return "Open WebUI configured default"
+            return self.gateway_default_label()
         provider = self.provider_for_selected_model(thread_id, model)
         size = f", {self.settings.image_size}" if self.settings.image_size else ""
         header = self.response_header(provider, model)
         return f"{header[:-1]}{size}]" if size else header
 
     def image_model_label(self) -> str:
-        return self.settings.image_generation_model or "Open WebUI configured default"
+        return self.settings.image_generation_model or self.gateway_default_label()
 
     def response_header(self, provider: str, model: str) -> str:
         return f"[{self.provider_display_name(provider)} - {self.model_short_id(model)}]"
@@ -1713,7 +1980,7 @@ class Murmur:
         return prompt, None, None
 
     def current_model(self, thread_id: str) -> str:
-        return self.thread_models.get(thread_id, self.settings.openwebui_model)
+        return self.thread_models.get(thread_id, self.default_chat_model())
 
     def current_model_alias(self, thread_id: str) -> str:
         return self.thread_model_aliases.get(thread_id, "default")
@@ -1732,12 +1999,12 @@ class Murmur:
         model = self.current_image_model(thread_id)
         if not model:
             return (
-                "Current image model: Open WebUI configured default\n"
-                f"Use {self.settings.bot_prefix} image model <provider> [connection] <number>."
+                f"Current image model: {self.gateway_default_label()}\n"
+                f"Use {self.settings.bot_prefix} image model <number|model-id>."
             )
         return (
             f"Current image model: {alias} ({self.model_short_id(model)})\n"
-            f"Use {self.settings.bot_prefix} image model <provider> [connection] <number>."
+            f"Use {self.settings.bot_prefix} image model <number|model-id>."
         )
 
     def current_provider(self, thread_id: str) -> str:
@@ -1755,7 +2022,7 @@ class Murmur:
         if cached:
             return cached
 
-        options = await self.fetch_openwebui_models()
+        options = await self.fetch_gateway_models()
         if not options:
             options = self.thread_model_options.get(thread_id, [])
 
@@ -1783,7 +2050,7 @@ class Murmur:
                 raise UserVisibleError(
                     "Configured model is not a chat model: "
                     f"{self.model_display(resolved_option)}\n"
-                    f"Use {self.settings.bot_prefix} model <provider> [connection] <number> "
+                    f"Use {self.settings.bot_prefix} model <number|model-id> "
                     "with a chat/text model."
                 )
 
@@ -1792,13 +2059,13 @@ class Murmur:
             if fallback:
                 print(
                     "Configured chat model "
-                    f"{model!r} was not returned by Open WebUI model APIs; "
+                    f"{model!r} was not returned by {self.gateway_label()} model APIs; "
                     f"using {fallback.id!r}."
                 )
                 resolved = fallback.id
             else:
                 raise UserVisibleError(
-                    "Configured chat model is not available in Open WebUI: "
+                    f"Configured chat model is not available in {self.gateway_label()}: "
                     f"{model}\n"
                     f"Use {self.settings.bot_prefix} models to pick a model."
                 )
@@ -1829,7 +2096,7 @@ class Murmur:
         candidates = [
             option
             for option in options
-            if family == "openwebui"
+            if family == self.gateway_provider_id()
             or self.provider_family(self.option_provider(option)) == family
         ]
         if not candidates:
@@ -1841,28 +2108,58 @@ class Murmur:
         if not chat_candidates:
             chat_candidates = candidates
 
-        preferred_ids = (
-            "openai/gpt-oss-20b:free",
-            "openai/gpt-oss-120b:free",
-            "meta-llama/llama-3.2-3b-instruct:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "qwen/qwen3-coder:free",
-            "@cf/openai/gpt-oss-20b",
-            "@cf/meta/llama-3.1-8b-instruct",
-        )
+        preferred_ids = self.preferred_chat_model_ids()
 
         for pool in (
             [option for option in chat_candidates if self.is_free_model(option)],
             chat_candidates,
         ):
-            for preferred_id in preferred_ids:
-                for option in pool:
-                    if self.model_short_id(option.id).lower() == preferred_id:
-                        return option
+            preferred = self.preferred_chat_model_from_options(pool, preferred_ids)
+            if preferred:
+                return preferred
             if pool:
-                return sorted(pool, key=lambda option: option.id)[0]
+                return sorted(pool, key=self.chat_model_sort_key)[0]
 
         return None
+
+    def preferred_chat_model_ids(self) -> tuple[str, ...]:
+        configured = [
+            self.default_chat_model(),
+            *self.model_aliases().values(),
+        ]
+        raw = os.getenv(self.preferred_chat_models_env(), "")
+        preferred = [
+            item.strip()
+            for item in raw.replace("\n", ",").split(",")
+            if item.strip()
+        ]
+        return tuple(dict.fromkeys([*configured, *preferred]))
+
+    def preferred_chat_model_from_options(
+        self,
+        options: list[ModelOption],
+        preferred_ids: tuple[str, ...] | None = None,
+    ) -> ModelOption | None:
+        preferred_ids = preferred_ids or self.preferred_chat_model_ids()
+        for preferred_id in preferred_ids:
+            preferred_key = preferred_id.strip().lower()
+            if not preferred_key:
+                continue
+            for option in options:
+                if self.equivalent_model_id(option.id, preferred_key):
+                    return option
+                if self.model_short_id(option.id).lower() == self.model_short_id(
+                    preferred_key
+                ).lower():
+                    return option
+        return None
+
+    def chat_model_sort_key(self, option: ModelOption) -> tuple[bool, str, str]:
+        return (
+            not self.is_free_model(option),
+            self.model_short_id(option.id).lower(),
+            option.id.lower(),
+        )
 
     def is_probably_chat_model(self, option: ModelOption) -> bool:
         capability_set = set(option.capabilities)
@@ -1905,6 +2202,35 @@ class Murmur:
         )
         return not any(term in text for term in non_chat_terms)
 
+    def is_probably_image_model(self, option: ModelOption) -> bool:
+        capability_set = set(option.capabilities)
+        if "image" in capability_set:
+            return True
+
+        text = f"{option.id} {option.name} {option.task or ''}".lower()
+        image_terms = (
+            "black-forest-labs",
+            "dall-e",
+            "dalle",
+            "flux",
+            "gpt-image",
+            "image-generation",
+            "image_generation",
+            "image-preview",
+            "imagen",
+            "ideogram",
+            "kandinsky",
+            "kolors",
+            "midjourney",
+            "playground-v",
+            "recraft",
+            "sdxl",
+            "seedream",
+            "stable-diffusion",
+            "text-to-image",
+        )
+        return any(term in text for term in image_terms)
+
     def resolve_model_id_from_options(
         self,
         requested: str,
@@ -1936,13 +2262,11 @@ class Murmur:
             if 0 <= index < len(options):
                 return options[index].id
 
-        return self.settings.openwebui_model_aliases.get(key)
+        return self.model_aliases().get(key)
 
     async def set_thread_model(self, thread_id: str, name: str) -> str:
         alias = name.strip().lower().lstrip("@")
-        if len(alias.split()) >= 2 and not self.thread_provider_model_options.get(
-            thread_id
-        ):
+        if not self.thread_model_options.get(thread_id):
             options = await self.fetch_model_options(include_all=True)
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
@@ -1955,6 +2279,11 @@ class Murmur:
         model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
             alias, thread_id
         )
+        if model is None:
+            options = self.thread_model_options.get(thread_id, [])
+            resolved = self.resolve_model_id_from_options(alias, options)
+            if self.model_id_in_options(resolved, options):
+                model = resolved
         if model is None and len(alias.split()) >= 2:
             options = await self.fetch_model_options(include_all=True)
             self.thread_model_options[thread_id] = options
@@ -1971,7 +2300,7 @@ class Murmur:
             return (
                 f"Unknown model: {name}\n"
                 f"Use {self.settings.bot_prefix} models to see available models.\n"
-                f"Provider model syntax: {self.settings.bot_prefix} model openrouter 1"
+                f"Model syntax: {self.settings.bot_prefix} model <number|model-id>"
             )
 
         option = await self.ensure_thread_model_option(thread_id, model)
@@ -1979,7 +2308,7 @@ class Murmur:
             return (
                 "That model is not a chat model:\n"
                 f"{self.model_display(option)}\n"
-                f"Use {self.settings.bot_prefix} model <provider> [connection] <number> "
+                f"Use {self.settings.bot_prefix} model <number|model-id> "
                 "with a chat/text model."
             )
 
@@ -2022,10 +2351,11 @@ class Murmur:
 
     async def set_thread_image_model(self, thread_id: str, name: str) -> str:
         alias = name.strip().lower().lstrip("@")
-        if len(alias.split()) >= 2 and not self.thread_provider_model_options.get(
-            thread_id
-        ):
-            options = await self.fetch_model_options(include_all=True)
+        unverified = False
+        options = self.thread_image_model_options.get(thread_id)
+        if not options:
+            options = await self.fetch_image_model_options(include_all=True)
+            self.thread_image_model_options[thread_id] = options
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
             self.thread_provider_model_options[thread_id] = groups
@@ -2037,8 +2367,14 @@ class Murmur:
         model = self.resolve_provider_model(thread_id, alias) or self.resolve_model(
             alias, thread_id
         )
+        if model is None:
+            options = self.thread_image_model_options.get(thread_id, [])
+            resolved = self.resolve_model_id_from_options(alias, options)
+            if self.model_id_in_options(resolved, options):
+                model = resolved
         if model is None and len(alias.split()) >= 2:
-            options = await self.fetch_model_options(include_all=True)
+            options = await self.fetch_image_model_options(include_all=True)
+            self.thread_image_model_options[thread_id] = options
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
             self.thread_provider_model_options[thread_id] = groups
@@ -2050,17 +2386,34 @@ class Murmur:
                 alias, thread_id
             )
         if model is None:
+            all_options = await self.fetch_model_options(include_all=True)
+            resolved = self.resolve_model_id_from_options(alias, all_options)
+            option = self.model_option_from_options(resolved, all_options)
+            if option:
+                model = resolved
+                unverified = not self.is_probably_image_model(option)
+            elif not alias.isdigit() and self.looks_like_model_id(name):
+                model = name.strip()
+                unverified = True
+
+        if model is None:
             return (
                 f"Unknown image model: {name}\n"
-                f"Use {self.settings.bot_prefix} models to see available models.\n"
-                f"Image model syntax: {self.settings.bot_prefix} image model openrouter 2 1"
+                f"Use {self.settings.bot_prefix} image models to see available image models.\n"
+                f"Image model syntax: {self.settings.bot_prefix} image model <number|model-id>"
             )
 
         self.set_thread_image_model_value(thread_id, model, alias)
-        return (
+        response = (
             f"Image model set to {alias} ({self.model_short_id(model)}) "
             "for this thread."
         )
+        if unverified:
+            response += (
+                f"\n{self.gateway_label()} did not mark this model as image-capable; "
+                "generation may fail if the image backend rejects it."
+            )
+        return response
 
     def set_thread_image_model_value(
         self,
@@ -2111,6 +2464,10 @@ class Murmur:
             if 0 <= index < len(options):
                 return str(index + 1)
         return requested or "default"
+
+    def looks_like_model_id(self, value: str) -> bool:
+        value = value.strip()
+        return bool(value) and any(marker in value for marker in ("/", ":", ".", "@", "-"))
 
     def provider_for_selected_model(self, thread_id: str, model_id: str) -> str:
         for provider, options in self.thread_provider_model_options.get(
@@ -2164,7 +2521,7 @@ class Murmur:
 
         current_alias = self.current_model_alias(thread_id)
         lines = ["Available models:"]
-        for alias, model in self.settings.openwebui_model_aliases.items():
+        for alias, model in self.model_aliases().items():
             marker = "*" if alias == current_alias else "-"
             lines.append(f"{marker} {alias}: {model}")
 
@@ -2173,6 +2530,62 @@ class Murmur:
         lines.append(f"One-shot: {self.settings.bot_prefix} @<name> your message")
         return "\n".join(lines)
 
+    async def image_model_list_message(
+        self,
+        thread_id: str,
+        include_all: bool = False,
+        free_only: bool = False,
+        provider_filter: str = "",
+    ) -> str:
+        options = await self.fetch_image_model_options(
+            include_all=include_all,
+            strict_free=free_only,
+        )
+        if not options:
+            return (
+                f"No image-capable models were marked in {self.gateway_label()}'s model list.\n"
+                "Murmur looks for image_generation metadata, "
+                "image_generation mode, and known image-model IDs.\n"
+                f"Set exact model anyway: {self.settings.bot_prefix} image model <model-id>"
+            )
+
+        compact_connections = True
+        self.thread_image_model_options[thread_id] = options
+        self.thread_model_options[thread_id] = options
+        groups = self.group_model_options(options)
+        if provider_filter.strip():
+            compact_connections = not self.is_provider_connection(provider_filter)
+            matching_providers = self.matching_provider_filters(
+                provider_filter,
+                sorted(groups, key=self.provider_sort_key),
+            )
+            if not matching_providers:
+                return (
+                    f"Unknown provider: {provider_filter}\n"
+                    f"Use {self.settings.bot_prefix} providers to see available providers."
+                )
+            options = [
+                option
+                for provider in matching_providers
+                for option in groups.get(provider, [])
+            ]
+            self.thread_image_model_options[thread_id] = options
+            self.thread_model_options[thread_id] = options
+
+        return self.dynamic_model_list_message(
+            thread_id,
+            options,
+            include_all=False,
+            free_only=free_only,
+            compact_connections=compact_connections,
+            title_override="Image models",
+            footer_lines=[
+                f"Set image: {self.settings.bot_prefix} image model <number|model-id>",
+                f"All {self.gateway_label()} models: {self.settings.bot_prefix} models",
+                f"Status: {self.settings.bot_prefix} status",
+            ],
+        )
+
     def dynamic_model_list_message(
         self,
         thread_id: str,
@@ -2180,10 +2593,14 @@ class Murmur:
         include_all: bool,
         free_only: bool = False,
         compact_connections: bool = False,
+        title_override: str | None = None,
+        footer_lines: list[str] | None = None,
     ) -> str:
         current_model = self.current_model(thread_id)
         current_image_model = self.current_image_model(thread_id)
-        if include_all:
+        if title_override:
+            title = title_override
+        elif include_all:
             title = "All models"
         elif free_only:
             title = "Free models"
@@ -2219,20 +2636,14 @@ class Murmur:
                 lines.append(f"{index}. {self.model_display(option)}{current}")
 
         lines.append("")
-        lines.append(
-            f"Chat: {self.settings.bot_prefix} model <provider> [connection] <number>"
-        )
-        lines.append(
-            f"Image: {self.settings.bot_prefix} image model <provider> [connection] <number>"
-        )
-        lines.append(
-            f"Filter: {self.settings.bot_prefix} models <provider> [connection]"
-        )
-        if include_all:
-            lines.append(f"Compact: {self.settings.bot_prefix} models")
-        else:
-            lines.append(f"All: {self.settings.bot_prefix} models all")
-        lines.append(f"Status: {self.settings.bot_prefix} status")
+        if footer_lines is None:
+            footer_lines = [
+                f"Chat: {self.settings.bot_prefix} model <number|model-id>",
+                f"Image: {self.settings.bot_prefix} image model <number|model-id>",
+                f"Free only: {self.settings.bot_prefix} models free",
+                f"Status: {self.settings.bot_prefix} status",
+            ]
+        lines.extend(footer_lines)
         return "\n".join(lines)
 
     def model_group_connection_counts(
@@ -2258,6 +2669,8 @@ class Murmur:
     ) -> str:
         count = connection_counts.get(provider, 1)
         noun = "connection" if count == 1 else "connections"
+        if self.provider_family(provider) == "litellm":
+            return self.provider_display_name(provider)
         return f"{self.provider_display_name(provider)} - {count} {noun}"
 
     def compact_model_groups_by_family(
@@ -2353,14 +2766,11 @@ class Murmur:
         all_options = await self.fetch_model_options(include_all=True)
         if not all_options:
             return (
-                "No providers returned from the Open WebUI model API.\n"
-                "Exact source: Open WebUI /api/models returned no usable models."
+                f"No providers returned from the {self.gateway_label()} model API.\n"
+                f"Exact source: {self.gateway_label()} model endpoints returned no usable models."
             )
 
-        free_options = [option for option in all_options if self.is_free_model(option)]
-        grouped = self.group_model_options(all_options)
         all_grouped = self.group_model_options(all_options)
-        free_grouped = self.group_model_options(free_options)
         self.thread_model_options[thread_id] = all_options
 
         provider_keys = sorted(all_grouped, key=self.provider_sort_key)
@@ -2371,29 +2781,18 @@ class Murmur:
         lines = [f"{title} ({len(provider_keys)}):"]
         for index, provider in enumerate(provider_keys, start=1):
             models = all_grouped.get(provider, [])
-            free_models = free_grouped.get(provider, [])
             marker = " (current)" if provider == current_provider else ""
             sample = ", ".join(self.model_short_id(model.id) for model in models[:3])
             suffix = f" - {sample}" if sample else ""
-            count = (
-                f"{len(models)} model(s)"
-                if include_all
-                else f"{len(free_models)} free / {len(models)} total model(s)"
-            )
+            count = f"{len(models)} model(s)"
             lines.append(
                 f"{index}. {self.provider_display_name(provider)}"
                 f" - {count}{marker}{suffix}"
             )
 
         lines.append("")
-        lines.append(
-            f"Switch provider: {self.settings.bot_prefix} provider <provider> [connection]"
-        )
-        lines.append(
-            f"Pick model: {self.settings.bot_prefix} model <provider> [connection] <number>"
-        )
-        lines.append(f"Models: {self.settings.bot_prefix} models <provider> [connection]")
-        lines.append(f"All models: {self.settings.bot_prefix} models all")
+        lines.append(f"Pick model: {self.settings.bot_prefix} model <number|model-id>")
+        lines.append(f"Models: {self.settings.bot_prefix} models")
         return "\n".join(lines)
 
     async def set_thread_provider(self, thread_id: str, name: str) -> str:
@@ -2485,73 +2884,30 @@ class Murmur:
         include_all: bool = False,
         strict_free: bool = False,
     ) -> list[ModelOption]:
-        models = self.with_configured_models(await self.fetch_openwebui_models())
-
-        if include_all:
-            return sorted(models, key=lambda model: model.id)
+        models = await self.fetch_gateway_models()
 
         free_models = [model for model in models if self.is_free_model(model)]
         if strict_free:
             return sorted(free_models, key=lambda model: model.id)
 
-        models_by_provider = self.group_model_options(models)
-        free_by_provider = self.group_model_options(free_models)
-        visible_models = []
-        for provider, provider_models in models_by_provider.items():
-            visible_models.extend(free_by_provider.get(provider) or provider_models)
+        return sorted(models, key=lambda model: model.id)
 
-        return self.dedupe_model_options(visible_models)
+    async def fetch_image_model_options(
+        self,
+        include_all: bool = False,
+        strict_free: bool = False,
+    ) -> list[ModelOption]:
+        models = await self.fetch_model_options(
+            include_all=include_all,
+            strict_free=strict_free,
+        )
+        return sorted(
+            [model for model in models if self.is_probably_image_model(model)],
+            key=lambda model: model.id,
+        )
 
     def with_configured_models(self, models: list[ModelOption]) -> list[ModelOption]:
-        options = list(models)
-        configured_models = [
-            self.settings.openwebui_model,
-            self.settings.image_generation_model,
-            *self.settings.openwebui_model_aliases.values(),
-        ]
-        for model_id in configured_models:
-            if not model_id:
-                continue
-            if any(self.equivalent_model_id(option.id, model_id) for option in options):
-                continue
-
-            provider = self.preferred_provider_for_model(model_id, options)
-            short_id = self.model_short_id(model_id)
-            options.append(
-                ModelOption(
-                    id=self.provider_model_id(provider, model_id),
-                    name=short_id,
-                    provider=provider,
-                    is_free=self.is_free_model_id(model_id, short_id),
-                    task=self.configured_model_task(model_id),
-                    capabilities=self.configured_model_capabilities(model_id),
-                )
-            )
-
-        return self.dedupe_model_options(options)
-
-    def preferred_provider_for_model(
-        self,
-        model_id: str,
-        options: list[ModelOption],
-    ) -> str:
-        provider = self.provider_for_model(model_id)
-        family = self.provider_family(provider)
-        providers = sorted(
-            {self.option_provider(option) for option in options},
-            key=self.provider_sort_key,
-        )
-        family_matches = [
-            candidate
-            for candidate in providers
-            if self.provider_family(candidate) == family
-        ]
-        if provider in family_matches:
-            return provider
-        for candidate in family_matches:
-            if candidate.endswith("_1"):
-                return candidate
-        return family_matches[0] if family_matches else provider
+        return self.dedupe_model_options(models)
 
     def equivalent_model_id(self, left: str | None, right: str | None) -> bool:
         if not left or not right:
@@ -2575,6 +2931,33 @@ class Murmur:
         prefix = model_id.split(".", 1)[0]
         return prefix if self.is_provider_connection(prefix) else None
 
+    async def fetch_gateway_models(self) -> list[ModelOption]:
+        if self.use_openwebui():
+            return await self.fetch_openwebui_models()
+        return await self.fetch_litellm_models()
+
+    async def fetch_litellm_models(self) -> list[ModelOption]:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
+        ) as session:
+            for path in ("/models",):
+                try:
+                    async with session.get(
+                        self.litellm_url(path),
+                        headers=await self.litellm_headers(),
+                    ) as response:
+                        if response.status >= 400:
+                            continue
+                        body = await response.json(content_type=None)
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    continue
+
+                models = self.parse_models_response(body, forced_provider="litellm")
+                if models:
+                    return self.dedupe_model_options(models)
+
+        return []
+
     async def fetch_openwebui_models(self) -> list[ModelOption]:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
@@ -2583,45 +2966,36 @@ class Murmur:
                 provider_by_url_idx,
                 configured_model_ids,
             ) = await self.fetch_openwebui_provider_metadata(session)
-            configured_models = self.configured_connection_models(
+            connection_models = self.configured_connection_models(
                 provider_by_url_idx,
                 configured_model_ids,
             )
-            cloudflare_url_idxs = {
-                url_idx
-                for url_idx, provider in provider_by_url_idx.items()
-                if self.provider_family(provider) == "cloudflare"
-            }
-            cloudflare_models = await self.fetch_cloudflare_models(
-                session,
-                provider_by_url_idx,
+            connection_models.extend(
+                await self.fetch_openwebui_connection_models(
+                    session,
+                    provider_by_url_idx,
+                    skip_url_idxs=set(configured_model_ids),
+                )
             )
-            connection_models = await self.fetch_openwebui_connection_models(
-                session,
-                provider_by_url_idx,
-                skip_url_idxs=set(configured_model_ids) | cloudflare_url_idxs,
-            )
+
             api_models: list[ModelOption] = []
-            for path in ("/api/models", "/api/v1/models"):
+            for path in self.gateway_model_paths():
                 try:
                     async with session.get(
-                        f"{self.settings.openwebui_base_url}{path}",
+                        self.openwebui_url(path),
                         headers=await self.openwebui_headers(session),
                     ) as response:
                         if response.status >= 400:
                             continue
                         body = await response.json(content_type=None)
-                except (aiohttp.ClientError, asyncio.TimeoutError):
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                     continue
 
                 api_models = self.parse_models_response(body, provider_by_url_idx)
                 if api_models:
                     break
 
-        connection_models = self.dedupe_model_options(
-            cloudflare_models + configured_models + connection_models
-        )
-
+        connection_models = self.dedupe_model_options(connection_models)
         if connection_models:
             connection_families = {
                 self.provider_family(option.provider) for option in connection_models
@@ -2660,97 +3034,6 @@ class Murmur:
                 )
         return self.dedupe_model_options(models)
 
-    async def fetch_cloudflare_models(
-        self,
-        session: aiohttp.ClientSession,
-        provider_by_url_idx: dict[str, str],
-    ) -> list[ModelOption]:
-        cloudflare_providers = [
-            provider
-            for provider in provider_by_url_idx.values()
-            if self.provider_family(provider) == "cloudflare"
-        ]
-        if not cloudflare_providers:
-            return []
-
-        account_id = (
-            os.getenv("CLOUDFLARE_ACCOUNT_ID")
-            or os.getenv("CF_ACCOUNT_ID")
-            or ""
-        ).strip()
-        api_token = (
-            os.getenv("CLOUDFLARE_API_TOKEN")
-            or os.getenv("CLOUDFLARE_API_KEY")
-            or os.getenv("CLOUDFLARE_API_KEY_1")
-            or os.getenv("CF_API_TOKEN")
-            or ""
-        ).strip()
-        if not account_id or not api_token:
-            return []
-
-        raw_models: list[dict] = []
-        hide_experimental = os.getenv(
-            "CLOUDFLARE_HIDE_EXPERIMENTAL_MODELS",
-            "true",
-        ).lower() not in {"0", "false", "no", "off"}
-        for page in range(1, 6):
-            params = {
-                "page": str(page),
-                "per_page": "100",
-                "hide_experimental": str(hide_experimental).lower(),
-            }
-            url = (
-                "https://api.cloudflare.com/client/v4/accounts/"
-                f"{account_id}/ai/models/search?{urlencode(params)}"
-            )
-            try:
-                async with session.get(
-                    url,
-                    headers={"Authorization": f"Bearer {api_token}"},
-                ) as response:
-                    if response.status >= 400:
-                        body = await response.text()
-                        print(
-                            "Cloudflare model search returned "
-                            f"{response.status}: {body[:500]}"
-                        )
-                        break
-                    body = await response.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                print(f"Cloudflare model search skipped: {exc}")
-                break
-
-            page_models = body.get("result") if isinstance(body, dict) else None
-            if not isinstance(page_models, list):
-                break
-            raw_models.extend(
-                model for model in page_models if isinstance(model, dict)
-            )
-            if len(page_models) < 100:
-                break
-
-        models: list[ModelOption] = []
-        for provider in sorted(set(cloudflare_providers), key=self.provider_sort_key):
-            for raw_model in raw_models:
-                name = str(raw_model.get("name") or "").strip()
-                if not name:
-                    continue
-                task = self.cloudflare_model_task(raw_model)
-                models.append(
-                    ModelOption(
-                        id=self.provider_model_id(provider, name),
-                        name=name,
-                        provider=provider,
-                        is_free=False,
-                        task=task,
-                        capabilities=self.cloudflare_model_capabilities(
-                            raw_model,
-                            task,
-                        ),
-                    )
-                )
-        return self.dedupe_model_options(models)
-
     async def fetch_openwebui_connection_models(
         self,
         session: aiohttp.ClientSession,
@@ -2767,7 +3050,7 @@ class Murmur:
                 continue
             try:
                 async with session.get(
-                    f"{self.settings.openwebui_base_url}/openai/models/{url_idx}",
+                    self.openwebui_url(f"/openai/models/{url_idx}"),
                     headers=await self.openwebui_headers(session),
                 ) as response:
                     if response.status >= 400:
@@ -2795,36 +3078,18 @@ class Murmur:
                 )
         return self.dedupe_model_options(models)
 
-    def dedupe_model_options(self, options: list[ModelOption]) -> list[ModelOption]:
-        deduped: dict[str, ModelOption] = {}
-        for option in options:
-            if not self.is_usable_model_option(option):
-                continue
-            deduped.setdefault(option.id, option)
-        return sorted(deduped.values(), key=lambda model: model.id)
-
-    def is_usable_model_option(self, option: ModelOption) -> bool:
-        model_id = self.model_short_id(option.id).strip().lower()
-        return model_id not in {"arena-model"}
-
-    async def fetch_openwebui_provider_map(
-        self, session: aiohttp.ClientSession
-    ) -> dict[str, str]:
-        provider_by_url_idx, _ = await self.fetch_openwebui_provider_metadata(session)
-        return provider_by_url_idx
-
     async def fetch_openwebui_provider_metadata(
         self, session: aiohttp.ClientSession
     ) -> tuple[dict[str, str], dict[str, list[str]]]:
         try:
             async with session.get(
-                f"{self.settings.openwebui_base_url}/openai/config",
+                self.openwebui_url("/openai/config"),
                 headers=await self.openwebui_headers(session),
             ) as response:
                 if response.status >= 400:
                     return {}, {}
                 body = await response.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
             return {}, {}
 
         if not isinstance(body, dict):
@@ -2859,13 +3124,24 @@ class Murmur:
 
         return provider_by_url_idx, configured_model_ids
 
+    def dedupe_model_options(self, options: list[ModelOption]) -> list[ModelOption]:
+        deduped: dict[str, ModelOption] = {}
+        for option in options:
+            if not self.is_usable_model_option(option):
+                continue
+            deduped.setdefault(option.id, option)
+        return sorted(deduped.values(), key=lambda model: model.id)
+
+    def is_usable_model_option(self, option: ModelOption) -> bool:
+        model_id = self.model_short_id(option.id).strip().lower()
+        return model_id not in {"arena-model"}
+
     def parse_models_response(
         self,
         body: object,
         provider_by_url_idx: dict[str, str] | None = None,
         forced_provider: str | None = None,
     ) -> list[ModelOption]:
-        provider_by_url_idx = provider_by_url_idx or {}
         if isinstance(body, dict):
             raw_models = body.get("data") or body.get("models") or []
         elif isinstance(body, list):
@@ -2880,7 +3156,7 @@ class Murmur:
                     ModelOption(
                         id=raw_model,
                         name=raw_model,
-                        provider=forced_provider or self.provider_for_model(raw_model),
+                        provider=forced_provider or self.gateway_provider_id(),
                         is_free=self.is_free_model_id(raw_model, raw_model),
                     )
                 )
@@ -2899,16 +3175,16 @@ class Murmur:
                 continue
 
             name = raw_model.get("name") or raw_model.get("title") or model_id
+            provider = forced_provider or self.provider_from_raw_model(
+                raw_model,
+                str(model_id),
+                provider_by_url_idx or {},
+            )
             models.append(
                 ModelOption(
                     id=str(model_id),
                     name=str(name),
-                    provider=forced_provider
-                    or self.provider_from_raw_model(
-                        raw_model,
-                        str(model_id),
-                        provider_by_url_idx,
-                    ),
+                    provider=provider,
                     is_free=self.is_free_raw_model(raw_model, str(model_id), str(name)),
                     pricing=(
                         raw_model.get("pricing")
@@ -2921,124 +3197,6 @@ class Murmur:
             )
 
         return models
-
-    def raw_model_task(self, raw_model: dict) -> str | None:
-        task = raw_model.get("task")
-        if isinstance(task, dict):
-            name = task.get("name")
-            return str(name).strip() if name else None
-        if isinstance(task, str) and task.strip():
-            return task.strip()
-        for key in ("task_name", "type"):
-            value = raw_model.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return None
-
-    def raw_model_capabilities(self, raw_model: dict) -> tuple[str, ...]:
-        task = self.raw_model_task(raw_model)
-        capabilities = self.capabilities_from_task(task)
-
-        raw_capabilities = raw_model.get("capabilities")
-        if isinstance(raw_capabilities, list):
-            for capability in raw_capabilities:
-                label = self.normalize_capability_label(str(capability))
-                if label:
-                    capabilities.append(label)
-
-        supported_parameters = raw_model.get("supported_parameters")
-        if isinstance(supported_parameters, list):
-            for parameter in supported_parameters:
-                label = self.capability_from_parameter(str(parameter))
-                if label:
-                    capabilities.append(label)
-
-        return tuple(dict.fromkeys(capabilities))
-
-    def cloudflare_model_task(self, raw_model: dict) -> str | None:
-        return self.raw_model_task(raw_model)
-
-    def cloudflare_model_capabilities(
-        self,
-        raw_model: dict,
-        task: str | None,
-    ) -> tuple[str, ...]:
-        capabilities = self.capabilities_from_task(task)
-        properties = raw_model.get("properties")
-        if isinstance(properties, list):
-            for prop in properties:
-                if not isinstance(prop, dict):
-                    continue
-                prop_id = str(prop.get("property_id") or "").strip().lower()
-                value = str(prop.get("value") or "").strip().lower()
-                if value not in {"true", "1", "yes"}:
-                    continue
-                label = self.normalize_capability_label(prop_id)
-                if label:
-                    capabilities.append(label)
-
-        return tuple(dict.fromkeys(capabilities))
-
-    def configured_model_task(self, model_id: str) -> str | None:
-        model_id = self.model_short_id(model_id).lower()
-        if any(part in model_id for part in ("flux", "stable-diffusion", "sdxl")):
-            return "Text-to-Image"
-        if "embedding" in model_id or "/bge-" in model_id:
-            return "Text Embeddings"
-        if "whisper" in model_id:
-            return "Automatic Speech Recognition"
-        return None
-
-    def configured_model_capabilities(self, model_id: str) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                self.capabilities_from_task(self.configured_model_task(model_id))
-            )
-        )
-
-    def capabilities_from_task(self, task: str | None) -> list[str]:
-        if not task:
-            return []
-        normalized = self.normalize_provider_key(task)
-        task_map = {
-            "textgeneration": "text",
-            "texttoimage": "image",
-            "imagetotext": "vision",
-            "textembeddings": "embeddings",
-            "automaticspeechrecognition": "speech-to-text",
-            "texttospeech": "speech",
-            "texttovideo": "video",
-            "musicgeneration": "music",
-            "summarization": "summarize",
-            "textclassification": "classify",
-            "objectdetection": "detect",
-            "translation": "translate",
-            "imageclassification": "classify-image",
-            "voiceactivitydetection": "voice-activity",
-        }
-        label = task_map.get(normalized)
-        return [label] if label else []
-
-    def capability_from_parameter(self, parameter: str) -> str | None:
-        normalized = self.normalize_provider_key(parameter)
-        if normalized in {"tools", "toolchoice", "functioncalling"}:
-            return "function-calling"
-        if normalized in {"responseformat", "structuredoutputs"}:
-            return "structured-output"
-        return None
-
-    def normalize_capability_label(self, capability: str) -> str | None:
-        normalized = self.normalize_provider_key(capability)
-        capability_map = {
-            "functioncalling": "function-calling",
-            "reasoning": "reasoning",
-            "vision": "vision",
-            "lora": "lora",
-            "batch": "batch",
-            "realtime": "real-time",
-            "asyncqueue": "async",
-        }
-        return capability_map.get(normalized)
 
     def provider_from_raw_model(
         self,
@@ -3067,10 +3225,163 @@ class Murmur:
             return "pollinations"
         if hostname:
             return hostname.removeprefix("api.").split(".", 1)[0]
-        return "openwebui"
+        return self.gateway_provider_id()
+
+    def configured_model_task(self, model_id: str) -> str | None:
+        model_id = model_id.lower()
+        if self.is_probably_image_model(
+            ModelOption(id=model_id, name=model_id, provider=self.gateway_provider_id())
+        ):
+            return "image"
+        return None
+
+    def configured_model_capabilities(self, model_id: str) -> tuple[str, ...]:
+        task = self.configured_model_task(model_id)
+        return tuple(self.capabilities_from_task(task))
+
+    def raw_model_task(self, raw_model: dict) -> str | None:
+        for mapping in self.raw_model_metadata_dicts(raw_model):
+            task = mapping.get("task")
+            if isinstance(task, dict):
+                name = task.get("name")
+                return str(name).strip() if name else None
+            if isinstance(task, str) and task.strip():
+                return task.strip()
+            for key in ("task_name", "type", "mode", "sample_spec"):
+                value = mapping.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    def raw_model_capabilities(self, raw_model: dict) -> tuple[str, ...]:
+        task = self.raw_model_task(raw_model)
+        capabilities = self.capabilities_from_task(task)
+
+        for mapping in self.raw_model_metadata_dicts(raw_model):
+            raw_capabilities = mapping.get("capabilities")
+            if isinstance(raw_capabilities, list):
+                for capability in raw_capabilities:
+                    label = self.normalize_capability_label(str(capability))
+                    if label:
+                        capabilities.append(label)
+            elif isinstance(raw_capabilities, dict):
+                for capability, enabled in raw_capabilities.items():
+                    if not self.capability_value_enabled(enabled):
+                        continue
+                    label = self.normalize_capability_label(str(capability))
+                    if label:
+                        capabilities.append(label)
+
+            for key in (
+                "image_generation",
+                "supports_image_generation",
+                "supports_image_output",
+            ):
+                if self.capability_value_enabled(mapping.get(key)):
+                    capabilities.append("image")
+
+            output_modalities = mapping.get("output_modalities")
+            if isinstance(output_modalities, list):
+                if any(str(value).lower() == "image" for value in output_modalities):
+                    capabilities.append("image")
+
+            supported_parameters = mapping.get("supported_parameters")
+            if isinstance(supported_parameters, list):
+                for parameter in supported_parameters:
+                    label = self.capability_from_parameter(str(parameter))
+                    if label:
+                        capabilities.append(label)
+
+        return tuple(dict.fromkeys(capabilities))
+
+    def raw_model_metadata_dicts(self, raw_model: dict) -> list[dict]:
+        seen: set[int] = set()
+        result: list[dict] = []
+
+        def visit(value: object, depth: int = 0) -> None:
+            if depth > 4 or not isinstance(value, dict):
+                return
+            identity = id(value)
+            if identity in seen:
+                return
+            seen.add(identity)
+            result.append(value)
+            for key in ("info", "meta", "model_info"):
+                visit(value.get(key), depth + 1)
+
+        visit(raw_model)
+        return result
+
+    def capability_value_enabled(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return False
+
+    def capabilities_from_task(self, task: str | None) -> list[str]:
+        if not task:
+            return []
+        normalized = self.normalize_provider_key(task)
+        task_map = {
+            "textgeneration": "text",
+            "texttoimage": "image",
+            "imagegeneration": "image",
+            "imagetotext": "vision",
+            "textembeddings": "embeddings",
+            "automaticspeechrecognition": "speech-to-text",
+            "texttospeech": "speech",
+            "texttovideo": "video",
+            "musicgeneration": "music",
+            "summarization": "summarize",
+            "textclassification": "classify",
+            "objectdetection": "detect",
+            "translation": "translate",
+            "imageclassification": "classify-image",
+            "voiceactivitydetection": "voice-activity",
+        }
+        label = task_map.get(normalized)
+        return [label] if label else []
+
+    def capability_from_parameter(self, parameter: str) -> str | None:
+        normalized = self.normalize_provider_key(parameter)
+        if normalized in {"tools", "toolchoice", "functioncalling"}:
+            return "function-calling"
+        if normalized in {"responseformat", "structuredoutputs"}:
+            return "structured-output"
+        return None
+
+    def normalize_capability_label(self, capability: str) -> str | None:
+        normalized = self.normalize_provider_key(capability)
+        capability_map = {
+            "functioncalling": "function-calling",
+            "structuredoutputs": "structured-output",
+            "responseformat": "structured-output",
+            "reasoning": "reasoning",
+            "vision": "vision",
+            "image": "image",
+            "imagegeneration": "image",
+            "generatesimages": "image",
+            "texttoimage": "image",
+            "fileupload": "file-upload",
+            "websearch": "web-search",
+            "codeinterpreter": "code-interpreter",
+            "citations": "citations",
+            "statusupdates": "status-updates",
+            "usage": "usage",
+            "lora": "lora",
+            "batch": "batch",
+            "realtime": "real-time",
+            "asyncqueue": "async",
+        }
+        return capability_map.get(normalized)
 
     def provider_for_model(self, model_id: str) -> str:
         model_id = model_id.strip()
+        if not self.use_openwebui():
+            return "litellm"
         if model_id.startswith("@cf/"):
             return "cloudflare"
         if model_id.startswith("openrouter/"):
@@ -3088,13 +3399,17 @@ class Murmur:
 
     def provider_display_name(self, provider: str) -> str:
         provider = self.canonical_provider_id(provider)
+        if provider == "litellm":
+            return "LiteLLM gateway"
+        if provider == "openwebui":
+            return "Open WebUI"
         return provider.replace("_", " ")
 
     def normalize_provider_key(self, provider: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", provider.lower())
 
     def canonical_provider_id(self, provider: str) -> str:
-        provider = provider.strip().lower() or "openwebui"
+        provider = provider.strip().lower() or self.gateway_provider_id()
         provider = re.sub(r"[^a-z0-9]+", "_", provider).strip("_")
         if provider in {"open_webui", "open_web_ui"}:
             return "openwebui"
@@ -3137,8 +3452,7 @@ class Murmur:
         model_id = self.model_short_id(model_id).lower()
         name = name.lower()
         return (
-            model_id == "openrouter/free"
-            or model_id.endswith(":free")
+            model_id.endswith(":free")
             or ":free" in model_id
             or name.startswith("free ")
             or name.endswith("(free)")
@@ -3205,8 +3519,18 @@ class Murmur:
             "id": message_id,
         }
 
-    async def ask_openwebui(self, thread_id: str, prompt: str, model: str) -> str:
+    async def ask_gateway(
+        self,
+        thread_id: str,
+        prompt: str,
+        model: str,
+        display_prompt: str | None = None,
+        source_message_id: str | None = None,
+        source_sender_id: str | None = None,
+        source_sender_name: str | None = None,
+    ) -> str:
         model = await self.resolve_chat_model(thread_id, model)
+        chat_prompt = display_prompt or prompt
         messages = [{"role": "system", "content": self.settings.system_prompt}]
         messages.extend(self.history[thread_id])
         messages.append({"role": "user", "content": prompt})
@@ -3219,12 +3543,13 @@ class Murmur:
                 "model": model,
                 "messages": messages,
                 "stream": False,
-                **self.openwebui_chat_metadata(thread_id),
             }
+            if self.use_openwebui():
+                payload.update(self.openwebui_chat_metadata(thread_id))
             try:
                 answer = await self.request_chat_completion(payload)
                 break
-            except OpenWebUIResponseError as exc:
+            except GatewayResponseError as exc:
                 errors.append(str(exc))
                 retry_model = await self.next_chat_retry_model(
                     thread_id,
@@ -3235,15 +3560,83 @@ class Murmur:
                     raise UserVisibleError("\n\n".join(errors)) from exc
 
                 print(
-                    "Open WebUI provider error for "
+                    f"{self.gateway_label()} provider error for "
                     f"{model!r}; retrying with {retry_model!r}."
                 )
                 model = retry_model
 
-        self.history[thread_id].append({"role": "user", "content": prompt})
+        self.history[thread_id].append({"role": "user", "content": chat_prompt})
         self.history[thread_id].append({"role": "assistant", "content": answer})
         provider = self.provider_for_selected_model(thread_id, model)
+        await self.sync_lobe_chat(
+            thread_id=thread_id,
+            user_prompt=chat_prompt,
+            assistant_answer=answer,
+            source_message_id=source_message_id,
+            source_sender_id=source_sender_id,
+            source_sender_name=source_sender_name,
+            provider=provider,
+            model=model,
+        )
         return f"{self.response_header(provider, model)}\n{answer}"
+
+    async def sync_lobe_chat(
+        self,
+        *,
+        thread_id: str,
+        user_prompt: str,
+        assistant_answer: str,
+        source_message_id: str | None,
+        source_sender_id: str | None,
+        source_sender_name: str | None,
+        provider: str,
+        model: str,
+    ) -> None:
+        if not self.lobe_sync.enabled:
+            return
+
+        try:
+            thread_name = self.lobe_thread_name(thread_id)
+            await self.lobe_sync.sync_exchange(
+                LobeChatExchange(
+                    thread_id=thread_id,
+                    thread_name=thread_name,
+                    topic_title=self.lobe_topic_title(thread_name),
+                    user_prompt=user_prompt,
+                    assistant_answer=assistant_answer,
+                    source_message_id=source_message_id,
+                    sender_id=source_sender_id,
+                    sender_name=source_sender_name,
+                    provider=self.provider_display_name(provider),
+                    model=self.model_short_id(model),
+                    gateway=self.gateway_provider_id(),
+                )
+            )
+        except Exception as exc:
+            print(f"Lobe sync failed for Messenger thread {thread_id}: {exc}")
+
+    def lobe_thread_name(self, thread_id: str) -> str:
+        name = self.facebook_thread_name(thread_id).strip()
+        if name and name != "Messenger thread":
+            return self.compact_lobe_title(name)
+
+        people = self.facebook_thread_people_names(thread_id)
+        if people and people != "unknown":
+            return self.compact_lobe_title(people)
+
+        return f"thread {thread_id}"
+
+    def lobe_topic_title(self, thread_name: str) -> str:
+        prefix = self.settings.lobe_topic_prefix.strip()
+        title = f"{thread_name} | {prefix}" if prefix else thread_name
+        return self.compact_lobe_title(title, max_length=120)
+
+    @staticmethod
+    def compact_lobe_title(value: str, max_length: int = 80) -> str:
+        title = re.sub(r"\s+", " ", value).strip()
+        if len(title) <= max_length:
+            return title
+        return title[: max_length - 3].rstrip() + "..."
 
     async def next_chat_retry_model(
         self,
@@ -3253,7 +3646,7 @@ class Murmur:
     ) -> str | None:
         options = self.thread_model_options.get(thread_id)
         if not options:
-            options = self.with_configured_models(await self.fetch_openwebui_models())
+            options = self.with_configured_models(await self.fetch_gateway_models())
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
             self.thread_provider_model_options[thread_id] = groups
@@ -3285,7 +3678,11 @@ class Murmur:
         if not candidates:
             return None
 
-        return sorted(candidates, key=lambda option: self.provider_sort_key(option.provider))[0].id
+        preferred = self.preferred_chat_model_from_options(candidates)
+        if preferred:
+            return preferred.id
+
+        return sorted(candidates, key=self.chat_model_sort_key)[0].id
 
     async def generate_image_response(
         self,
@@ -3315,16 +3712,15 @@ class Murmur:
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         ) as session:
             body, status = await self.post_image_generation(session, prompt, model)
-            if status == 401 and not self.settings.openwebui_api_key:
+            if self.use_openwebui() and status == 401 and not self.settings.openwebui_api_key:
                 self.openwebui_token = None
                 body, status = await self.post_image_generation(session, prompt, model)
-
             if status >= 400:
                 raise UserVisibleError(self.image_error_message(prompt, status, body))
 
             image_refs = self.parse_image_generation_response(body)
             if not image_refs:
-                raise RuntimeError(f"Unexpected Open WebUI image response: {body}")
+                raise RuntimeError(f"Unexpected {self.gateway_label()} image response: {body}")
 
             paths = []
             for image_ref in image_refs:
@@ -3347,8 +3743,8 @@ class Murmur:
             payload["steps"] = self.settings.image_steps
 
         async with session.post(
-            f"{self.settings.openwebui_base_url}/api/v1/images/generations",
-            headers=await self.openwebui_headers(session),
+            self.image_generation_url(),
+            headers=await self.gateway_headers(session),
             json=payload,
         ) as response:
             try:
@@ -3361,7 +3757,30 @@ class Murmur:
         raw_error = self.read_image_proxy_error(prompt)
         if raw_error:
             return "Image generation failed.\nRaw upstream error:\n" + raw_error
-        return f"Image generation failed.\nOpen WebUI image error {status}: {body}"
+        if self.is_gateway_provider_auth_error(status, body):
+            return (
+                "Image generation failed.\n"
+                f"{self.gateway_label()}'s image provider returned Unauthorized. "
+                f"The Murmur request reached {self.gateway_label()}, but the configured image "
+                f"backend/API key inside {self.gateway_label()} rejected it.\n"
+                f"{self.gateway_label()} image error {status}: {body}"
+            )
+        return f"Image generation failed.\n{self.gateway_label()} image error {status}: {body}"
+
+    def is_gateway_provider_auth_error(self, status: int, body: object) -> bool:
+        if status != 400:
+            return False
+        text = str(body).lower()
+        return any(
+            marker in text
+            for marker in (
+                "unauthorized",
+                "not authorized",
+                "forbidden",
+                "permission",
+                "access denied",
+            )
+        )
 
     def read_image_proxy_error(self, prompt: str) -> str | None:
         prompt_id = hashlib.sha256(
@@ -3434,7 +3853,9 @@ class Murmur:
         return True
 
     async def materialize_generated_image(
-        self, session: aiohttp.ClientSession, image_ref: dict[str, str]
+        self,
+        session: aiohttp.ClientSession,
+        image_ref: dict[str, str],
     ) -> str:
         ref_type = image_ref["type"]
         value = image_ref["value"]
@@ -3452,16 +3873,21 @@ class Murmur:
         return self.write_generated_image(base64.b64decode(value), "image/png")
 
     async def download_generated_image(
-        self, session: aiohttp.ClientSession, image_url: str
+        self,
+        session: aiohttp.ClientSession,
+        image_url: str,
     ) -> str:
-        url = urljoin(f"{self.settings.openwebui_base_url}/", image_url)
+        if image_url.startswith(("http://", "https://")):
+            url = image_url
+        else:
+            url = urljoin(f"{self.gateway_url('/')}", image_url)
         async with session.get(
             url,
-            headers=await self.openwebui_headers(session),
+            headers=await self.gateway_headers(session),
         ) as response:
             if response.status >= 400:
                 body = await response.text()
-                raise RuntimeError(f"Open WebUI image download {response.status}: {body}")
+                raise RuntimeError(f"{self.gateway_label()} image download {response.status}: {body}")
             content_type = response.headers.get("Content-Type", "image/png")
             return self.write_generated_image(await response.read(), content_type)
 
@@ -3473,29 +3899,62 @@ class Murmur:
             image_file.write(content)
             return image_file.name
 
+    def litellm_url(self, path: str) -> str:
+        if not self.settings.litellm_base_url:
+            raise UserVisibleError("LITELLM_BASE_URL is not configured.")
+        return f"{self.settings.litellm_base_url}{path}"
+
+    def openwebui_url(self, path: str) -> str:
+        if not self.settings.openwebui_base_url:
+            raise UserVisibleError("OPENWEBUI_BASE_URL is not configured.")
+        return f"{self.settings.openwebui_base_url}{path}"
+
+    def gateway_url(self, path: str) -> str:
+        if self.use_openwebui():
+            return self.openwebui_url(path)
+        return self.litellm_url(path)
+
+    def image_generation_url(self) -> str:
+        if self.use_openwebui():
+            return self.openwebui_url("/api/v1/images/generations")
+        return self.litellm_url("/images/generations")
+
+    def chat_completion_url(self) -> str:
+        if self.use_openwebui():
+            return self.openwebui_url("/api/chat/completions")
+        return self.litellm_url("/chat/completions")
+
     async def request_chat_completion(self, payload: dict) -> str:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         ) as session:
             body, status = await self.post_chat_completion(session, payload)
-            if status == 401 and not self.settings.openwebui_api_key:
+            if self.use_openwebui() and status == 401 and not self.settings.openwebui_api_key:
                 self.openwebui_token = None
                 body, status = await self.post_chat_completion(session, payload)
 
+        return self.chat_completion_answer_from_body(payload, body, status)
+
+    def chat_completion_answer_from_body(
+        self,
+        payload: dict,
+        body: object,
+        status: int,
+    ) -> str:
         if status >= 400:
             model = payload.get("model")
-            raise OpenWebUIResponseError(
-                self.openwebui_error_message(status, body, model),
+            raise GatewayResponseError(
+                self.gateway_error_message(status, body, model),
                 status=status,
                 body=body,
                 model=model,
-                retryable=self.is_retryable_openwebui_body(status, body),
+                retryable=self.is_retryable_gateway_body(status, body),
             )
 
         model = payload.get("model")
         if body is None:
-            raise OpenWebUIResponseError(
-                self.openwebui_null_response_message(status, model),
+            raise GatewayResponseError(
+                self.gateway_null_response_message(status, model),
                 status=status,
                 body=body,
                 model=model,
@@ -3503,8 +3962,8 @@ class Murmur:
             )
 
         if not isinstance(body, dict):
-            raise OpenWebUIResponseError(
-                self.openwebui_error_message(status, body, model),
+            raise GatewayResponseError(
+                self.gateway_error_message(status, body, model),
                 status=status,
                 body=body,
                 model=model,
@@ -3525,9 +3984,9 @@ class Murmur:
                 raise KeyError("choices[0].message")
             content = message.get("content")
         except (KeyError, IndexError, TypeError) as exc:
-            retryable = self.is_retryable_openwebui_body(status, body)
-            raise OpenWebUIResponseError(
-                self.openwebui_error_message(status, body, model),
+            retryable = self.is_retryable_gateway_body(status, body)
+            raise GatewayResponseError(
+                self.gateway_error_message(status, body, model),
                 status=status,
                 body=body,
                 model=model,
@@ -3553,9 +4012,9 @@ class Murmur:
         if text:
             return text
 
-        raise OpenWebUIResponseError(
+        raise GatewayResponseError(
             (
-                f"Open WebUI error {status} for model {model}: response message "
+                f"{self.gateway_label()} error {status} for model {model}: response message "
                 f"content was empty or null. Raw response: {body}"
             ),
             status=status,
@@ -3568,8 +4027,8 @@ class Murmur:
         self, session: aiohttp.ClientSession, payload: dict
     ) -> tuple[object, int]:
         async with session.post(
-            f"{self.settings.openwebui_base_url}/api/chat/completions",
-            headers=await self.openwebui_headers(session),
+            self.chat_completion_url(),
+            headers=await self.gateway_headers(session),
             json=payload,
         ) as response:
             return await self.read_response_body(response), response.status
@@ -3580,37 +4039,36 @@ class Murmur:
         except Exception:
             return await response.text()
 
-    def openwebui_error_message(
+    def gateway_error_message(
         self,
         status: int,
         body: object,
         model: object | None = None,
     ) -> str:
         model_text = f" for model {model}" if model else ""
-        message = f"Open WebUI error {status}{model_text}: {body}"
+        message = f"{self.gateway_label()} error {status}{model_text}: {body}"
         if self.is_rate_limit_error(body):
             message += (
-                "\n\nRate limit hit. Try another provider/model: "
-                f"{self.settings.bot_prefix} providers, then "
-                f"{self.settings.bot_prefix} models <provider> [connection], then "
-                f"{self.settings.bot_prefix} model <provider> [connection] <number>."
+                f"\n\nRate limit hit. Pick another {self.gateway_label()} model: "
+                f"{self.settings.bot_prefix} models, then "
+                f"{self.settings.bot_prefix} model <number|model-id>."
             )
         return message
 
-    def openwebui_null_response_message(
+    def gateway_null_response_message(
         self,
         status: int,
         model: object | None = None,
     ) -> str:
-        message = self.openwebui_error_message(status, None, model)
+        message = self.gateway_error_message(status, None, model)
         return (
             f"{message}\n"
-            "Open WebUI logged: Provider returned error\n"
-            "Open WebUI returned HTTP 200 with a null JSON body, so Murmur "
+            f"{self.gateway_label()} logged: Provider returned error\n"
+            f"{self.gateway_label()} returned HTTP 200 with a null JSON body, so Murmur "
             "could not read a deeper provider payload from the response."
         )
 
-    def is_retryable_openwebui_body(self, status: int, body: object) -> bool:
+    def is_retryable_gateway_body(self, status: int, body: object) -> bool:
         if status in {408, 409, 425, 429} or status >= 500:
             return True
         text = str(body).lower()
@@ -3640,6 +4098,12 @@ class Murmur:
             )
         )
 
+    async def litellm_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.settings.litellm_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.litellm_api_key}"
+        return headers
+
     async def openwebui_headers(self, session: aiohttp.ClientSession) -> dict[str, str]:
         token = self.settings.openwebui_api_key or await self.openwebui_jwt(session)
         headers = {"Content-Type": "application/json"}
@@ -3663,7 +4127,7 @@ class Murmur:
         }
 
         async with session.post(
-            f"{self.settings.openwebui_base_url}/api/v1/auths/signin",
+            self.openwebui_url("/api/v1/auths/signin"),
             headers={"Content-Type": "application/json"},
             json=payload,
         ) as response:
@@ -3679,6 +4143,11 @@ class Murmur:
             raise RuntimeError(f"Unexpected Open WebUI sign-in response: {body}") from exc
 
         return self.openwebui_token
+
+    async def gateway_headers(self, session: aiohttp.ClientSession) -> dict[str, str]:
+        if self.use_openwebui():
+            return await self.openwebui_headers(session)
+        return await self.litellm_headers()
 
 
 def main() -> None:
