@@ -3830,7 +3830,7 @@ class Murmur:
         for key in ("url", "image_url", "path"):
             value = item.get(key)
             if isinstance(value, str) and value:
-                return {"type": "url", "value": value}
+                return self.parse_image_item(value)
 
         for key in ("b64_json", "base64", "image"):
             value = item.get(key)
