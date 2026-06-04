@@ -2905,9 +2905,28 @@ class Murmur:
             include_all=include_all,
             strict_free=strict_free,
         )
+        image_models = [model for model in models if self.is_probably_image_model(model)]
+        configured_model = self.configured_image_model_option()
+        if configured_model and (not strict_free or configured_model.is_free):
+            image_models.insert(0, configured_model)
+
         return sorted(
-            [model for model in models if self.is_probably_image_model(model)],
+            self.dedupe_model_options(image_models),
             key=lambda model: model.id,
+        )
+
+    def configured_image_model_option(self) -> ModelOption | None:
+        model = (self.settings.image_generation_model or "").strip()
+        if not model:
+            return None
+
+        return ModelOption(
+            id=model,
+            name=model,
+            provider=self.provider_for_model(model),
+            is_free=self.is_free_model_id(model, model),
+            task="image-generation",
+            capabilities=("image",),
         )
 
     def with_configured_models(self, models: list[ModelOption]) -> list[ModelOption]:
