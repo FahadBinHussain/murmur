@@ -2576,19 +2576,33 @@ class Murmur:
             self.thread_image_model_options[thread_id] = options
             self.thread_model_options[thread_id] = options
 
-        return self.dynamic_model_list_message(
+        default_limit = (
+            20
+            if not include_all and not free_only and not provider_filter.strip()
+            else None
+        )
+        response = self.dynamic_model_list_message(
             thread_id,
             options,
-            include_all=False,
+            include_all=include_all,
             free_only=free_only,
             compact_connections=compact_connections,
-            title_override="Image models",
+            title_override="All image models" if include_all else "Image models",
+            max_display=default_limit,
             footer_lines=[
                 f"Set image: {self.settings.bot_prefix} image model <number|model-id>",
-                f"All {self.gateway_label()} models: {self.settings.bot_prefix} models",
+                (
+                    f"Show all image models: {self.settings.bot_prefix} image models all"
+                    if default_limit
+                    else f"All {self.gateway_label()} models: {self.settings.bot_prefix} models"
+                ),
                 f"Status: {self.settings.bot_prefix} status",
             ],
         )
+        self.thread_image_model_options[thread_id] = list(
+            self.thread_model_options.get(thread_id, [])
+        )
+        return response
 
     def dynamic_model_list_message(
         self,
@@ -2599,6 +2613,7 @@ class Murmur:
         compact_connections: bool = False,
         title_override: str | None = None,
         footer_lines: list[str] | None = None,
+        max_display: int | None = None,
     ) -> str:
         current_model = self.current_model(thread_id)
         current_image_model = self.current_image_model(thread_id)
@@ -2614,20 +2629,31 @@ class Murmur:
         connection_counts = self.model_group_connection_counts(groups)
         if compact_connections:
             groups = self.compact_model_groups_by_family(thread_id, groups)
+        total_display_count = sum(
+            len(provider_options) for provider_options in groups.values()
+        )
+        if max_display is not None and max_display > 0:
+            groups = self.limit_model_groups(groups, max_display)
+        display_options = self.flatten_model_groups(groups)
+        self.thread_model_options[thread_id] = display_options
         self.thread_provider_model_options[thread_id] = groups
         self.thread_provider_options[thread_id] = sorted(
             groups,
             key=self.provider_sort_key,
         )
-        display_count = sum(
-            len(provider_options) for provider_options in groups.values()
+        display_count = len(display_options)
+        count_label = (
+            f"{display_count} of {total_display_count}"
+            if display_count < total_display_count
+            else str(display_count)
         )
-        lines = [f"{title} ({display_count}):"]
+        lines = [f"{title} ({count_label}):"]
 
+        display_index = 1
         for provider, provider_options in groups.items():
             lines.append("")
             lines.append(f"[{self.model_group_header(provider, connection_counts)}]")
-            for index, option in enumerate(provider_options, start=1):
+            for option in provider_options:
                 current_labels = []
                 if self.equivalent_model_id(option.id, current_model):
                     current_labels.append("chat current")
@@ -2637,7 +2663,8 @@ class Murmur:
                 ):
                     current_labels.append("image current")
                 current = f" ({', '.join(current_labels)})" if current_labels else ""
-                lines.append(f"{index}. {self.model_display(option)}{current}")
+                lines.append(f"{display_index}. {self.model_display(option)}{current}")
+                display_index += 1
 
         lines.append("")
         if footer_lines is None:
@@ -2649,6 +2676,32 @@ class Murmur:
             ]
         lines.extend(footer_lines)
         return "\n".join(lines)
+
+    def limit_model_groups(
+        self,
+        groups: dict[str, list[ModelOption]],
+        max_display: int,
+    ) -> dict[str, list[ModelOption]]:
+        limited: dict[str, list[ModelOption]] = {}
+        remaining = max_display
+        for provider, provider_options in groups.items():
+            if remaining <= 0:
+                break
+            kept = provider_options[:remaining]
+            if kept:
+                limited[provider] = kept
+                remaining -= len(kept)
+        return limited
+
+    def flatten_model_groups(
+        self,
+        groups: dict[str, list[ModelOption]],
+    ) -> list[ModelOption]:
+        return [
+            option
+            for provider_options in groups.values()
+            for option in provider_options
+        ]
 
     def model_group_connection_counts(
         self,
