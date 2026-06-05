@@ -1037,6 +1037,7 @@ async def main_async() -> int:
     proxy_url, proxy_source = select_login_proxy()
     verify_proxy = fbchat_proxy(os.getenv("FB_LOGIN_VERIFY_PROXY") or proxy_url)
     user_agent = os.getenv("FB_LOGIN_USER_AGENT") or os.getenv("FB_USER_AGENT") or None
+    verify_existing_profile = env_bool("FB_LOGIN_VERIFY_EXISTING_PROFILE", False)
 
     print(f"Browser profile: {args.profile_dir}")
     print(f"Browser engine: {browser_engine}")
@@ -1076,7 +1077,7 @@ async def main_async() -> int:
             if has_login_cookies(cookies):
                 print("Existing browser profile already has Facebook login cookies.")
 
-                if not args.no_verify:
+                if not args.no_verify and verify_existing_profile:
                     try:
                         await verify_cookie_candidate(cookies, args.output, user_agent, verify_proxy)
                         print("Existing browser profile cookies verified with fbchat-muqit.")
@@ -1106,6 +1107,17 @@ async def main_async() -> int:
                                 wait_until="domcontentloaded",
                                 timeout=max(1000, args.nav_timeout * 1000),
                             )
+                elif not args.no_verify:
+                    print(
+                        "Opening Facebook before verifying existing profile cookies, "
+                        "so visible checkpoint steps can complete."
+                    )
+                    require_verified_login = True
+                    await page.goto(
+                        args.login_url,
+                        wait_until="domcontentloaded",
+                        timeout=max(1000, args.nav_timeout * 1000),
+                    )
 
             if not has_login_cookies(cookies):
                 await page.goto(
@@ -1196,7 +1208,7 @@ async def main_async() -> int:
                 if has_login_cookies(cookies):
                     print("Existing browser profile already has Facebook login cookies.")
 
-                    if not args.no_verify:
+                    if not args.no_verify and verify_existing_profile:
                         try:
                             await verify_cookie_candidate(cookies, args.output, user_agent, verify_proxy)
                             print("Existing browser profile cookies verified with fbchat-muqit.")
@@ -1226,6 +1238,17 @@ async def main_async() -> int:
                                     wait_until="domcontentloaded",
                                     timeout=max(1000, args.nav_timeout * 1000),
                                 )
+                    elif not args.no_verify:
+                        print(
+                            "Opening Facebook before verifying existing profile cookies, "
+                            "so visible checkpoint steps can complete."
+                        )
+                        require_verified_login = True
+                        await page.goto(
+                            args.login_url,
+                            wait_until="domcontentloaded",
+                            timeout=max(1000, args.nav_timeout * 1000),
+                        )
 
                 if not has_login_cookies(cookies):
                     await page.goto(
