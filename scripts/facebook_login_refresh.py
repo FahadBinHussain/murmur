@@ -1108,16 +1108,21 @@ async def main_async() -> int:
                                 timeout=max(1000, args.nav_timeout * 1000),
                             )
                 elif not args.no_verify:
-                    print(
-                        "Opening Facebook before verifying existing profile cookies, "
-                        "so visible checkpoint steps can complete."
-                    )
-                    require_verified_login = True
-                    await page.goto(
-                        args.login_url,
-                        wait_until="domcontentloaded",
-                        timeout=max(1000, args.nav_timeout * 1000),
-                    )
+                    if env_bool("FB_LOGIN_CLEAR_ON_VERIFY_FAILURE", False):
+                        print("Clearing browser cookies and forcing a fresh Facebook login.")
+                        await context.clear_cookies()
+                        cookies = []
+                    else:
+                        print(
+                            "Opening Facebook before verifying existing profile cookies, "
+                            "so visible checkpoint steps can complete."
+                        )
+                        require_verified_login = True
+                        await page.goto(
+                            args.login_url,
+                            wait_until="domcontentloaded",
+                            timeout=max(1000, args.nav_timeout * 1000),
+                        )
 
             if not has_login_cookies(cookies):
                 await page.goto(
@@ -1239,16 +1244,21 @@ async def main_async() -> int:
                                     timeout=max(1000, args.nav_timeout * 1000),
                                 )
                     elif not args.no_verify:
-                        print(
-                            "Opening Facebook before verifying existing profile cookies, "
-                            "so visible checkpoint steps can complete."
-                        )
-                        require_verified_login = True
-                        await page.goto(
-                            args.login_url,
-                            wait_until="domcontentloaded",
-                            timeout=max(1000, args.nav_timeout * 1000),
-                        )
+                        if env_bool("FB_LOGIN_CLEAR_ON_VERIFY_FAILURE", False):
+                            print("Clearing browser cookies and forcing a fresh Facebook login.")
+                            await context.clear_cookies()
+                            cookies = []
+                        else:
+                            print(
+                                "Opening Facebook before verifying existing profile cookies, "
+                                "so visible checkpoint steps can complete."
+                            )
+                            require_verified_login = True
+                            await page.goto(
+                                args.login_url,
+                                wait_until="domcontentloaded",
+                                timeout=max(1000, args.nav_timeout * 1000),
+                            )
 
                 if not has_login_cookies(cookies):
                     await page.goto(
