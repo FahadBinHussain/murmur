@@ -478,6 +478,38 @@ async def click_cookie_consent_continue(page) -> bool:
     return False
 
 
+async def click_automated_behavior_warning_dismiss(page) -> bool:
+    warning_markers = (
+        "we suspect automated behaviour on your account",
+        "we suspect automated behavior on your account",
+    )
+    for scope in page_scopes(page):
+        try:
+            body = await scope.locator("body").inner_text(timeout=500)
+        except Exception:
+            continue
+        normalized = " ".join(body.lower().split())
+        if not any(marker in normalized for marker in warning_markers):
+            continue
+
+        for selector in [
+            'button:has-text("Dismiss")',
+            'div[role="button"]:has-text("Dismiss")',
+            'a[role="button"]:has-text("Dismiss")',
+            'input[type="submit"][value="Dismiss"]',
+        ]:
+            target = await first_visible(scope, [selector], timeout_ms=250)
+            if target is None:
+                continue
+            try:
+                await target.click(timeout=1500)
+                print("Dismissed Facebook automated-behaviour checkpoint warning.")
+                return True
+            except Exception:
+                continue
+    return False
+
+
 async def click_safe_facebook_step(page) -> bool:
     safe_texts = [
         "Continue",
@@ -843,6 +875,9 @@ async def wait_for_login(
         last_totp_code = await submit_totp_if_needed(page, totp_secret, last_totp_code)
         await click_authentication_app_option(page)
         if await click_cookie_consent_continue(page):
+            await asyncio.sleep(2)
+            continue
+        if await click_automated_behavior_warning_dismiss(page):
             await asyncio.sleep(2)
             continue
         if (
