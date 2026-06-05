@@ -84,7 +84,7 @@ Examples:
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for a compact chat-model list, `/ai models all` for the full backend list, `/ai image models` for a compact image-capable list, and `/ai image models all` for the full image-capable list.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for a compact chat-model list, `/ai models all` for the full backend list, and `/ai models free` for all free chat models. Use `/ai image models` for a compact image-capable list, `/ai image models all` for the full image-capable list, and `/ai image models free` for all free image-capable models.
 
 Responses include the selected provider and model:
 

@@ -2517,7 +2517,7 @@ class Murmur:
                 ]
             default_limit = (
                 20
-                if not include_all and not provider_filter.strip()
+                if not include_all and not free_only and not provider_filter.strip()
                 else None
             )
             return self.dynamic_model_list_message(
@@ -2594,7 +2594,7 @@ class Murmur:
 
         default_limit = (
             20
-            if not include_all and not provider_filter.strip()
+            if not include_all and not free_only and not provider_filter.strip()
             else None
         )
         response = self.dynamic_model_list_message(
