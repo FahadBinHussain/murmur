@@ -79,6 +79,14 @@ def keep_last_proxy_on_rotation_failure() -> bool:
     return env_bool("WEBSHARE_KEEP_LAST_ON_ROTATION_FAILURE", True)
 
 
+def direct_fallback_on_rotation_failure() -> bool:
+    return env_bool("WEBSHARE_DIRECT_FALLBACK_ON_ROTATION_FAILURE", True)
+
+
+def direct_proxy_state() -> dict[str, str]:
+    return {key: "direct" for key in FACEBOOK_PROXY_KEYS}
+
+
 def redacted_url(value: str | None) -> str:
     if not value:
         return ""
@@ -418,6 +426,17 @@ async def ensure_webshare_proxy_state() -> dict[str, str]:
         return proxy_state
 
     sample = "; ".join(failures[:5]) or "all candidates failed"
+    if direct_fallback_on_rotation_failure():
+        proxy_state = direct_proxy_state()
+        sync_message = persist_facebook_proxy_state(proxy_state)
+        print(
+            "No Webshare proxy passed the connectivity test; falling back to "
+            f"direct Facebook connectivity. {sample}",
+            flush=True,
+        )
+        print(sync_message, flush=True)
+        return proxy_state
+
     if current_proxy and keep_last_proxy_on_rotation_failure():
         print(
             "No replacement Webshare proxy passed the connectivity test; keeping last "
