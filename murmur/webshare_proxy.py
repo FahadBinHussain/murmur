@@ -368,12 +368,20 @@ async def ensure_webshare_proxy_state() -> dict[str, str]:
         else:
             ok, reason = await test_proxy(current_proxy, label="stored Facebook proxy")
             if ok:
+                proxy_state = proxy_state_for(current_proxy, current)
+                if policy == "webshare":
+                    proxy_state = {key: current_proxy for key in FACEBOOK_PROXY_KEYS}
+                sync_message = ""
+                if proxy_state != current:
+                    sync_message = persist_facebook_proxy_state(proxy_state)
                 print(
                     "Webshare proxy manager kept current Facebook proxy: "
                     f"{redacted_url(current_proxy)} ({reason})",
                     flush=True,
                 )
-                return current
+                if sync_message:
+                    print(sync_message, flush=True)
+                return proxy_state
             print(
                 "Webshare proxy manager rejected current Facebook proxy: "
                 f"{redacted_url(current_proxy)} ({reason})",
