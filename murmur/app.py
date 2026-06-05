@@ -1642,12 +1642,13 @@ class Murmur:
             return self.status_message(thread_id)
 
         if command == "models":
-            include_all, free_only, provider_filter = self.model_list_args(parts[1:])
+            include_all, free_only, provider_filter, page = self.model_list_args(parts[1:])
             return await self.model_list_message(
                 thread_id,
                 include_all=include_all,
                 free_only=free_only,
                 provider_filter=provider_filter,
+                page=page,
             )
 
         if command == "providers":
@@ -1707,7 +1708,7 @@ class Murmur:
             return ChatCommandResult(response=self.status_message(thread_id))
 
         if subcommand == "models":
-            include_all, free_only, provider_filter = self.model_list_args(
+            include_all, free_only, provider_filter, page = self.model_list_args(
                 rest_parts[1:]
             )
             return ChatCommandResult(
@@ -1716,6 +1717,7 @@ class Murmur:
                     include_all=include_all,
                     free_only=free_only,
                     provider_filter=provider_filter,
+                    page=page,
                 )
             )
 
@@ -1759,12 +1761,16 @@ class Murmur:
 
         return ChatCommandResult(prompt=rest)
 
-    def model_list_args(self, args: list[str]) -> tuple[bool, bool, str]:
+    def model_list_args(self, args: list[str]) -> tuple[bool, bool, str, int]:
         mode = args[0].lower() if args else ""
         free_only = mode == "free"
         include_all = not free_only
-        provider_filter = " ".join(args[1:] if free_only else args)
-        return include_all, free_only, provider_filter
+        filter_parts = list(args[1:] if free_only else args)
+        page = 1
+        if filter_parts and filter_parts[-1].isdigit():
+            page = max(1, int(filter_parts.pop()))
+        provider_filter = " ".join(filter_parts)
+        return include_all, free_only, provider_filter, page
 
     async def handle_media_command(
         self,
@@ -1790,7 +1796,7 @@ class Murmur:
             image_args = parts[1].strip()
             image_arg_parts = image_args.split(maxsplit=1)
             if image_arg_parts and image_arg_parts[0].lower() == "models":
-                include_all, free_only, provider_filter = self.model_list_args(
+                include_all, free_only, provider_filter, page = self.model_list_args(
                     image_args.split()[1:]
                 )
                 return BotResponse(
@@ -1799,6 +1805,7 @@ class Murmur:
                         include_all=include_all,
                         free_only=free_only,
                         provider_filter=provider_filter,
+                        page=page,
                     )
                 )
 
@@ -2485,6 +2492,7 @@ class Murmur:
         include_all: bool = False,
         free_only: bool = False,
         provider_filter: str = "",
+        page: int = 1,
     ) -> str:
         include_all = include_all or not free_only
         options = await self.fetch_model_options(
@@ -2517,7 +2525,13 @@ class Murmur:
                 free_only,
                 compact_connections=compact_connections,
                 title_override="Free models" if free_only else "Models",
-                max_display=None,
+                page=page,
+                page_size=self.model_list_page_size(),
+                page_command=self.model_list_page_command(
+                    image=False,
+                    free_only=free_only,
+                    provider_filter=provider_filter,
+                ),
                 footer_lines=[
                     f"Set chat: {self.settings.bot_prefix} model <number|model-id>",
                     f"Image models: {self.settings.bot_prefix} image models",
@@ -2543,6 +2557,7 @@ class Murmur:
         include_all: bool = False,
         free_only: bool = False,
         provider_filter: str = "",
+        page: int = 1,
     ) -> str:
         include_all = include_all or not free_only
         options = await self.fetch_image_model_options(
@@ -2586,10 +2601,16 @@ class Murmur:
             free_only=free_only,
             compact_connections=compact_connections,
             title_override="Free image models" if free_only else "Image models",
-            max_display=None,
+            page=page,
+            page_size=self.model_list_page_size(),
+            page_command=self.model_list_page_command(
+                image=True,
+                free_only=free_only,
+                provider_filter=provider_filter,
+            ),
             footer_lines=[
                 f"Set image: {self.settings.bot_prefix} image model <number|model-id>",
-                f"All {self.gateway_label()} models: {self.settings.bot_prefix} models",
+                f"Chat models: {self.settings.bot_prefix} models",
                 f"Status: {self.settings.bot_prefix} status",
             ],
         )
@@ -2608,6 +2629,9 @@ class Murmur:
         title_override: str | None = None,
         footer_lines: list[str] | None = None,
         max_display: int | None = None,
+        page: int = 1,
+        page_size: int | None = None,
+        page_command: str | None = None,
     ) -> str:
         current_model = self.current_model(thread_id)
         current_image_model = self.current_image_model(thread_id)
@@ -2624,24 +2648,33 @@ class Murmur:
         total_display_count = sum(
             len(provider_options) for provider_options in groups.values()
         )
-        if max_display is not None and max_display > 0:
+        all_groups = groups
+        all_display_options = self.flatten_model_groups(all_groups)
+        display_start = 0
+        total_pages = 1
+        if page_size is not None and page_size > 0 and total_display_count > page_size:
+            total_pages = max(1, (total_display_count + page_size - 1) // page_size)
+            page = min(max(1, page), total_pages)
+            display_start = (page - 1) * page_size
+            groups = self.slice_model_groups(groups, display_start, page_size)
+        elif max_display is not None and max_display > 0:
             groups = self.limit_model_groups(groups, max_display)
         display_options = self.flatten_model_groups(groups)
-        self.thread_model_options[thread_id] = display_options
-        self.thread_provider_model_options[thread_id] = groups
+        self.thread_model_options[thread_id] = all_display_options
+        self.thread_provider_model_options[thread_id] = all_groups
         self.thread_provider_options[thread_id] = sorted(
-            groups,
+            all_groups,
             key=self.provider_sort_key,
         )
         display_count = len(display_options)
         count_label = (
-            f"{display_count} of {total_display_count}"
+            f"{display_start + 1}-{display_start + display_count} of {total_display_count}"
             if display_count < total_display_count
             else str(display_count)
         )
         lines = [f"{title} ({count_label}):"]
 
-        display_index = 1
+        display_index = display_start + 1
         for provider, provider_options in groups.items():
             lines.append("")
             lines.append(f"[{self.model_group_header(provider, connection_counts)}]")
@@ -2666,8 +2699,39 @@ class Murmur:
                 f"Free only: {self.settings.bot_prefix} models free",
                 f"Status: {self.settings.bot_prefix} status",
             ]
+        if total_pages > 1 and page_command:
+            lines.append(f"Page {page}/{total_pages}")
+            if page < total_pages:
+                lines.append(f"Next: {page_command} {page + 1}")
+            if page > 1:
+                lines.append(f"Prev: {page_command} {page - 1}")
         lines.extend(footer_lines)
         return "\n".join(lines)
+
+    def model_list_page_size(self) -> int:
+        raw = os.getenv("MODEL_LIST_PAGE_SIZE", "25")
+        try:
+            return max(5, min(int(raw), 100))
+        except ValueError:
+            return 25
+
+    def model_list_page_command(
+        self,
+        *,
+        image: bool,
+        free_only: bool,
+        provider_filter: str,
+    ) -> str:
+        parts = [self.settings.bot_prefix]
+        if image:
+            parts.extend(["image", "models"])
+        else:
+            parts.append("models")
+        if free_only:
+            parts.append("free")
+        if provider_filter.strip():
+            parts.append(provider_filter.strip())
+        return " ".join(parts)
 
     def limit_model_groups(
         self,
@@ -2684,6 +2748,30 @@ class Murmur:
                 limited[provider] = kept
                 remaining -= len(kept)
         return limited
+
+    def slice_model_groups(
+        self,
+        groups: dict[str, list[ModelOption]],
+        start: int,
+        limit: int,
+    ) -> dict[str, list[ModelOption]]:
+        sliced: dict[str, list[ModelOption]] = {}
+        end = start + limit
+        index = 0
+        for provider, provider_options in groups.items():
+            provider_start = index
+            provider_end = index + len(provider_options)
+            index = provider_end
+            if provider_end <= start:
+                continue
+            if provider_start >= end:
+                break
+            local_start = max(0, start - provider_start)
+            local_end = min(len(provider_options), end - provider_start)
+            kept = provider_options[local_start:local_end]
+            if kept:
+                sliced[provider] = kept
+        return sliced
 
     def flatten_model_groups(
         self,

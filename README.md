@@ -58,11 +58,16 @@ Chat
 Image
 /ai image <prompt>
 /ai image models
+/ai image models <page>
+/ai image models free
+/ai image models free <page>
 /ai image model <number|model-id>
 
 Models
 /ai models
+/ai models <page>
 /ai models free
+/ai models free <page>
 /ai providers
 /ai status
 ```
@@ -74,14 +79,16 @@ Examples:
 ```text
 /ai explain this in one sentence
 /ai models
+/ai models 2
 /ai model 12
 /ai image a brutalist library in heavy rain
 /ai image models
+/ai image models 2
 /ai image model 44
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the full backend list, `/ai models free` for all free chat models, `/ai image models` for the full image-capable list, and `/ai image models free` for all free image-capable models.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai image models` for image-capable models, and `/ai image models free` for free image-capable models. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page.
 
 Responses include the selected provider and model:
 
