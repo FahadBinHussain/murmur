@@ -1766,8 +1766,8 @@ class Murmur:
 
     def model_list_args(self, args: list[str]) -> tuple[bool, bool, str]:
         mode = args[0].lower() if args else ""
-        include_all = mode == "all"
         free_only = mode == "free"
+        include_all = not free_only
         provider_filter = " ".join(args[1:] if mode in {"all", "free"} else args)
         return include_all, free_only, provider_filter
 
@@ -2491,16 +2491,16 @@ class Murmur:
         free_only: bool = False,
         provider_filter: str = "",
     ) -> str:
+        include_all = include_all or not free_only
         options = await self.fetch_model_options(
             include_all=include_all,
             strict_free=free_only,
         )
-        compact_connections = True
+        compact_connections = False
         if options:
             self.thread_model_options[thread_id] = options
             groups = self.group_model_options(options)
             if provider_filter.strip():
-                compact_connections = not self.is_provider_connection(provider_filter)
                 matching_providers = self.matching_provider_filters(
                     provider_filter,
                     sorted(groups, key=self.provider_sort_key),
@@ -2515,26 +2515,17 @@ class Murmur:
                     for provider in matching_providers
                     for option in groups.get(provider, [])
                 ]
-            default_limit = (
-                20
-                if not include_all and not free_only and not provider_filter.strip()
-                else None
-            )
             return self.dynamic_model_list_message(
                 thread_id,
                 options,
                 include_all,
                 free_only,
                 compact_connections=compact_connections,
-                max_display=default_limit,
+                max_display=None,
                 footer_lines=[
                     f"Set chat: {self.settings.bot_prefix} model <number|model-id>",
                     f"Image models: {self.settings.bot_prefix} image models",
-                    (
-                        f"Show all models: {self.settings.bot_prefix} models all"
-                        if default_limit
-                        else f"Free only: {self.settings.bot_prefix} models free"
-                    ),
+                    f"Free only: {self.settings.bot_prefix} models free",
                     f"Status: {self.settings.bot_prefix} status",
                 ],
             )
@@ -2557,6 +2548,7 @@ class Murmur:
         free_only: bool = False,
         provider_filter: str = "",
     ) -> str:
+        include_all = include_all or not free_only
         options = await self.fetch_image_model_options(
             include_all=include_all,
             strict_free=free_only,
@@ -2569,12 +2561,11 @@ class Murmur:
                 f"Set exact model anyway: {self.settings.bot_prefix} image model <model-id>"
             )
 
-        compact_connections = True
+        compact_connections = False
         self.thread_image_model_options[thread_id] = options
         self.thread_model_options[thread_id] = options
         groups = self.group_model_options(options)
         if provider_filter.strip():
-            compact_connections = not self.is_provider_connection(provider_filter)
             matching_providers = self.matching_provider_filters(
                 provider_filter,
                 sorted(groups, key=self.provider_sort_key),
@@ -2592,11 +2583,6 @@ class Murmur:
             self.thread_image_model_options[thread_id] = options
             self.thread_model_options[thread_id] = options
 
-        default_limit = (
-            20
-            if not include_all and not free_only and not provider_filter.strip()
-            else None
-        )
         response = self.dynamic_model_list_message(
             thread_id,
             options,
@@ -2604,14 +2590,10 @@ class Murmur:
             free_only=free_only,
             compact_connections=compact_connections,
             title_override="All image models" if include_all else "Image models",
-            max_display=default_limit,
+            max_display=None,
             footer_lines=[
                 f"Set image: {self.settings.bot_prefix} image model <number|model-id>",
-                (
-                    f"Show all image models: {self.settings.bot_prefix} image models all"
-                    if default_limit
-                    else f"All {self.gateway_label()} models: {self.settings.bot_prefix} models"
-                ),
+                f"All {self.gateway_label()} models: {self.settings.bot_prefix} models",
                 f"Status: {self.settings.bot_prefix} status",
             ],
         )
