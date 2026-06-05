@@ -1651,8 +1651,7 @@ class Murmur:
             )
 
         if command == "providers":
-            include_all = len(parts) > 1 and parts[1].lower() == "all"
-            return await self.provider_list_message(thread_id, include_all=include_all)
+            return await self.provider_list_message(thread_id)
 
         if command == "provider":
             if len(parts) == 1:
@@ -1721,12 +1720,8 @@ class Murmur:
             )
 
         if subcommand == "providers":
-            include_all = len(rest_parts) > 1 and rest_parts[1].lower() == "all"
             return ChatCommandResult(
-                response=await self.provider_list_message(
-                    thread_id,
-                    include_all=include_all,
-                )
+                response=await self.provider_list_message(thread_id)
             )
 
         if subcommand == "provider":
@@ -1768,7 +1763,7 @@ class Murmur:
         mode = args[0].lower() if args else ""
         free_only = mode == "free"
         include_all = not free_only
-        provider_filter = " ".join(args[1:] if mode in {"all", "free"} else args)
+        provider_filter = " ".join(args[1:] if free_only else args)
         return include_all, free_only, provider_filter
 
     async def handle_media_command(
@@ -2521,6 +2516,7 @@ class Murmur:
                 include_all,
                 free_only,
                 compact_connections=compact_connections,
+                title_override="Free models" if free_only else "Models",
                 max_display=None,
                 footer_lines=[
                     f"Set chat: {self.settings.bot_prefix} model <number|model-id>",
@@ -2589,7 +2585,7 @@ class Murmur:
             include_all=include_all,
             free_only=free_only,
             compact_connections=compact_connections,
-            title_override="All image models" if include_all else "Image models",
+            title_override="Free image models" if free_only else "Image models",
             max_display=None,
             footer_lines=[
                 f"Set image: {self.settings.bot_prefix} image model <number|model-id>",
@@ -2617,8 +2613,6 @@ class Murmur:
         current_image_model = self.current_image_model(thread_id)
         if title_override:
             title = title_override
-        elif include_all:
-            title = "All models"
         elif free_only:
             title = "Free models"
         else:
@@ -2815,9 +2809,7 @@ class Murmur:
                 return suffix
         return model_id
 
-    async def provider_list_message(
-        self, thread_id: str, include_all: bool = False
-    ) -> str:
+    async def provider_list_message(self, thread_id: str) -> str:
         all_options = await self.fetch_model_options(include_all=True)
         if not all_options:
             return (
@@ -2832,8 +2824,7 @@ class Murmur:
         self.thread_provider_options[thread_id] = provider_keys
         self.thread_provider_model_options[thread_id] = all_grouped
         current_provider = self.current_provider(thread_id)
-        title = "Providers" if not include_all else "Providers (all models)"
-        lines = [f"{title} ({len(provider_keys)}):"]
+        lines = [f"Providers ({len(provider_keys)}):"]
         for index, provider in enumerate(provider_keys, start=1):
             models = all_grouped.get(provider, [])
             marker = " (current)" if provider == current_provider else ""
@@ -2874,7 +2865,7 @@ class Murmur:
         if not provider_models:
             return (
                 f"No models found for provider {self.provider_display_name(provider)}.\n"
-                f"Use {self.settings.bot_prefix} providers all to refresh provider data."
+                f"Use {self.settings.bot_prefix} providers to refresh provider data."
             )
 
         model = provider_models[0]
