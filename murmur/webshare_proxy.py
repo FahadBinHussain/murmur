@@ -371,6 +371,9 @@ async def ensure_webshare_proxy_state() -> dict[str, str]:
                 proxy_state = proxy_state_for(current_proxy, current)
                 if policy == "webshare":
                     proxy_state = {key: current_proxy for key in FACEBOOK_PROXY_KEYS}
+                    for key in FACEBOOK_PROXY_KEYS:
+                        if proxy_explicitly_direct(os.getenv(key)):
+                            proxy_state[key] = "direct"
                 sync_message = ""
                 if proxy_state != current:
                     sync_message = persist_facebook_proxy_state(proxy_state)
