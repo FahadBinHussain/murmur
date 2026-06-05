@@ -51,6 +51,14 @@ def env_int(name: str, default: int) -> int:
         raise SystemExit(f"{name} must be an integer, got {raw!r}")
 
 
+def env_list(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    values = [item.strip() for item in raw.replace("\n", ",").split(",")]
+    return [item for item in values if item]
+
+
 def env_path(name: str, default: str) -> Path:
     raw = os.getenv(name) or default
     path = Path(raw)
@@ -621,6 +629,99 @@ async def facebook_page_debug(page) -> None:
         print(f"Facebook page debug unavailable: {exc}")
 
 
+def messenger_warmup_urls() -> list[str]:
+    urls = env_list(
+        "FB_LOGIN_MESSENGER_WARMUP_URLS",
+        [
+            "https://www.messenger.com/",
+            "https://www.facebook.com/messages/t/",
+        ],
+    )
+    thread_url = (os.getenv("FB_LOGIN_MESSENGER_THREAD_URL") or "").strip()
+    if thread_url:
+        urls.append(thread_url)
+    return urls
+
+
+async def messenger_surface_loaded(page) -> bool:
+    url = (page.url or "").lower()
+    bad_url_markers = ("checkpoint", "login", "recover", "captcha")
+    if any(marker in url for marker in bad_url_markers):
+        return False
+
+    messenger_text_markers = (
+        "search messenger",
+        "new message",
+        "message requests",
+        "chats",
+        "messenger,",
+        "unread chats",
+    )
+    for scope in page_scopes(page):
+        try:
+            text = await scope.locator("body").inner_text(timeout=700)
+        except Exception:
+            continue
+        normalized = " ".join(text.lower().split())
+        if any(marker in normalized for marker in messenger_text_markers):
+            return True
+    return False
+
+
+async def warmup_messenger_session(context, page) -> None:
+    if not env_bool("FB_LOGIN_MESSENGER_WARMUP", True):
+        return
+
+    urls = messenger_warmup_urls()
+    if not urls:
+        return
+
+    nav_timeout_ms = max(
+        1000,
+        env_int("FB_LOGIN_MESSENGER_WARMUP_NAV_SECONDS", 45) * 1000,
+    )
+    wait_seconds = max(0, env_int("FB_LOGIN_MESSENGER_WARMUP_WAIT_SECONDS", 6))
+    print("Warming hosted browser on Messenger pages before cookie verification.")
+    for url in urls:
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
+            try:
+                await page.wait_for_load_state(
+                    "networkidle",
+                    timeout=min(nav_timeout_ms, 10000),
+                )
+            except Exception:
+                pass
+            await click_cookie_consent_continue(page)
+            await click_automated_behavior_warning_dismiss(page)
+            if wait_seconds:
+                await page.wait_for_timeout(wait_seconds * 1000)
+            loaded = await messenger_surface_loaded(page)
+            parsed = urlparse(page.url)
+            print(
+                "Messenger warm-up visited "
+                f"{urlparse(url).netloc}{urlparse(url).path}; "
+                f"current={parsed.netloc}{parsed.path}; loaded={loaded}."
+            )
+            if loaded:
+                break
+        except Exception as exc:
+            print(
+                "Messenger warm-up failed for "
+                f"{urlparse(url).netloc}{urlparse(url).path}: {compact_exception(exc)}"
+            )
+
+    try:
+        cookies = await facebook_cookies(context)
+        names = required_cookie_names(cookies)
+        print(
+            "Messenger warm-up cookies: "
+            f"count={len(cookies)} c_user={'c_user' in names} xs={'xs' in names}."
+        )
+    except Exception as exc:
+        print(f"Messenger warm-up cookie read failed: {compact_exception(exc)}")
+
+
 async def facebook_captcha_detected(page) -> bool:
     try:
         for frame in page.frames:
@@ -818,6 +919,7 @@ async def wait_for_login(
     login_resubmits = 0
     last_login_submit = 0.0
     last_verify_attempt = 0.0
+    last_messenger_warmup = 0.0
     last_verify_error: BaseException | None = None
     while time.monotonic() < deadline:
         try:
@@ -849,6 +951,16 @@ async def wait_for_login(
                         "Facebook cookies are present but fbchat-muqit verification still fails: "
                         f"{compact_exception(exc)}"
                     )
+                    warmup_interval = max(
+                        15,
+                        env_int("FB_LOGIN_MESSENGER_WARMUP_INTERVAL_SECONDS", 45),
+                    )
+                    if time.monotonic() - last_messenger_warmup > warmup_interval:
+                        last_messenger_warmup = time.monotonic()
+                        await warmup_messenger_session(context, page)
+                        last_verify_attempt = 0.0
+                        await asyncio.sleep(1)
+                        continue
         if await facebook_captcha_detected(page):
             await facebook_page_debug(page)
             screenshot_path = ROOT / "output" / "facebook_login_refresh_captcha.png"

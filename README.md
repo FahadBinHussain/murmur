@@ -328,6 +328,10 @@ Add `MURMUR_STATE_DATABASE_URL` if cookie/profile state should survive rebuilds 
 | `FB_COOKIES_PATH` | `cookies.json` | Cookie file consumed by `fbchat-muqit`. |
 | `FB_COOKIES_JSON_B64` | empty | Base64-encoded cookie JSON for hosted deployments. |
 | `FB_USER_AGENT` | empty | Optional Facebook user-agent override. |
+| `FB_LOGIN_MESSENGER_WARMUP` | `true` | During hosted cookie refresh, open Messenger surfaces before accepting exported cookies. |
+| `FB_LOGIN_MESSENGER_WARMUP_URLS` | Messenger home and Facebook messages | Comma-separated Messenger URLs to warm before cookie verification. |
+| `FB_LOGIN_MESSENGER_THREAD_URL` | empty | Optional real thread URL to warm after the default Messenger URLs. |
+| `FB_LOGIN_MESSENGER_WARMUP_INTERVAL_SECONDS` | `45` | Minimum seconds between Messenger warm-up attempts during cookie verification. |
 | `BOT_PREFIX` | `/ai` | Command prefix. |
 | `MAX_HISTORY_MESSAGES` | `12` | Per-thread short memory size. |
 | `MAX_REPLY_CHARS` | `1800` | Messenger reply chunk size. |
