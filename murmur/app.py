@@ -2515,12 +2515,28 @@ class Murmur:
                     for provider in matching_providers
                     for option in groups.get(provider, [])
                 ]
+            default_limit = (
+                20
+                if not include_all and not provider_filter.strip()
+                else None
+            )
             return self.dynamic_model_list_message(
                 thread_id,
                 options,
                 include_all,
                 free_only,
                 compact_connections=compact_connections,
+                max_display=default_limit,
+                footer_lines=[
+                    f"Set chat: {self.settings.bot_prefix} model <number|model-id>",
+                    f"Image models: {self.settings.bot_prefix} image models",
+                    (
+                        f"Show all models: {self.settings.bot_prefix} models all"
+                        if default_limit
+                        else f"Free only: {self.settings.bot_prefix} models free"
+                    ),
+                    f"Status: {self.settings.bot_prefix} status",
+                ],
             )
 
         current_alias = self.current_model_alias(thread_id)
@@ -2578,7 +2594,7 @@ class Murmur:
 
         default_limit = (
             20
-            if not include_all and not free_only and not provider_filter.strip()
+            if not include_all and not provider_filter.strip()
             else None
         )
         response = self.dynamic_model_list_message(

@@ -62,6 +62,7 @@ Image
 
 Models
 /ai models
+/ai models all
 /ai models free
 /ai providers
 /ai status
@@ -74,14 +75,16 @@ Examples:
 ```text
 /ai explain this in one sentence
 /ai models
+/ai models all
 /ai model 12
 /ai image a brutalist library in heavy rain
 /ai image models
+/ai image models all
 /ai image model 44
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for chat models and `/ai image models` for image-capable models.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for a compact chat-model list, `/ai models all` for the full backend list, `/ai image models` for a compact image-capable list, and `/ai image models all` for the full image-capable list.
 
 Responses include the selected provider and model:
 
@@ -214,7 +217,7 @@ Murmur
   or OpenWebUI /api/v1/images/generations
 ```
 
-`/ai image models` filters backend model lists by image-generation metadata when available and known image model IDs as a fallback. If the backend returns plain model IDs with no capability metadata, Murmur can still accept an exact image model ID through `/ai image model <model-id>`.
+`/ai image models` filters backend model lists by image-generation metadata when available and known image model IDs as a fallback. The default list is compact; `/ai image models all` shows the full image-capable list. If the backend returns plain model IDs with no capability metadata, Murmur can still accept an exact image model ID through `/ai image model <model-id>`.
 
 ```env
 IMAGE_GENERATION_MODEL=
