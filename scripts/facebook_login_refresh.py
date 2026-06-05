@@ -826,6 +826,10 @@ async def wait_for_login(
             if "Target page, context or browser has been closed" in str(exc):
                 raise RuntimeError("Browser closed before Facebook login cookies were exported.") from exc
             raise
+        if await click_automated_behavior_warning_dismiss(page):
+            last_verify_attempt = 0.0
+            await asyncio.sleep(2)
+            continue
         if has_login_cookies(cookies):
             if not require_verified:
                 return cookies
