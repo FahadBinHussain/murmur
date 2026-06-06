@@ -91,7 +91,7 @@ Examples:
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, and `/ai image models free` for free image-capable models. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, and `/ai image models free` for free image-capable models. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page. Filtered lists keep the same model numbers as `/ai models`, so a number means the same model everywhere.
 
 Responses include the selected provider and model:
 

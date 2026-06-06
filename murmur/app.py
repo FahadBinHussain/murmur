@@ -2269,12 +2269,18 @@ class Murmur:
     def resolve_model(self, name: str, thread_id: str | None = None) -> str | None:
         key = name.strip().lower().lstrip("@")
         if thread_id and key.isdigit():
-            index = int(key) - 1
-            options = self.thread_model_options.get(thread_id, [])
-            if 0 <= index < len(options):
-                return options[index].id
+            return self.resolve_model_number(thread_id, int(key))
 
         return self.model_aliases().get(key)
+
+    def resolve_model_number(self, thread_id: str, number: int) -> str | None:
+        if number < 1:
+            return None
+        options = self.thread_model_options.get(thread_id, [])
+        index = number - 1
+        if 0 <= index < len(options):
+            return options[index].id
+        return None
 
     async def set_thread_model(self, thread_id: str, name: str) -> str:
         alias = name.strip().lower().lstrip("@")
@@ -2526,6 +2532,9 @@ class Murmur:
                     for provider in matching_providers
                     for option in groups.get(provider, [])
                 ]
+            numbering_options = options
+            if free_only or usable_only or provider_filter.strip():
+                numbering_options = await self.fetch_model_options(include_all=True)
             return self.dynamic_model_list_message(
                 thread_id,
                 options,
@@ -2553,6 +2562,7 @@ class Murmur:
                     f"Usable only: {self.settings.bot_prefix} models usable",
                     f"Status: {self.settings.bot_prefix} status",
                 ],
+                numbering_options=numbering_options,
             )
 
         return (
@@ -2606,6 +2616,7 @@ class Murmur:
             self.thread_image_model_options[thread_id] = options
             self.thread_model_options[thread_id] = options
 
+        numbering_options = await self.fetch_model_options(include_all=True)
         response = self.dynamic_model_list_message(
             thread_id,
             options,
@@ -2631,10 +2642,9 @@ class Murmur:
                 f"Chat models: {self.settings.bot_prefix} models",
                 f"Status: {self.settings.bot_prefix} status",
             ],
+            numbering_options=numbering_options,
         )
-        self.thread_image_model_options[thread_id] = list(
-            self.thread_model_options.get(thread_id, [])
-        )
+        self.thread_image_model_options[thread_id] = options
         return response
 
     def dynamic_model_list_message(
@@ -2651,6 +2661,7 @@ class Murmur:
         page: int = 1,
         page_size: int | None = None,
         page_command: str | None = None,
+        numbering_options: list[ModelOption] | None = None,
     ) -> str:
         current_model = self.current_model(thread_id)
         current_image_model = self.current_image_model(thread_id)
@@ -2671,6 +2682,9 @@ class Murmur:
         )
         all_groups = groups
         all_display_options = self.flatten_model_groups(all_groups)
+        selection_options = numbering_options or all_display_options
+        selection_groups = self.group_model_options(selection_options)
+        number_by_model_id = self.model_number_map(selection_options)
         display_start = 0
         total_pages = 1
         if page_size is not None and page_size > 0 and total_display_count > page_size:
@@ -2681,10 +2695,10 @@ class Murmur:
         elif max_display is not None and max_display > 0:
             groups = self.limit_model_groups(groups, max_display)
         display_options = self.flatten_model_groups(groups)
-        self.thread_model_options[thread_id] = all_display_options
-        self.thread_provider_model_options[thread_id] = all_groups
+        self.thread_model_options[thread_id] = selection_options
+        self.thread_provider_model_options[thread_id] = selection_groups
         self.thread_provider_options[thread_id] = sorted(
-            all_groups,
+            selection_groups,
             key=self.provider_sort_key,
         )
         display_count = len(display_options)
@@ -2695,7 +2709,7 @@ class Murmur:
         )
         lines = [f"{title} ({count_label}):"]
 
-        display_index = display_start + 1
+        fallback_display_index = display_start + 1
         for provider, provider_options in groups.items():
             lines.append("")
             lines.append(f"[{self.model_group_header(provider, connection_counts)}]")
@@ -2709,8 +2723,12 @@ class Murmur:
                 ):
                     current_labels.append("image current")
                 current = f" ({', '.join(current_labels)})" if current_labels else ""
+                display_index = number_by_model_id.get(
+                    option.id,
+                    fallback_display_index,
+                )
                 lines.append(f"{display_index}. {self.model_display(option)}{current}")
-                display_index += 1
+                fallback_display_index += 1
 
         lines.append("")
         if footer_lines is None:
@@ -2807,6 +2825,9 @@ class Murmur:
             for provider_options in groups.values()
             for option in provider_options
         ]
+
+    def model_number_map(self, options: list[ModelOption]) -> dict[str, int]:
+        return {option.id: index for index, option in enumerate(options, start=1)}
 
     def model_group_connection_counts(
         self,
