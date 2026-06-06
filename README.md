@@ -61,6 +61,8 @@ Image
 /ai image models <page>
 /ai image models free
 /ai image models free <page>
+/ai image models usable
+/ai image models usable <page>
 /ai image model <number|model-id>
 
 Models
@@ -87,11 +89,12 @@ Examples:
 /ai image a brutalist library in heavy rain
 /ai image models
 /ai image models 2
+/ai image models usable
 /ai image model 44
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, and `/ai image models free` for free image-capable models. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page. Filtered lists keep the same model numbers as `/ai models`, so a number means the same model everywhere.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, `/ai image models free` for free image-capable models, and `/ai image models usable` for image models verified through the image generation endpoint. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page. Filtered lists keep the same model numbers as `/ai models`, so a number means the same model everywhere.
 
 Responses include the selected provider and model:
 
@@ -224,7 +227,7 @@ Murmur
   or OpenWebUI /api/v1/images/generations
 ```
 
-`/ai image models` filters backend model lists by image-generation metadata when available and known image model IDs as a fallback. If the backend returns plain model IDs with no capability metadata, Murmur can still accept an exact image model ID through `/ai image model <model-id>`.
+`/ai image models` filters backend model lists by image-generation metadata when available and known image model IDs as a fallback. `/ai image models usable` uses separate image-generation verification metadata, not the chat usability list. If the backend returns plain model IDs with no capability metadata, Murmur can still accept an exact image model ID through `/ai image model <model-id>`.
 
 ```env
 IMAGE_GENERATION_MODEL=

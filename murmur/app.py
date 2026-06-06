@@ -179,6 +179,7 @@ class ModelOption:
     provider: str = ""
     is_free: bool = False
     is_verified_usable: bool = False
+    is_verified_image_usable: bool = False
     pricing: dict[str, str] | None = None
     task: str | None = None
     capabilities: tuple[str, ...] = ()
@@ -2595,7 +2596,7 @@ class Murmur:
         if (
             configured_model
             and (not free_only or configured_model.is_free)
-            and (not usable_only or configured_model.is_verified_usable)
+            and (not usable_only or configured_model.is_verified_image_usable)
         ):
             options.insert(0, configured_model)
         options = self.dedupe_model_options(options)
@@ -2603,7 +2604,9 @@ class Murmur:
             options = [model for model in options if self.is_free_model(model)]
         if usable_only:
             options = [
-                model for model in options if self.is_verified_usable_model(model)
+                model
+                for model in options
+                if self.is_verified_image_usable_model(model)
             ]
         if not options:
             return (
@@ -3134,14 +3137,20 @@ class Murmur:
         models = await self.fetch_model_options(
             include_all=include_all,
             strict_free=strict_free,
-            strict_usable=strict_usable,
+            strict_usable=False,
         )
         image_models = [model for model in models if self.is_probably_image_model(model)]
+        if strict_usable:
+            image_models = [
+                model
+                for model in image_models
+                if self.is_verified_image_usable_model(model)
+            ]
         configured_model = self.configured_image_model_option()
         if (
             configured_model
             and (not strict_free or configured_model.is_free)
-            and (not strict_usable or configured_model.is_verified_usable)
+            and (not strict_usable or configured_model.is_verified_image_usable)
         ):
             image_models.insert(0, configured_model)
 
@@ -3357,6 +3366,8 @@ class Murmur:
                         name=self.model_short_id(option.name),
                         provider=provider,
                         is_free=option.is_free,
+                        is_verified_usable=option.is_verified_usable,
+                        is_verified_image_usable=option.is_verified_image_usable,
                         pricing=option.pricing,
                         task=option.task,
                         capabilities=option.capabilities,
@@ -3473,6 +3484,7 @@ class Murmur:
                     provider=provider,
                     is_free=self.is_free_raw_model(raw_model, str(model_id), str(name)),
                     is_verified_usable=self.is_verified_usable_raw_model(raw_model),
+                    is_verified_image_usable=self.is_verified_image_usable_raw_model(raw_model),
                     pricing=(
                         raw_model.get("pricing")
                         if isinstance(raw_model.get("pricing"), dict)
@@ -3738,6 +3750,9 @@ class Murmur:
     def is_verified_usable_model(self, model: ModelOption) -> bool:
         return model.is_verified_usable
 
+    def is_verified_image_usable_model(self, model: ModelOption) -> bool:
+        return model.is_verified_image_usable
+
     def is_free_model_id(self, model_id: str, name: str) -> bool:
         model_id = self.model_short_id(model_id).lower()
         name = name.lower()
@@ -3784,6 +3799,25 @@ class Murmur:
     def is_verified_usable_raw_model(self, raw_model: dict) -> bool:
         for mapping in self.raw_model_metadata_dicts(raw_model):
             for key in ("usable", "verified_usable", "is_usable", "is_verified_usable"):
+                value = mapping.get(key)
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"true", "yes", "y", "1", "usable"}:
+                        return True
+                    if normalized in {"false", "no", "n", "0"}:
+                        return False
+        return False
+
+    def is_verified_image_usable_raw_model(self, raw_model: dict) -> bool:
+        for mapping in self.raw_model_metadata_dicts(raw_model):
+            for key in (
+                "image_usable",
+                "verified_image_usable",
+                "is_image_usable",
+                "is_verified_image_usable",
+            ):
                 value = mapping.get(key)
                 if isinstance(value, bool):
                     return value
