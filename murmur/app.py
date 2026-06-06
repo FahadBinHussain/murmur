@@ -2540,16 +2540,11 @@ class Murmur:
                 ],
             )
 
-        current_alias = self.current_model_alias(thread_id)
-        lines = ["Available models:"]
-        for alias, model in self.model_aliases().items():
-            marker = "*" if alias == current_alias else "-"
-            lines.append(f"{marker} {alias}: {model}")
-
-        lines.append("")
-        lines.append(f"Switch: {self.settings.bot_prefix} model <name>")
-        lines.append(f"One-shot: {self.settings.bot_prefix} @<name> your message")
-        return "\n".join(lines)
+        return (
+            f"{self.gateway_label()} model endpoint returned no usable models.\n"
+            "That alias-only fallback is disabled now because it hides the real problem.\n"
+            f"Try again, or check logs/status: {self.settings.bot_prefix} status"
+        )
 
     async def image_model_list_message(
         self,
@@ -3100,14 +3095,24 @@ class Murmur:
                         headers=await self.litellm_headers(),
                     ) as response:
                         if response.status >= 400:
+                            body = await response.text()
+                            print(
+                                f"{self.gateway_label()} model fetch {path} "
+                                f"returned {response.status}: {body[:200]}"
+                            )
                             continue
                         body = await response.json(content_type=None)
-                except (aiohttp.ClientError, asyncio.TimeoutError):
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    print(
+                        f"{self.gateway_label()} model fetch {path} failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     continue
 
                 models = self.parse_models_response(body, forced_provider="litellm")
                 if models:
                     return self.dedupe_model_options(models)
+                print(f"{self.gateway_label()} model fetch {path} returned no usable models.")
 
         return []
 
