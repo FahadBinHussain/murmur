@@ -455,6 +455,8 @@ class Murmur:
         self.thread_provider_options: dict[str, list[str]] = {}
         self.thread_provider_model_options: dict[str, dict[str, list[ModelOption]]] = {}
         self.resolved_model_cache: dict[str, str] = {}
+        self.model_options_cache: list[ModelOption] = []
+        self.model_options_cache_at = 0.0
         self.openwebui_token: str | None = None
         self.lobe_sync = LobeSyncer(
             LobeSyncConfig(
@@ -2508,11 +2510,16 @@ class Murmur:
         page: int = 1,
     ) -> str:
         include_all = include_all or not free_only and not usable_only
-        options = await self.fetch_model_options(
-            include_all=include_all,
-            strict_free=free_only,
-            strict_usable=usable_only,
-        )
+        numbering_options = await self.fetch_model_options(include_all=True)
+        options = numbering_options
+        if free_only:
+            options = [model for model in numbering_options if self.is_free_model(model)]
+        if usable_only:
+            options = [
+                model
+                for model in numbering_options
+                if self.is_verified_usable_model(model)
+            ]
         compact_connections = False
         if options:
             self.thread_model_options[thread_id] = options
@@ -2532,9 +2539,6 @@ class Murmur:
                     for provider in matching_providers
                     for option in groups.get(provider, [])
                 ]
-            numbering_options = options
-            if free_only or usable_only or provider_filter.strip():
-                numbering_options = await self.fetch_model_options(include_all=True)
             return self.dynamic_model_list_message(
                 thread_id,
                 options,
@@ -2581,11 +2585,26 @@ class Murmur:
         page: int = 1,
     ) -> str:
         include_all = include_all or not free_only and not usable_only
-        options = await self.fetch_image_model_options(
-            include_all=include_all,
-            strict_free=free_only,
-            strict_usable=usable_only,
-        )
+        numbering_options = await self.fetch_model_options(include_all=True)
+        options = [
+            model
+            for model in numbering_options
+            if self.is_probably_image_model(model)
+        ]
+        configured_model = self.configured_image_model_option()
+        if (
+            configured_model
+            and (not free_only or configured_model.is_free)
+            and (not usable_only or configured_model.is_verified_usable)
+        ):
+            options.insert(0, configured_model)
+        options = self.dedupe_model_options(options)
+        if free_only:
+            options = [model for model in options if self.is_free_model(model)]
+        if usable_only:
+            options = [
+                model for model in options if self.is_verified_usable_model(model)
+            ]
         if not options:
             return (
                 f"No image-capable models were marked in {self.gateway_label()}'s model list.\n"
@@ -2616,7 +2635,6 @@ class Murmur:
             self.thread_image_model_options[thread_id] = options
             self.thread_model_options[thread_id] = options
 
-        numbering_options = await self.fetch_model_options(include_all=True)
         response = self.dynamic_model_list_message(
             thread_id,
             options,
@@ -3065,7 +3083,7 @@ class Murmur:
         strict_free: bool = False,
         strict_usable: bool = False,
     ) -> list[ModelOption]:
-        models = await self.fetch_gateway_models()
+        models = await self.cached_gateway_models()
 
         if strict_free:
             free_models = [model for model in models if self.is_free_model(model)]
@@ -3077,6 +3095,35 @@ class Murmur:
             return sorted(usable_models, key=lambda model: model.id)
 
         return sorted(models, key=lambda model: model.id)
+
+    async def cached_gateway_models(self) -> list[ModelOption]:
+        ttl_seconds = self.model_list_cache_seconds()
+        now = time.monotonic()
+        if (
+            self.model_options_cache
+            and ttl_seconds > 0
+            and now - self.model_options_cache_at < ttl_seconds
+        ):
+            return list(self.model_options_cache)
+
+        models = await self.fetch_gateway_models()
+        if models:
+            self.model_options_cache = list(models)
+            self.model_options_cache_at = now
+            return models
+
+        if self.model_options_cache:
+            print(f"{self.gateway_label()} model fetch failed; using cached model list.")
+            return list(self.model_options_cache)
+
+        return []
+
+    def model_list_cache_seconds(self) -> int:
+        raw = os.getenv("MODEL_LIST_CACHE_SECONDS", "600")
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 600
 
     async def fetch_image_model_options(
         self,
@@ -3152,32 +3199,50 @@ class Murmur:
             timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         ) as session:
             for path in ("/models",):
-                try:
-                    async with session.get(
-                        self.litellm_url(path),
-                        headers=await self.litellm_headers(),
-                    ) as response:
-                        if response.status >= 400:
-                            body = await response.text()
-                            print(
-                                f"{self.gateway_label()} model fetch {path} "
-                                f"returned {response.status}: {body[:200]}"
-                            )
+                for attempt in range(1, 4):
+                    try:
+                        async with session.get(
+                            self.litellm_url(path),
+                            headers=await self.litellm_headers(),
+                        ) as response:
+                            if response.status >= 400:
+                                body = await response.text()
+                                print(
+                                    f"{self.gateway_label()} model fetch {path} "
+                                    f"returned {response.status}: {body[:200]}"
+                                )
+                                if response.status == 429 and attempt < 3:
+                                    await asyncio.sleep(
+                                        self.model_fetch_retry_delay(response, attempt)
+                                    )
+                                    continue
+                                break
+                            body = await response.json(content_type=None)
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        print(
+                            f"{self.gateway_label()} model fetch {path} failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        if attempt < 3:
+                            await asyncio.sleep(float(attempt))
                             continue
-                        body = await response.json(content_type=None)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    print(
-                        f"{self.gateway_label()} model fetch {path} failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    continue
+                        break
 
-                models = self.parse_models_response(body, forced_provider="litellm")
-                if models:
-                    return self.dedupe_model_options(models)
-                print(f"{self.gateway_label()} model fetch {path} returned no usable models.")
+                    models = self.parse_models_response(body, forced_provider="litellm")
+                    if models:
+                        return self.dedupe_model_options(models)
+                    print(
+                        f"{self.gateway_label()} model fetch {path} returned no usable models."
+                    )
+                    break
 
         return []
+
+    def model_fetch_retry_delay(self, response: aiohttp.ClientResponse, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After", "").strip()
+        if retry_after.isdigit():
+            return min(float(retry_after), 10.0)
+        return float(attempt * 2)
 
     async def fetch_openwebui_models(self) -> list[ModelOption]:
         async with aiohttp.ClientSession(
