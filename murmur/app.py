@@ -3621,10 +3621,25 @@ class Murmur:
         if self.is_free_model_id(model_id, name):
             return True
 
-        pricing = raw_model.get("pricing")
-        if not isinstance(pricing, dict) or not pricing:
-            return False
+        for mapping in self.raw_model_metadata_dicts(raw_model):
+            for key in ("free", "is_free", "free_tier", "is_free_tier"):
+                value = mapping.get(key)
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"true", "yes", "y", "1", "free"}:
+                        return True
+                    if normalized in {"false", "no", "n", "0", "paid"}:
+                        return False
 
+            pricing = mapping.get("pricing")
+            if isinstance(pricing, dict) and self.pricing_is_free(pricing):
+                return True
+
+        return False
+
+    def pricing_is_free(self, pricing: dict) -> bool:
         numeric_prices = []
         for value in pricing.values():
             try:
