@@ -68,6 +68,8 @@ Models
 /ai models <page>
 /ai models free
 /ai models free <page>
+/ai models usable
+/ai models usable <page>
 /ai providers
 /ai status
 ```
@@ -80,6 +82,7 @@ Examples:
 /ai explain this in one sentence
 /ai models
 /ai models 2
+/ai models usable
 /ai model 12
 /ai image a brutalist library in heavy rain
 /ai image models
@@ -88,7 +91,7 @@ Examples:
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai image models` for image-capable models, and `/ai image models free` for free image-capable models. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page.
+Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, and `/ai image models free` for free image-capable models. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page.
 
 Responses include the selected provider and model:
 

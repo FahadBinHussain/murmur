@@ -178,6 +178,7 @@ class ModelOption:
     name: str
     provider: str = ""
     is_free: bool = False
+    is_verified_usable: bool = False
     pricing: dict[str, str] | None = None
     task: str | None = None
     capabilities: tuple[str, ...] = ()
@@ -1642,11 +1643,12 @@ class Murmur:
             return self.status_message(thread_id)
 
         if command == "models":
-            include_all, free_only, provider_filter, page = self.model_list_args(parts[1:])
+            include_all, free_only, usable_only, provider_filter, page = self.model_list_args(parts[1:])
             return await self.model_list_message(
                 thread_id,
                 include_all=include_all,
                 free_only=free_only,
+                usable_only=usable_only,
                 provider_filter=provider_filter,
                 page=page,
             )
@@ -1708,7 +1710,7 @@ class Murmur:
             return ChatCommandResult(response=self.status_message(thread_id))
 
         if subcommand == "models":
-            include_all, free_only, provider_filter, page = self.model_list_args(
+            include_all, free_only, usable_only, provider_filter, page = self.model_list_args(
                 rest_parts[1:]
             )
             return ChatCommandResult(
@@ -1716,6 +1718,7 @@ class Murmur:
                     thread_id,
                     include_all=include_all,
                     free_only=free_only,
+                    usable_only=usable_only,
                     provider_filter=provider_filter,
                     page=page,
                 )
@@ -1761,16 +1764,17 @@ class Murmur:
 
         return ChatCommandResult(prompt=rest)
 
-    def model_list_args(self, args: list[str]) -> tuple[bool, bool, str, int]:
+    def model_list_args(self, args: list[str]) -> tuple[bool, bool, bool, str, int]:
         mode = args[0].lower() if args else ""
         free_only = mode == "free"
-        include_all = not free_only
-        filter_parts = list(args[1:] if free_only else args)
+        usable_only = mode == "usable"
+        include_all = not free_only and not usable_only
+        filter_parts = list(args[1:] if (free_only or usable_only) else args)
         page = 1
         if filter_parts and filter_parts[-1].isdigit():
             page = max(1, int(filter_parts.pop()))
         provider_filter = " ".join(filter_parts)
-        return include_all, free_only, provider_filter, page
+        return include_all, free_only, usable_only, provider_filter, page
 
     async def handle_media_command(
         self,
@@ -1796,7 +1800,7 @@ class Murmur:
             image_args = parts[1].strip()
             image_arg_parts = image_args.split(maxsplit=1)
             if image_arg_parts and image_arg_parts[0].lower() == "models":
-                include_all, free_only, provider_filter, page = self.model_list_args(
+                include_all, free_only, usable_only, provider_filter, page = self.model_list_args(
                     image_args.split()[1:]
                 )
                 return BotResponse(
@@ -1804,6 +1808,7 @@ class Murmur:
                         message.thread_id,
                         include_all=include_all,
                         free_only=free_only,
+                        usable_only=usable_only,
                         provider_filter=provider_filter,
                         page=page,
                     )
@@ -1877,6 +1882,7 @@ class Murmur:
                 "Models",
                 f"{prefix} models",
                 f"{prefix} models free",
+                f"{prefix} models usable",
                 f"{prefix} providers",
                 f"{prefix} status",
             ]
@@ -2491,13 +2497,15 @@ class Murmur:
         thread_id: str,
         include_all: bool = False,
         free_only: bool = False,
+        usable_only: bool = False,
         provider_filter: str = "",
         page: int = 1,
     ) -> str:
-        include_all = include_all or not free_only
+        include_all = include_all or not free_only and not usable_only
         options = await self.fetch_model_options(
             include_all=include_all,
             strict_free=free_only,
+            strict_usable=usable_only,
         )
         compact_connections = False
         if options:
@@ -2524,18 +2532,25 @@ class Murmur:
                 include_all,
                 free_only,
                 compact_connections=compact_connections,
-                title_override="Free models" if free_only else "Models",
+                usable_only=usable_only,
+                title_override=(
+                    "Verified usable models"
+                    if usable_only
+                    else "Free models" if free_only else "Models"
+                ),
                 page=page,
                 page_size=self.model_list_page_size(),
                 page_command=self.model_list_page_command(
                     image=False,
                     free_only=free_only,
+                    usable_only=usable_only,
                     provider_filter=provider_filter,
                 ),
                 footer_lines=[
                     f"Set chat: {self.settings.bot_prefix} model <number|model-id>",
                     f"Image models: {self.settings.bot_prefix} image models",
                     f"Free only: {self.settings.bot_prefix} models free",
+                    f"Usable only: {self.settings.bot_prefix} models usable",
                     f"Status: {self.settings.bot_prefix} status",
                 ],
             )
@@ -2551,13 +2566,15 @@ class Murmur:
         thread_id: str,
         include_all: bool = False,
         free_only: bool = False,
+        usable_only: bool = False,
         provider_filter: str = "",
         page: int = 1,
     ) -> str:
-        include_all = include_all or not free_only
+        include_all = include_all or not free_only and not usable_only
         options = await self.fetch_image_model_options(
             include_all=include_all,
             strict_free=free_only,
+            strict_usable=usable_only,
         )
         if not options:
             return (
@@ -2594,13 +2611,19 @@ class Murmur:
             options,
             include_all=include_all,
             free_only=free_only,
+            usable_only=usable_only,
             compact_connections=compact_connections,
-            title_override="Free image models" if free_only else "Image models",
+            title_override=(
+                "Verified usable image models"
+                if usable_only
+                else "Free image models" if free_only else "Image models"
+            ),
             page=page,
             page_size=self.model_list_page_size(),
             page_command=self.model_list_page_command(
                 image=True,
                 free_only=free_only,
+                usable_only=usable_only,
                 provider_filter=provider_filter,
             ),
             footer_lines=[
@@ -2620,6 +2643,7 @@ class Murmur:
         options: list[ModelOption],
         include_all: bool,
         free_only: bool = False,
+        usable_only: bool = False,
         compact_connections: bool = False,
         title_override: str | None = None,
         footer_lines: list[str] | None = None,
@@ -2632,6 +2656,8 @@ class Murmur:
         current_image_model = self.current_image_model(thread_id)
         if title_override:
             title = title_override
+        elif usable_only:
+            title = "Verified usable models"
         elif free_only:
             title = "Free models"
         else:
@@ -2692,6 +2718,7 @@ class Murmur:
                 f"Chat: {self.settings.bot_prefix} model <number|model-id>",
                 f"Image: {self.settings.bot_prefix} image model <number|model-id>",
                 f"Free only: {self.settings.bot_prefix} models free",
+                f"Usable only: {self.settings.bot_prefix} models usable",
                 f"Status: {self.settings.bot_prefix} status",
             ]
         if total_pages > 1 and page_command:
@@ -2715,6 +2742,7 @@ class Murmur:
         *,
         image: bool,
         free_only: bool,
+        usable_only: bool,
         provider_filter: str,
     ) -> str:
         parts = [self.settings.bot_prefix]
@@ -2724,6 +2752,8 @@ class Murmur:
             parts.append("models")
         if free_only:
             parts.append("free")
+        if usable_only:
+            parts.append("usable")
         if provider_filter.strip():
             parts.append(provider_filter.strip())
         return " ".join(parts)
@@ -3012,12 +3042,18 @@ class Murmur:
         self,
         include_all: bool = False,
         strict_free: bool = False,
+        strict_usable: bool = False,
     ) -> list[ModelOption]:
         models = await self.fetch_gateway_models()
 
-        free_models = [model for model in models if self.is_free_model(model)]
         if strict_free:
+            free_models = [model for model in models if self.is_free_model(model)]
             return sorted(free_models, key=lambda model: model.id)
+        if strict_usable:
+            usable_models = [
+                model for model in models if self.is_verified_usable_model(model)
+            ]
+            return sorted(usable_models, key=lambda model: model.id)
 
         return sorted(models, key=lambda model: model.id)
 
@@ -3025,14 +3061,20 @@ class Murmur:
         self,
         include_all: bool = False,
         strict_free: bool = False,
+        strict_usable: bool = False,
     ) -> list[ModelOption]:
         models = await self.fetch_model_options(
             include_all=include_all,
             strict_free=strict_free,
+            strict_usable=strict_usable,
         )
         image_models = [model for model in models if self.is_probably_image_model(model)]
         configured_model = self.configured_image_model_option()
-        if configured_model and (not strict_free or configured_model.is_free):
+        if (
+            configured_model
+            and (not strict_free or configured_model.is_free)
+            and (not strict_usable or configured_model.is_verified_usable)
+        ):
             image_models.insert(0, configured_model)
 
         return sorted(
@@ -3344,6 +3386,7 @@ class Murmur:
                     name=str(name),
                     provider=provider,
                     is_free=self.is_free_raw_model(raw_model, str(model_id), str(name)),
+                    is_verified_usable=self.is_verified_usable_raw_model(raw_model),
                     pricing=(
                         raw_model.get("pricing")
                         if isinstance(raw_model.get("pricing"), dict)
@@ -3606,6 +3649,9 @@ class Murmur:
     def is_free_model(self, model: ModelOption) -> bool:
         return model.is_free or self.is_free_model_id(model.id, model.name)
 
+    def is_verified_usable_model(self, model: ModelOption) -> bool:
+        return model.is_verified_usable
+
     def is_free_model_id(self, model_id: str, name: str) -> bool:
         model_id = self.model_short_id(model_id).lower()
         name = name.lower()
@@ -3648,6 +3694,20 @@ class Murmur:
                 pass
 
         return bool(numeric_prices) and all(price == 0 for price in numeric_prices)
+
+    def is_verified_usable_raw_model(self, raw_model: dict) -> bool:
+        for mapping in self.raw_model_metadata_dicts(raw_model):
+            for key in ("usable", "verified_usable", "is_usable", "is_verified_usable"):
+                value = mapping.get(key)
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"true", "yes", "y", "1", "usable"}:
+                        return True
+                    if normalized in {"false", "no", "n", "0"}:
+                        return False
+        return False
 
     def is_reply_to_bot(self, message: Message) -> bool:
         replied_to = message.replied_to_message
