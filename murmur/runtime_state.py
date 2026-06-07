@@ -18,6 +18,7 @@ from typing import Any
 COOKIE_STATE_KEY = "facebook_cookies"
 FACEBOOK_PROXY_STATE_KEY = "facebook_proxies"
 FACEBOOK_PROFILE_STATE_KEY = "facebook_browser_profile"
+THREAD_MODEL_SELECTIONS_STATE_KEY = "thread_model_selections"
 
 PROFILE_EXCLUDED_DIRS = {
     "BrowserMetrics",
@@ -143,6 +144,15 @@ def encode_json_state(payload: Any) -> tuple[str, str]:
 
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
     return Fernet(key).encrypt(raw).decode("ascii"), "fernet:v1"
+
+
+def encode_plain_json_state(payload: Any) -> tuple[str, str]:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ), "plain-json"
 
 
 def encode_binary_state(raw: bytes, plain_encoding: str, encrypted_encoding: str) -> tuple[str, str]:
@@ -295,6 +305,60 @@ def fetch_runtime_state(key: str) -> tuple[str, str]:
     if not row:
         raise RuntimeStateMissing(f"no stored runtime state for {key}")
     return str(row[0]), str(row[1])
+
+
+def normalize_thread_model_selections(payload: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(payload, dict):
+        raise RuntimeStateError("stored thread model selections are not an object")
+
+    allowed_keys = {
+        "chat_model",
+        "chat_alias",
+        "chat_provider",
+        "image_model",
+        "image_alias",
+    }
+    cleaned: dict[str, dict[str, str]] = {}
+    for raw_thread_id, raw_selection in payload.items():
+        thread_id = str(raw_thread_id or "").strip()
+        if not thread_id or not isinstance(raw_selection, dict):
+            continue
+
+        selection: dict[str, str] = {}
+        for key in allowed_keys:
+            value = raw_selection.get(key)
+            if isinstance(value, str) and value.strip():
+                selection[key] = value.strip()
+
+        if selection:
+            cleaned[thread_id] = selection
+
+    return cleaned
+
+
+def persist_thread_model_selections(selections: dict[str, dict[str, str]]) -> str:
+    if not env_bool("MURMUR_PERSIST_THREAD_MODELS_TO_DB", True):
+        return "DB thread model selections sync disabled."
+    if not state_database_url():
+        return "DB thread model selections not synced: missing MURMUR_STATE_DATABASE_URL or DATABASE_URL."
+
+    try:
+        cleaned = normalize_thread_model_selections(selections)
+        value, encoding = encode_plain_json_state(cleaned)
+        upsert_runtime_state(THREAD_MODEL_SELECTIONS_STATE_KEY, value, encoding)
+    except Exception as exc:
+        return f"DB thread model selections sync failed: {exc}"
+
+    return "DB thread model selections synced."
+
+
+def load_thread_model_selections() -> dict[str, dict[str, str]]:
+    if not env_bool("MURMUR_PERSIST_THREAD_MODELS_TO_DB", True):
+        return {}
+
+    value, encoding = fetch_runtime_state(THREAD_MODEL_SELECTIONS_STATE_KEY)
+    raw = json.loads(decode_json_state(value, encoding))
+    return normalize_thread_model_selections(raw)
 
 
 def profile_max_bytes() -> int:

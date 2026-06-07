@@ -30,7 +30,7 @@ Murmur is a bridge, not a second AI platform.
 - LiteLLM mode uses `/v1/chat/completions`, `/v1/images/generations`, and `/v1/models`.
 - OpenWebUI mode uses `/api/chat/completions`, `/api/v1/images/generations`, `/api/models`, and `/openai/*` model endpoints.
 - Lobe mirroring writes successful chat and image exchanges into Lobe's Postgres tables, without making Lobe the active model backend.
-- Per-thread model choices are stored in Murmur memory while the worker is running.
+- Per-thread model choices are stored in Murmur memory and persist through restarts when `MURMUR_STATE_DATABASE_URL` is configured.
 
 ## Features
 
@@ -94,7 +94,7 @@ Examples:
 /ai status
 ```
 
-Model choices are remembered per Messenger thread while Murmur is online. Chat model selection and image model selection are separate. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, `/ai image models free` for free image-capable models, and `/ai image models usable` for image models verified through the image generation endpoint. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page. Filtered lists keep the same model numbers as `/ai models`, so a number means the same model everywhere.
+Model choices are remembered per Messenger thread. Chat model selection and image model selection are separate, and choices survive restarts when Murmur has `MURMUR_STATE_DATABASE_URL`. Use `/ai models` for the backend list, `/ai models free` for free chat models, `/ai models usable` for models that the gateway has verified with a tiny chat request, `/ai image models` for image-capable models, `/ai image models free` for free image-capable models, and `/ai image models usable` for image models verified through the image generation endpoint. Lists use full backend data but are paged for Messenger stability; use the page number shown in the footer for the next page. Filtered lists keep the same model numbers as `/ai models`, so a number means the same model everywhere.
 
 Responses include the selected provider and model:
 
@@ -256,9 +256,9 @@ Murmur can run in all threads or only selected thread IDs. `ALLOWED_THREAD_IDS` 
 
 ## Hosted State
 
-For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads and trusted browser profiles survive rebuilds, configure PostgreSQL with `MURMUR_STATE_DATABASE_URL`.
+For ephemeral hosts such as free Hugging Face Spaces, runtime files disappear on rebuild. To make admin cookie uploads, trusted browser profiles, proxy state, and per-thread model choices survive rebuilds, configure PostgreSQL with `MURMUR_STATE_DATABASE_URL`.
 
-Murmur writes encrypted cookie state and an encrypted browser-profile vault to `MURMUR_STATE_TABLE`. Startup restores the profile, then reads cookie state before falling back to `FB_COOKIES_JSON_B64`.
+Murmur writes encrypted cookie state and an encrypted browser-profile vault to `MURMUR_STATE_TABLE`. It also stores non-secret per-thread chat/image model selections in the same table. Startup restores the profile and model selections, then reads cookie state before falling back to `FB_COOKIES_JSON_B64`.
 
 ```env
 MURMUR_STATE_DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB
@@ -296,7 +296,7 @@ MURMUR_ADMIN_USERNAME=
 MURMUR_ADMIN_PASSWORD=
 ```
 
-Add `MURMUR_STATE_DATABASE_URL` if cookie/profile state should survive rebuilds without replacing secrets.
+Add `MURMUR_STATE_DATABASE_URL` if cookie/profile/model-selection state should survive rebuilds without replacing secrets.
 
 ## Environment Reference
 
@@ -354,6 +354,7 @@ Add `MURMUR_STATE_DATABASE_URL` if cookie/profile state should survive rebuilds 
 | --- | --- | --- |
 | `MURMUR_STATE_DATABASE_URL` | empty | PostgreSQL URL for runtime state. |
 | `MURMUR_STATE_TABLE` | `murmur_runtime_state` | Runtime state table name. |
+| `MURMUR_PERSIST_THREAD_MODELS_TO_DB` | `true` | Persist per-thread chat/image model choices to runtime state. |
 | `MURMUR_COOKIE_STATE_SECRET` | empty | Encryption secret for cookies/profile state. |
 | `MURMUR_ADMIN_CONSOLE` | `true` | Enable admin console. |
 | `MURMUR_ADMIN_PATH` | `/murmur-admin` | Admin console path. |

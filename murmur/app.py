@@ -35,6 +35,8 @@ from .runtime_state import (
     RuntimeStateMissing,
     RuntimeStateNotConfigured,
     load_facebook_proxy_state,
+    load_thread_model_selections as load_stored_thread_model_selections,
+    persist_thread_model_selections as persist_stored_thread_model_selections,
 )
 from .lobe_sync import LobeChatExchange, LobeFileAttachment, LobeSyncConfig, LobeSyncer
 from .webshare_proxy import ensure_webshare_proxy_state, network_policy
@@ -488,6 +490,7 @@ class Murmur:
         self.thread_allowlist_mtime: float | None = None
         self.thread_allowlist_mode = "allowlist" if settings.allowed_thread_ids else "allow_all"
         self.thread_allowlist_ids: set[str] = set(settings.allowed_thread_ids)
+        self.load_thread_model_selections()
         self.load_facebook_name_cache()
         self.configure_facebook_http_timeout()
         self.configure_mqtt_proxy()
@@ -513,6 +516,89 @@ class Murmur:
         self.client.on_message_delivered = self.log_facebook_delivered_event
         self.client.on_mark_read = self.log_facebook_mark_read_event
         self.client.on_typing = self.log_facebook_typing_event
+
+    def load_thread_model_selections(self) -> None:
+        try:
+            selections = load_stored_thread_model_selections()
+        except (RuntimeStateMissing, RuntimeStateNotConfigured):
+            return
+        except Exception as exc:
+            print(f"DB thread model selections unavailable: {exc}")
+            return
+
+        restored = 0
+        for thread_id, selection in selections.items():
+            restored_thread = False
+            chat_model = selection.get("chat_model")
+            if chat_model:
+                self.thread_models[thread_id] = chat_model
+                self.thread_model_aliases[thread_id] = selection.get(
+                    "chat_alias",
+                    self.model_short_id(chat_model),
+                )
+                self.thread_providers[thread_id] = selection.get(
+                    "chat_provider",
+                    self.provider_for_model(chat_model),
+                )
+                restored_thread = True
+
+            image_model = selection.get("image_model")
+            if image_model:
+                self.thread_image_models[thread_id] = image_model
+                self.thread_image_model_aliases[thread_id] = selection.get(
+                    "image_alias",
+                    self.model_short_id(image_model),
+                )
+                restored_thread = True
+
+            if restored_thread:
+                restored += 1
+
+        if restored:
+            print(f"Restored {restored} thread model selection(s) from DB.")
+
+    def thread_model_selection_payload(self) -> dict[str, dict[str, str]]:
+        thread_ids = set(self.thread_models)
+        thread_ids.update(self.thread_model_aliases)
+        thread_ids.update(self.thread_providers)
+        thread_ids.update(self.thread_image_models)
+        thread_ids.update(self.thread_image_model_aliases)
+
+        payload: dict[str, dict[str, str]] = {}
+        for thread_id in sorted(thread_ids):
+            selection: dict[str, str] = {}
+            chat_model = self.thread_models.get(thread_id)
+            if chat_model:
+                selection["chat_model"] = chat_model
+                selection["chat_alias"] = self.thread_model_aliases.get(
+                    thread_id,
+                    self.model_short_id(chat_model),
+                )
+                selection["chat_provider"] = self.thread_providers.get(
+                    thread_id,
+                    self.provider_for_model(chat_model),
+                )
+
+            image_model = self.thread_image_models.get(thread_id)
+            if image_model:
+                selection["image_model"] = image_model
+                selection["image_alias"] = self.thread_image_model_aliases.get(
+                    thread_id,
+                    self.model_short_id(image_model),
+                )
+
+            if selection:
+                payload[thread_id] = selection
+
+        return payload
+
+    async def persist_thread_model_selections(self) -> None:
+        message = await asyncio.to_thread(
+            persist_stored_thread_model_selections,
+            self.thread_model_selection_payload(),
+        )
+        if "failed" in message.lower():
+            print(message)
 
     def load_facebook_name_cache(self) -> None:
         try:
@@ -1837,6 +1923,7 @@ class Murmur:
                     image_model,
                     image_selector or image_model,
                 )
+                await self.persist_thread_model_selections()
                 if not image_prompt:
                     return BotResponse(text=self.current_image_model_message(message.thread_id))
 
@@ -2351,6 +2438,7 @@ class Murmur:
         self.thread_providers[thread_id] = self.provider_for_selected_model(
             thread_id, model
         )
+        await self.persist_thread_model_selections()
         return f"Model set to {alias} ({self.model_short_id(model)}) for this thread."
 
     async def ensure_thread_model_option(
@@ -2425,6 +2513,7 @@ class Murmur:
             )
 
         self.set_thread_image_model_value(thread_id, model, alias)
+        await self.persist_thread_model_selections()
         response = (
             f"Image model set to {alias} ({self.model_short_id(model)}) "
             "for this thread."
@@ -3027,6 +3116,7 @@ class Murmur:
         self.thread_providers[thread_id] = provider
         self.thread_models[thread_id] = model.id
         self.thread_model_aliases[thread_id] = self.provider_display_name(provider)
+        await self.persist_thread_model_selections()
         return (
             f"Provider set to {self.provider_display_name(provider)} for this thread.\n"
             f"Model set to {self.model_short_id(model.id)}."
