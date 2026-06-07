@@ -47,3 +47,13 @@ services:
         value: /ai
       - key: RESPOND_ONLY_ON_PREFIX
         value: "true"
+      - key: MURMUR_AUTOMATION_NOTIFICATIONS
+        value: "true"
+      - key: MURMUR_AUTOMATION_NOTIFICATION_TOKEN
+        sync: false
+      - key: MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID
+        value: "2637078310061988"
+      - key: MURMUR_AUTOMATION_NOTIFICATION_POLL_SECONDS
+        value: "10"
+      - key: MURMUR_AUTOMATION_NOTIFICATION_CLAIM_LIMIT
+        value: "5"

@@ -271,6 +271,31 @@ MURMUR_COOKIE_STATE_SECRET=long-random-secret
 
 The admin console is available at `/murmur-admin` by default.
 
+## Automation Notifications
+
+Codex jobs and local automation scripts can enqueue Messenger notifications through Murmur instead of connecting to Facebook directly. The proxy accepts a bearer-token-protected `POST`, stores the notification in Murmur runtime state, and the Messenger listener delivers queued messages with retries.
+
+```env
+MURMUR_AUTOMATION_NOTIFICATIONS=true
+MURMUR_AUTOMATION_NOTIFICATION_TOKEN=long-random-token
+MURMUR_AUTOMATION_NOTIFICATION_PATH=/api/automation/notifications
+MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID=2637078310061988
+MURMUR_AUTOMATION_NOTIFICATION_POLL_SECONDS=10
+MURMUR_AUTOMATION_NOTIFICATION_CLAIM_LIMIT=5
+```
+
+Send JSON like:
+
+```json
+{
+  "source": "youtube-stream-watch",
+  "dedupeKey": "youtube-stream-watch:VIDEO_ID:needs-review",
+  "message": "New stream needs review: https://www.youtube.com/watch?v=VIDEO_ID"
+}
+```
+
+If `MURMUR_STATE_DATABASE_URL` is configured, queued notifications survive Space rebuilds. Without the database, Murmur falls back to `MURMUR_AUTOMATION_NOTIFICATION_QUEUE_PATH`, which is useful locally but ephemeral on hosted rebuilds.
+
 ```env
 MURMUR_ADMIN_CONSOLE=true
 MURMUR_ADMIN_PATH=/murmur-admin
@@ -361,6 +386,15 @@ Add `MURMUR_STATE_DATABASE_URL` if cookie/profile/model-selection state should s
 | `MURMUR_ADMIN_USERNAME` | `admin` | Admin username. |
 | `MURMUR_ADMIN_PASSWORD` | empty | Admin password. |
 | `MURMUR_ADMIN_SESSION_SECRET` | empty | Optional separate signed-session secret. |
+| `MURMUR_AUTOMATION_NOTIFICATIONS` | `true` | Enable the generic automation notification worker when a token is configured. |
+| `MURMUR_AUTOMATION_NOTIFICATION_TOKEN` | empty | Bearer token required to enqueue automation notifications. |
+| `MURMUR_AUTOMATION_NOTIFICATION_PATH` | `/api/automation/notifications` | Proxy endpoint for local/Codex automation notification enqueue calls. |
+| `MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID` | empty | Messenger thread ID used when an enqueue payload does not specify one. |
+| `MURMUR_AUTOMATION_NOTIFICATION_POLL_SECONDS` | `10` | Listener poll interval for queued automation notifications. |
+| `MURMUR_AUTOMATION_NOTIFICATION_CLAIM_LIMIT` | `5` | Maximum queued notifications claimed per poll. |
+| `MURMUR_AUTOMATION_NOTIFICATION_MAX_ATTEMPTS` | `12` | Attempts before a notification is marked dead. |
+| `MURMUR_AUTOMATION_NOTIFICATION_MAX_MESSAGE_CHARS` | `3500` | Maximum Messenger message size accepted by the enqueue endpoint. |
+| `MURMUR_AUTOMATION_NOTIFICATION_QUEUE_PATH` | `/tmp/murmur-automation-notifications.json` | Local fallback queue path when runtime DB is unavailable. |
 
 ## Security Notes
 

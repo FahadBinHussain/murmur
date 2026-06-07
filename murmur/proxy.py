@@ -33,6 +33,12 @@ from .runtime_state import (
     persist_facebook_proxy_state,
 )
 
+from .automation_notifications import (
+    automation_notification_endpoint_path,
+    automation_notification_token,
+    enqueue_notification,
+    notification_summary,
+)
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -1142,6 +1148,64 @@ async def maybe_handle_admin_console(request: web.Request) -> web.Response | Non
     )
 
 
+def bearer_token(request: web.Request) -> str:
+    header = str(request.headers.get("Authorization") or "")
+    if not header.lower().startswith("bearer "):
+        return ""
+    return header[7:].strip()
+
+
+async def maybe_handle_automation_notifications(
+    request: web.Request,
+) -> web.Response | None:
+    if request.path != automation_notification_endpoint_path():
+        return None
+
+    configured_token = automation_notification_token()
+    if not configured_token:
+        return web.json_response(
+            {"error": {"message": "Automation notifications are not configured."}},
+            status=404,
+            headers=no_store_headers(),
+        )
+
+    provided_token = bearer_token(request)
+    if not provided_token or not secrets.compare_digest(
+        provided_token,
+        configured_token,
+    ):
+        return web.json_response(
+            {"error": {"message": "Unauthorized."}},
+            status=401,
+            headers=no_store_headers({"WWW-Authenticate": "Bearer"}),
+        )
+
+    if request.method in {"GET", "HEAD"}:
+        return web.json_response(
+            notification_summary(),
+            headers=no_store_headers(),
+        )
+
+    if request.method != "POST":
+        return web.json_response(
+            {"error": {"message": "Method not allowed."}},
+            status=405,
+            headers=no_store_headers({"Allow": "GET, POST"}),
+        )
+
+    try:
+        payload = await request.json()
+        result = enqueue_notification(payload)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return web.json_response(
+            {"error": {"message": str(exc)}},
+            status=400,
+            headers=no_store_headers(),
+        )
+
+    return web.json_response(result, headers=no_store_headers())
+
+
 async def cloudflare_image_proxy_models(request: web.Request) -> web.Response:
     auth_error = image_proxy_auth_error(request)
     if auth_error is not None:
@@ -1350,6 +1414,10 @@ async def handle(request: web.Request) -> web.StreamResponse:
     image_proxy_response = await maybe_handle_image_proxy(request)
     if image_proxy_response is not None:
         return image_proxy_response
+
+    notification_response = await maybe_handle_automation_notifications(request)
+    if notification_response is not None:
+        return notification_response
 
     if request.path == "/health":
         return await proxy_http(request)

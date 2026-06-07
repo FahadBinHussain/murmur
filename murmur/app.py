@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from fbchat_muqit import Client, EventType, Message
 
 from .bnp_notifications import BnpNotificationWorker
+from .automation_notifications import AutomationNotificationWorker
 from .fbchat_patch import apply_fbchat_patches
 from .admin_state import (
     read_thread_allowlist,
@@ -476,6 +477,7 @@ class Murmur:
         )
         self.mqtt_watchdog_task: asyncio.Task | None = None
         self.thread_registry_refresh_task: asyncio.Task | None = None
+        self.automation_notification_task: asyncio.Task | None = None
         self.bnp_notification_task: asyncio.Task | None = None
         self.response_tasks: set[asyncio.Task] = set()
         self.file_upload_lock = asyncio.Lock()
@@ -503,6 +505,7 @@ class Murmur:
         self.client.event(EventType.LISTENING)(self.on_listening)
         self.client.event(EventType.MESSAGE)(self.on_message)
         self.bnp_notification_worker = BnpNotificationWorker(self.client)
+        self.automation_notification_worker = AutomationNotificationWorker(self.client)
 
     def patch_facebook_event_logs(self) -> None:
         if not self.settings.fb_log_names:
@@ -1299,6 +1302,19 @@ class Murmur:
             self.bnp_notification_task.add_done_callback(
                 self.log_bnp_notification_task_error
             )
+        if (
+            self.automation_notification_worker.enabled
+            and (
+                self.automation_notification_task is None
+                or self.automation_notification_task.done()
+            )
+        ):
+            self.automation_notification_task = asyncio.create_task(
+                self.automation_notification_worker.run()
+            )
+            self.automation_notification_task.add_done_callback(
+                self.log_automation_notification_task_error
+            )
 
     async def watch_mqtt_listener(self) -> None:
         await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)
@@ -1353,6 +1369,18 @@ class Murmur:
             task.result()
         except Exception as exc:
             print(f"Unhandled Murmur response task failed: {exc}")
+
+    def log_automation_notification_task_error(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+
+        try:
+            task.result()
+        except Exception as exc:
+            print(
+                "Unhandled automation Messenger notification task failed: "
+                f"{exc}"
+            )
 
     def log_bnp_notification_task_error(self, task: asyncio.Task) -> None:
         if task.cancelled():
