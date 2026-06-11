@@ -1178,34 +1178,64 @@ async def wait_for_login(
             await asyncio.sleep(3)
             continue
         if page.url and "/remember_browser/" in page.url:
-            # On the "Trust this device" page — no <form> element exists,
-            # all submission is JS-driven. Dispatch native events on the
-            # trust button to trigger Facebook's internal handler.
-            await click_safe_facebook_step(page)
-            await asyncio.sleep(1)
-            # Also dispatch native mouse events for frameworks that use
-            # different event systems (React/MobX/etc)
+            # On the "Trust this device" page.
+            # Facebook's trust page has no <form> element; all handling is
+            # via JS event handlers on div buttons.  Native event dispatch
+            # didn't trigger any request.  Instead, extract the session
+            # tokens from the page and POST directly to Facebook's
+            # remember_browser endpoint via fetch().
             for scope in page_scopes(page):
                 try:
-                    result = await scope.evaluate("""() => {
-                        const btn = Array.from(document.querySelectorAll(
-                            'div[role="button"], button, a[role="button"], span[role="button"]'
-                        )).find(el => el.innerText.includes('Trust this device'));
-                        if (!btn) return 'no-btn';
-                        // Try multiple event types to trigger JS handler
-                        btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-                        btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
-                        btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                        btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        btn.click();
-                        return 'dispatched';
+                    tokens = await scope.evaluate("""() => {
+                        const t = {};
+                        const m = document.cookie.match(/c_user=([^;]+)/);
+                        if (m) t.c_user = m[1];
+                        const m2 = document.querySelector('input[name="fb_dtsg"]');
+                        if (m2) t.fb_dtsg = m2.value;
+                        // Look for form input values
+                        document.querySelectorAll('input[name], select[name]').forEach(el => {
+                            t[el.name] = el.value;
+                        });
+                        // Also check for __user, __a, __dyn etc from the ajax layer
+                        t.__user = null;
+                        return t;
                     }""")
-                    print(f"[trust] native event dispatch: {result}")
+                    print(f"[trust] page tokens: fb_dtsg={tokens.get('fb_dtsg','?')} c_user={tokens.get('c_user','?')} inputs={len(tokens)-2}")
+                except Exception as e:
+                    print(f"[trust] token extraction failed: {e}")
+                # Try POST via fetch with credentials include
+                try:
+                    result = await scope.evaluate("""async () => {
+                        // Find the fb_dtsg and build the request
+                        const m = document.cookie.match(/c_user=([^;]+)/);
+                        const uid = m ? m[1] : '';
+                        const dtsgEl = document.querySelector('input[name="fb_dtsg"], input[name="fb_dtsg"]');
+                        const dtsg = dtsgEl ? dtsgEl.value : '';
+                        const jazoestEl = document.querySelector('input[name="jazoest"]');
+                        const jazoest = jazoestEl ? jazoestEl.value : '';
+                        const body = new URLSearchParams();
+                        if (uid) body.set('uid', uid);
+                        if (dtsg) body.set('fb_dtsg', dtsg);
+                        if (jazoest) body.set('jazoest', jazoest);
+                        body.set('remember_browser', '1');
+                        body.set('confirmed', '1');
+                        try {
+                            const resp = await fetch('/two_factor/remember_browser/', {
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                                body: body.toString()
+                            });
+                            return 'fetch-status:' + resp.status + ' type:' + (resp.headers.get('content-type') || '?') + ' url:' + resp.url;
+                        } catch(e) {
+                            return 'fetch-error:' + e.message;
+                        }
+                    }""")
+                    print(f"[trust] remember_browser POST: {result}")
                     await asyncio.sleep(3)
                     break
                 except Exception as e:
-                    print(f"[trust] event dispatch failed: {e}")
+                    print(f"[trust] remember_browser POST failed: {e}")
                     continue
             # Wait up to 60s for the page to process
             for waited in range(30):
