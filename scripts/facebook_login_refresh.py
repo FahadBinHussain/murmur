@@ -991,25 +991,30 @@ async def submit_totp_if_needed(
         except Exception:
             pass
 
-    # Wait for the "Input Code is being validated" overlay to resolve
-    for scope in page_scopes(page):
-        try:
-            body = await scope.locator("body").inner_text(timeout=500)
-        except Exception:
-            break
-        if "input code is being validated" in body.lower():
-            for waited in range(12):
-                await asyncio.sleep(1)
-                try:
-                    body = await scope.locator("body").inner_text(timeout=300)
-                except Exception:
-                    continue
-                if "input code is being validated" not in body.lower():
-                    body_snippet = body[:200].replace("\n", " ")
-                    print(f"Overlay resolved after code submission: {waited+1}s. body_start={body_snippet}")
-                    break
-            else:
-                print("TOTP code submission: overlay still showing after 12s; proceeding anyway.")
+    # Wait briefly for the "Input Code is being validated" overlay, then for it to resolve
+    for _ in range(6):
+        await asyncio.sleep(1)
+        for scope in page_scopes(page):
+            try:
+                body = await scope.locator("body").inner_text(timeout=300)
+            except Exception:
+                continue
+            if "input code is being validated" in body.lower():
+                for waited in range(12):
+                    await asyncio.sleep(1)
+                    try:
+                        body = await scope.locator("body").inner_text(timeout=300)
+                    except Exception:
+                        continue
+                    if "input code is being validated" not in body.lower():
+                        body_snippet = body[:200].replace("\n", " ")
+                        print(f"Overlay resolved after code submission: {waited+1}s. body_start={body_snippet}")
+                        break
+                else:
+                    print("TOTP code submission: overlay still showing after 12s; proceeding anyway.")
+                break
+        else:
+            continue
         break
 
     print(f"Submitted authenticator code for window offset #{len(tried_codes) + 1}.")
