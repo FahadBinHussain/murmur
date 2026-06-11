@@ -401,10 +401,11 @@ def page_scopes(page) -> list[Any]:
     return scopes
 
 
-def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
+def generate_totp_codes(secret: str, digits: int = 6, period: int = 30) -> list[str]:
+    """Return TOTP codes for [current, prev, next] 30s windows."""
     raw = secret.strip()
     if raw.isdigit() and len(raw) == digits:
-        return raw
+        return [raw]
     parsed = urlparse(raw)
     if parsed.scheme.lower() == "otpauth":
         query_secret = parse_qs(parsed.query).get("secret", [""])[0]
@@ -422,12 +423,20 @@ def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
 
     padding = "=" * ((8 - len(normalized) % 8) % 8)
     key = base64.b32decode(normalized + padding, casefold=True)
-    counter = int(time.time() // period)
-    msg = struct.pack(">Q", counter)
-    digest = hmac.new(key, msg, hashlib.sha1).digest()
-    offset = digest[-1] & 0x0F
-    code_int = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
-    return str(code_int % (10**digits)).zfill(digits)
+    now = int(time.time())
+    codes: list[str] = []
+    for offset_window in (0, -1, 1):
+        counter = (now + offset_window * period) // period
+        msg = struct.pack(">Q", counter)
+        digest = hmac.new(key, msg, hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        code_int = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+        codes.append(str(code_int % (10**digits)).zfill(digits))
+    return codes
+
+
+def generate_totp(secret: str, digits: int = 6, period: int = 30) -> str:
+    return generate_totp_codes(secret, digits, period)[0]
 
 
 async def click_submit_or_continue(page) -> bool:
@@ -897,9 +906,15 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
     if code_box is None:
         return last_code
 
-    code = generate_totp(totp_secret)
+    codes = generate_totp_codes(totp_secret)
+    code = codes[0]
     if code == last_code:
-        return last_code
+        for candidate in codes[1:]:
+            if candidate != last_code:
+                code = candidate
+                break
+        else:
+            return last_code
 
     # Try fill() first — works when element is enabled/normal
     filled = False
