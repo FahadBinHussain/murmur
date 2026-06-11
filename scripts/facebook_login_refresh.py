@@ -521,11 +521,6 @@ async def click_automated_behavior_warning_dismiss(page) -> bool:
 async def click_safe_facebook_step(page) -> bool:
     safe_texts = [
         "Continue",
-        "Try another way",
-        "Try another method",
-        "Use another method",
-        "Choose another way",
-        "Choose another method",
         "Get a code",
         "Enter code",
         "This was me",
