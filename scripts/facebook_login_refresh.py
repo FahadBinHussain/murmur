@@ -547,6 +547,7 @@ async def click_safe_facebook_step(page) -> bool:
         "Get a code",
         "Enter code",
         "This was me",
+        "Trust this device",
         "Yes, continue",
         "Yes",
         "Trust this browser",
