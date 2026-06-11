@@ -998,31 +998,40 @@ async def submit_totp_if_needed(
         except Exception:
             pass
 
-    # Wait for the "Input Code is being validated" overlay to appear, then resolve
+    # Wait for the page to transition away from the code entry form
     await asyncio.sleep(2)
-    for scope in page_scopes(page):
+    overlay_seen = False
+    for waited in range(16):
+        await asyncio.sleep(1)
         try:
-            body = await scope.locator("body").inner_text(timeout=1000)
-        except Exception as exc:
-            print(f"[totp-overlay] body read failed: {exc}")
+            body = await page.locator("body").inner_text(timeout=500)
+        except Exception:
             continue
-        if "input code is being validated" in body.lower():
-            print(f"[totp-overlay] overlay detected, waiting for resolution...")
-            for waited in range(12):
-                await asyncio.sleep(1)
-                try:
-                    body = await scope.locator("body").inner_text(timeout=300)
-                except Exception:
-                    continue
-                if "input code is being validated" not in body.lower():
-                    body_snippet = body[:200].replace("\n", " ")
-                    print(f"[totp-overlay] resolved after {waited+1}s. start={body_snippet}")
-                    break
-            else:
-                print("[totp-overlay] still showing after 12s; proceeding anyway.")
-        else:
-            print(f"[totp-overlay] text not found; body_start={body[:100].replace(chr(10),' ')}")
-        break
+        lower = body.lower()
+
+        if "input code is being validated" in lower:
+            if not overlay_seen:
+                print(f"[totp-overlay] overlay detected after {waited+2}s, waiting for resolution...")
+                overlay_seen = True
+            continue
+
+        if overlay_seen:
+            print(f"[totp-overlay] overlay resolved after {waited+2}s. start={body[:200].replace(chr(10),' ')}")
+            break
+
+        if "trust this device" in lower or "you're logged in" in lower:
+            print(f"[totp-overlay] trust-this-device prompt after {waited+2}s")
+            break
+
+        if "enter the 6-digit code" not in lower and "authentication app" not in lower:
+            print(f"[totp-overlay] page changed; body_start={body[:100].replace(chr(10),' ')}")
+            break
+
+        # Still on code entry page, keep waiting
+        if waited % 4 == 0:
+            print(f"[totp-overlay] still on code entry page after {waited+2}s...")
+    else:
+        print(f"[totp-overlay] page did not transition within {16+2}s; proceeding anyway.")
 
     print(f"Submitted authenticator code for window offset #{len(tried_codes) + 1}.")
     return code
