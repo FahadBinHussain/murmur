@@ -896,6 +896,13 @@ async def submit_totp_if_needed(
         except Exception:
             continue
         if "input code is being validated" in body.lower():
+            try:
+                debug_dir = ROOT / "output"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(debug_dir / "overlay_detected.png"), full_page=True)
+                print(f"Saved overlay screenshot: {debug_dir / 'overlay_detected.png'}")
+            except Exception as exc:
+                print(f"Could not save overlay screenshot: {exc}")
             for waited in range(12):  # up to ~12s
                 await asyncio.sleep(1)
                 if not await facebook_totp_page(page):
@@ -911,6 +918,11 @@ async def submit_totp_if_needed(
             try:
                 await page.reload(timeout=30000)
                 await asyncio.sleep(3)
+                try:
+                    await page.screenshot(path=str(debug_dir / "overlay_after_reload.png"), full_page=True)
+                    print(f"Saved after-reload screenshot: {debug_dir / 'overlay_after_reload.png'}")
+                except Exception as exc:
+                    print(f"Could not save after-reload screenshot: {exc}")
             except Exception:
                 pass
             return None
