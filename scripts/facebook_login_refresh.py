@@ -887,17 +887,30 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
     if code == last_code:
         return last_code
 
-    # Use JS to set value, bypassing disabled/detached element issues with fill()
+    # Try fill() first — works when element is enabled/normal
+    filled = False
     try:
-        await code_box.evaluate(f"""el => {{
-            el.disabled = false;
-            el.value = '';
-            el.value = '{code}';
-            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        }}""")
+        await code_box.fill(code, timeout=2000)
+        filled = True
     except Exception:
-        return last_code
+        pass
+
+    if not filled:
+        # React hooks into the native value setter, so el.value = x won't
+        # trigger its virtual-DOM tracking. Use the setter directly so
+        # React sees the change, then dispatch an input event.
+        try:
+            await code_box.evaluate(f"""el => {{
+                el.disabled = false;
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value'
+                ).set;
+                setter.call(el, '{code}');
+                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            }}""")
+            await page.wait_for_timeout(300)
+        except Exception:
+            return last_code
 
     await page.wait_for_timeout(500)
     if not await click_submit_or_continue(page):
