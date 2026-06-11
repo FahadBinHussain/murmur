@@ -1195,23 +1195,33 @@ async def wait_for_login(
                 else:
                     continue
                 break
-            # If clicking the submit didn't navigate, try submitting via JS
-            # (the button may be JS-handled; form.submit() bypasses handlers)
-            for scope in page_scopes(page):
-                try:
-                    submitted = await scope.evaluate("""() => {
-                        const form = document.querySelector('form');
-                        if (!form) return 'no-form';
-                        const action = form.action || '';
-                        form.submit();
-                        return 'submitted action=' + action;
-                    }""")
-                    print(f"Form submit via JS: {submitted}")
-                    await asyncio.sleep(2)
-                    break
-                except Exception as e:
-                    print(f"Form submit JS failed: {e}")
-                    continue
+            # If clicking the submit button still didn't navigate, try
+            # requestSubmit which triggers all JS event handlers (unlike
+            # form.submit() which bypasses them)
+            if not any(m in (page.url or "").lower() for m in
+                       ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth")):
+                print("[trust] page navigated after submit click")
+            else:
+                for scope in page_scopes(page):
+                    try:
+                        result = await scope.evaluate("""() => {
+                            const form = document.querySelector('form');
+                            const btn = document.querySelector('input[type="submit"], button[type="submit"]');
+                            if (!form) return 'no-form';
+                            if (!btn) return 'no-submit-btn';
+                            try {
+                                form.requestSubmit(btn);
+                                return 'requestSubmit-called';
+                            } catch(e) {
+                                return 'requestSubmit-failed:' + e.message;
+                            }
+                        }""")
+                        print(f"[trust] requestSubmit result: {result}")
+                        await asyncio.sleep(2)
+                        break
+                    except Exception as e:
+                        print(f"[trust] scope evaluate failed: {e}")
+                        continue
             # After trust + submit, try verifying cookies without navigation
             await asyncio.sleep(2)
             try:
