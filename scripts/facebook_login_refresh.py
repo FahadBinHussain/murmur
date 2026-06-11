@@ -905,16 +905,22 @@ async def submit_totp_if_needed(
                 print(f"Could not save overlay screenshot: {exc}")
             for waited in range(12):  # up to ~12s
                 await asyncio.sleep(1)
-                if not await facebook_totp_page(page):
-                    return None  # success – caller checks cookies
+                is_totp_page = await facebook_totp_page(page)
+                current_url = f"...{page.url.split('?')[0].split('//')[-1]}" if page.url else "no-url"
+                if not is_totp_page:
+                    print(f"Overlay resolved: left TOTP page after {waited+1}s -> {current_url}")
+                    return None
                 try:
                     body = await scope.locator("body").inner_text(timeout=300)
-                except Exception:
+                except Exception as exc:
+                    print(f"Overlay wait: inner_text exception at {waited+1}s: {exc}")
                     continue
                 if "input code is being validated" not in body.lower():
-                    return None  # overlay gone (error or result)
+                    body_snippet = body[:200].replace("\n", " ")
+                    print(f"Overlay resolved: 'validating' text gone after {waited+1}s. body_start={body_snippet}")
+                    return None
             # Still stuck after 12s – reload so the next loop pass retries
-            print("TOTP validation overlay did not resolve; reloading 2FA page.")
+            print("TOTP validation overlay did not resolve after 12s; reloading 2FA page.")
             try:
                 await page.reload(timeout=30000)
                 await asyncio.sleep(3)
