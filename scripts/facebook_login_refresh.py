@@ -972,24 +972,27 @@ async def submit_totp_if_needed(
     if code is None:
         return None
 
-    # Set the code value
+    # Set the code value — type character by character for React compatibility
     try:
-        await code_box.fill(code, timeout=5000)
+        await code_box.click(timeout=3000)
+        await code_box.fill("", timeout=2000)
+        await code_box.press_sequentially(code, delay=30)
+        print(f"[totp] typed {len(code)}-digit code via press_sequentially")
     except Exception:
-        pass
-    try:
-        await code_box.evaluate(f"""el => {{
-            el.disabled = false;
-            const setter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value'
-            ).set;
-            setter.call(el, '{code}');
-            el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertFromPaste' }}));
-            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        }}""")
-        await page.wait_for_timeout(300)
-    except Exception:
-        return None
+        print(f"[totp] press_sequentially failed, trying evaluate fallback")
+        try:
+            await code_box.evaluate(f"""el => {{
+                el.disabled = false;
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value'
+                ).set;
+                setter.call(el, '{code}');
+                el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertFromPaste' }}));
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}""")
+            await page.wait_for_timeout(300)
+        except Exception:
+            return None
 
     await page.wait_for_timeout(500)
 
