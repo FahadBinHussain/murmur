@@ -287,7 +287,7 @@ def proxy_state_for(proxy_url: str, current: dict[str, str] | None = None) -> di
     current = current or {}
     state = {key: proxy_url for key in FACEBOOK_PROXY_KEYS}
     for key in FACEBOOK_PROXY_KEYS:
-        if proxy_explicitly_direct(current.get(key)):
+        if key != "FB_PROXY" and proxy_explicitly_direct(current.get(key)):
             state[key] = "direct"
     return state
 
