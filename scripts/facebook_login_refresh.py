@@ -1178,38 +1178,34 @@ async def wait_for_login(
             await asyncio.sleep(3)
             continue
         if page.url and "/remember_browser/" in page.url:
-            # On the "Trust this device" page.
-            # Instead of clicking UI buttons that may trigger broken JS/AJAX,
-            # submit the form directly via fetch() with credentials='include'
-            # so the browser stores Set-Cookie responses automatically.
+            # On the "Trust this device" page — no <form> element exists,
+            # all submission is JS-driven. Dispatch native events on the
+            # trust button to trigger Facebook's internal handler.
             await click_safe_facebook_step(page)
             await asyncio.sleep(1)
+            # Also dispatch native mouse events for frameworks that use
+            # different event systems (React/MobX/etc)
             for scope in page_scopes(page):
                 try:
-                    result = await scope.evaluate("""async () => {
-                        const form = document.querySelector('form');
-                        if (!form) return 'no-form';
-                        const formData = new FormData(form);
-                        // Ensure trust is selected
-                        if (!formData.has('submit')) formData.set('submit', 'Trust this device');
-                        const url = form.action || '/two_factor/remember_browser/';
-                        try {
-                            const resp = await fetch(url, {
-                                method: 'POST',
-                                body: formData,
-                                credentials: 'include',
-                                redirect: 'follow'
-                            });
-                            return 'fetch-status:' + resp.status + ' url:' + resp.url;
-                        } catch(e) {
-                            return 'fetch-error:' + e.message;
-                        }
+                    result = await scope.evaluate("""() => {
+                        const btn = Array.from(document.querySelectorAll(
+                            'div[role="button"], button, a[role="button"], span[role="button"]'
+                        )).find(el => el.innerText.includes('Trust this device'));
+                        if (!btn) return 'no-btn';
+                        // Try multiple event types to trigger JS handler
+                        btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+                        btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
+                        btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                        btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        btn.click();
+                        return 'dispatched';
                     }""")
-                    print(f"[trust] fetch submit result: {result}")
+                    print(f"[trust] native event dispatch: {result}")
                     await asyncio.sleep(3)
                     break
                 except Exception as e:
-                    print(f"[trust] fetch evaluate failed: {e}")
+                    print(f"[trust] event dispatch failed: {e}")
                     continue
             # Wait up to 60s for the page to process
             for waited in range(30):
