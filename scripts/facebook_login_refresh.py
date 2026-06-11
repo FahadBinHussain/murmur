@@ -1112,8 +1112,11 @@ async def wait_for_login(
         await click_safe_facebook_step(page)
         await asyncio.sleep(2)
         url = (page.url or "").lower()
-        if any(m in url for m in ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth")):
-            print("Still on auth page after safe click; navigating to Facebook home to complete login.")
+        if (
+            tried_totp_codes
+            and any(m in url for m in ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth"))
+        ):
+            print("Still on auth page after TOTP; navigating to Facebook home to complete login.")
             try:
                 await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(3)
