@@ -955,7 +955,10 @@ async def wait_for_login(
             continue
         if has_login_cookies(cookies):
             if not require_verified:
-                return cookies
+                url = (page.url or "").lower()
+                auth_url_markers = ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth")
+                if not any(m in url for m in auth_url_markers):
+                    return cookies
             if time.monotonic() - last_verify_attempt > 15:
                 last_verify_attempt = time.monotonic()
                 try:
