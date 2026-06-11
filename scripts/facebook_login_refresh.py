@@ -815,12 +815,19 @@ async def fill_login_form(page, identifier: str, password: str) -> bool:
     if password_box is None:
         return False
 
-    if email_box is not None:
-        await email_box.fill(identifier, timeout=2000)
-    await password_box.fill(password, timeout=2000)
+    try:
+        if email_box is not None:
+            await email_box.fill(identifier, timeout=2000)
+        await password_box.fill(password, timeout=2000)
+    except Exception as exc:
+        print(f"fill_login_form: fill failed ({exc}); skipping login resubmit.")
+        return False
 
     if not await click_submit_or_continue(page):
-        await password_box.press("Enter")
+        try:
+            await password_box.press("Enter")
+        except Exception:
+            pass
     return True
 
 
