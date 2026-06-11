@@ -460,9 +460,13 @@ async def click_submit_or_continue(page) -> bool:
             if submit is None:
                 continue
             try:
+                text = await submit.inner_text()
+                tag = await submit.evaluate("el => el.tagName + (el.type ? '[' + el.type + ']' : '')")
+                print(f"[click-btn] matched selector={selector} tag={tag} text={text[:30]}")
                 await submit.click(timeout=1500)
                 return True
-            except Exception:
+            except Exception as exc:
+                print(f"[click-btn] click failed for {selector}: {exc}")
                 continue
     return False
 
@@ -996,11 +1000,17 @@ async def submit_totp_if_needed(
 
     await page.wait_for_timeout(500)
 
-    if not await click_submit_or_continue(page):
-        try:
-            await code_box.press("Enter")
-        except Exception:
-            pass
+    # Submit the code - try Enter first (input is focused after typing), then click Continue
+    try:
+        await page.keyboard.press("Enter")
+        print("[totp] pressed Enter to submit code")
+    except Exception:
+        print("[totp] Enter key failed, clicking Continue")
+        if not await click_submit_or_continue(page):
+            try:
+                await code_box.press("Enter")
+            except Exception:
+                pass
 
     # Wait for the page to transition away from the code entry form
     await asyncio.sleep(2)
