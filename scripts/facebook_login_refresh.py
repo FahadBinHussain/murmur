@@ -217,6 +217,20 @@ def playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
     return out
 
 
+async def navigate_with_retry(page, url: str, nav_timeout: int, retries: int = 3) -> None:
+    for attempt in range(1, retries + 1):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=max(1000, nav_timeout * 1000))
+            return
+        except Exception as exc:
+            if attempt < retries:
+                wait = attempt * 10
+                print(f"Navigation to {url} failed (attempt {attempt}/{retries}): {type(exc).__name__}. Retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
 def normalize_browser_engine(value: str | None) -> str:
     raw = (value or "playwright").strip().lower()
     if raw in {"cloak", "cloakbrowser", "cloak-browser"}:
@@ -1255,17 +1269,13 @@ async def main_async() -> int:
                             "so visible checkpoint steps can complete."
                         )
                         require_verified_login = True
-                        await page.goto(
-                            args.login_url,
-                            wait_until="domcontentloaded",
-                            timeout=max(1000, args.nav_timeout * 1000),
+                        await navigate_with_retry(
+                            page, args.login_url, args.nav_timeout,
                         )
 
             if not has_login_cookies(cookies):
-                await page.goto(
-                    args.login_url,
-                    wait_until="domcontentloaded",
-                    timeout=max(1000, args.nav_timeout * 1000),
+                await navigate_with_retry(
+                    page, args.login_url, args.nav_timeout,
                 )
                 cookies = await facebook_cookies(context)
 
@@ -1375,10 +1385,8 @@ async def main_async() -> int:
                                     "Opening Facebook so the existing profile can finish reauthentication."
                                 )
                                 require_verified_login = True
-                                await page.goto(
-                                    args.login_url,
-                                    wait_until="domcontentloaded",
-                                    timeout=max(1000, args.nav_timeout * 1000),
+                                await navigate_with_retry(
+                                    page, args.login_url, args.nav_timeout,
                                 )
                     elif not args.no_verify:
                         if env_bool("FB_LOGIN_CLEAR_ON_VERIFY_FAILURE", False):
@@ -1391,17 +1399,13 @@ async def main_async() -> int:
                                 "so visible checkpoint steps can complete."
                             )
                             require_verified_login = True
-                            await page.goto(
-                                args.login_url,
-                                wait_until="domcontentloaded",
-                                timeout=max(1000, args.nav_timeout * 1000),
+                            await navigate_with_retry(
+                                page, args.login_url, args.nav_timeout,
                             )
 
                 if not has_login_cookies(cookies):
-                    await page.goto(
-                        args.login_url,
-                        wait_until="domcontentloaded",
-                        timeout=max(1000, args.nav_timeout * 1000),
+                    await navigate_with_retry(
+                        page, args.login_url, args.nav_timeout,
                     )
                     cookies = await facebook_cookies(context)
 
