@@ -404,6 +404,16 @@ async def _login_with_bootstrap_fallback(cls: Any, session: Any, jar: Any, user_
                         region,
                         user_name,
                     ) = _extract_tokens_from_html(html_content)
+
+                    # Reject checkpoint/login pages even when token extraction
+                    # succeeds — checkpoint pages still carry fb_dtsg.
+                    if "checkpoint=True" in _html_markers(html_content) or "login=True" in _html_markers(html_content):
+                        logger.warning(
+                            "fbchat-muqit bootstrap extracted tokens but "
+                            f"page shows checkpoint/login; markers={_html_markers(html_content)}"
+                        )
+                        continue
+
                     out = cls(
                         user_id=user_id,
                         user_name=user_name,

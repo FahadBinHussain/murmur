@@ -1023,6 +1023,7 @@ async def wait_for_login(
                         verify_user_agent,
                         verify_proxy,
                     )
+                    cookies = await facebook_cookies(context)
                     return cookies
                 except Exception as exc:
                     last_verify_error = exc
@@ -1219,6 +1220,9 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main_async() -> int:
+    from murmur.fbchat_patch import apply_fbchat_patches
+    apply_fbchat_patches()
+
     load_env()
     args = parse_args()
     browser_engine = normalize_browser_engine(args.browser_engine)
