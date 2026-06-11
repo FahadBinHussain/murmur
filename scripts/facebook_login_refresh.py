@@ -1195,8 +1195,24 @@ async def wait_for_login(
                 else:
                     continue
                 break
+            # If clicking the submit didn't navigate, try submitting via JS
+            # (the button may be JS-handled; form.submit() bypasses handlers)
+            for scope in page_scopes(page):
+                try:
+                    submitted = await scope.evaluate("""() => {
+                        const form = document.querySelector('form');
+                        if (!form) return 'no-form';
+                        const action = form.action || '';
+                        form.submit();
+                        return 'submitted action=' + action;
+                    }""")
+                    print(f"Form submit via JS: {submitted}")
+                    await asyncio.sleep(2)
+                    break
+                except Exception as e:
+                    print(f"Form submit JS failed: {e}")
+                    continue
             # After trust + submit, try verifying cookies without navigation
-            # (Facebook's response may have set post-2FA cookies even if page didn't redirect)
             await asyncio.sleep(2)
             try:
                 immediate = await facebook_cookies(context)
