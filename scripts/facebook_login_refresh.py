@@ -888,14 +888,35 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
     if code_box is None:
         return last_code
 
+    # If input already has 6-digit value and is disabled/busy, code was already entered.
+    try:
+        current_value = await code_box.input_value(timeout=500)
+        if current_value and len(current_value.strip()) >= 6 and current_value.strip().isdigit():
+            is_disabled = await code_box.is_disabled()
+            if is_disabled:
+                await asyncio.sleep(2)
+            if not await click_submit_or_continue(page):
+                await page.keyboard.press("Enter")
+            print("Submitted authenticator code.")
+            return generate_totp(totp_secret)
+    except Exception:
+        pass
+
     code = generate_totp(totp_secret)
     if code == last_code:
         return last_code
 
-    await code_box.fill(code, timeout=2000)
+    try:
+        await code_box.fill(code, timeout=2000)
+    except Exception:
+        return last_code
+
     await page.wait_for_timeout(300)
     if not await click_submit_or_continue(page):
-        await code_box.press("Enter")
+        try:
+            await code_box.press("Enter")
+        except Exception:
+            return last_code
     print("Submitted authenticator code.")
     return code
 
