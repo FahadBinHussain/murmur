@@ -991,30 +991,30 @@ async def submit_totp_if_needed(
         except Exception:
             pass
 
-    # Wait briefly for the "Input Code is being validated" overlay, then for it to resolve
-    for _ in range(6):
-        await asyncio.sleep(1)
-        for scope in page_scopes(page):
-            try:
-                body = await scope.locator("body").inner_text(timeout=300)
-            except Exception:
-                continue
-            if "input code is being validated" in body.lower():
-                for waited in range(12):
-                    await asyncio.sleep(1)
-                    try:
-                        body = await scope.locator("body").inner_text(timeout=300)
-                    except Exception:
-                        continue
-                    if "input code is being validated" not in body.lower():
-                        body_snippet = body[:200].replace("\n", " ")
-                        print(f"Overlay resolved after code submission: {waited+1}s. body_start={body_snippet}")
-                        break
-                else:
-                    print("TOTP code submission: overlay still showing after 12s; proceeding anyway.")
-                break
-        else:
+    # Wait for the "Input Code is being validated" overlay to appear, then resolve
+    await asyncio.sleep(2)
+    for scope in page_scopes(page):
+        try:
+            body = await scope.locator("body").inner_text(timeout=1000)
+        except Exception as exc:
+            print(f"[totp-overlay] body read failed: {exc}")
             continue
+        if "input code is being validated" in body.lower():
+            print(f"[totp-overlay] overlay detected, waiting for resolution...")
+            for waited in range(12):
+                await asyncio.sleep(1)
+                try:
+                    body = await scope.locator("body").inner_text(timeout=300)
+                except Exception:
+                    continue
+                if "input code is being validated" not in body.lower():
+                    body_snippet = body[:200].replace("\n", " ")
+                    print(f"[totp-overlay] resolved after {waited+1}s. start={body_snippet}")
+                    break
+            else:
+                print("[totp-overlay] still showing after 12s; proceeding anyway.")
+        else:
+            print(f"[totp-overlay] text not found; body_start={body[:100].replace(chr(10),' ')}")
         break
 
     print(f"Submitted authenticator code for window offset #{len(tried_codes) + 1}.")
