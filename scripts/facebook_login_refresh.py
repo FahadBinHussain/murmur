@@ -1177,51 +1177,31 @@ async def wait_for_login(
             print(f"Resubmitted Facebook login form after redirect ({login_resubmits}/3).")
             await asyncio.sleep(3)
             continue
-        if await click_safe_facebook_step(page):
-            # After clicking a safe step (e.g. Trust this device), try to
-            # submit the form by clicking any visible submit button.
-            await asyncio.sleep(0.5)
-            for scope in page_scopes(page):
-                for sel in ('input[type="submit"]', 'button[type="submit"]'):
+        if page.url and "/remember_browser/" in page.url:
+            # On the "Trust this device" page — this is the post-2FA confirmation.
+            # Click the trust button and wait for the AJAX response / redirect.
+            await click_safe_facebook_step(page)
+            # Wait up to 60s for the page to process (AJAX may be slow on HF Space)
+            for waited in range(30):
+                await asyncio.sleep(2)
+                url = (page.url or "").lower()
+                if not any(m in url for m in ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth", "remember_browser")):
+                    print(f"[trust] page left trust page after {waited*2+2}s; url={url[:80]}")
+                    break
+                # Check if cookies were upgraded (try verifying)
+                if waited % 5 == 4:
                     try:
-                        btn = scope.locator(sel).first
-                        if await btn.is_visible(timeout=300):
-                            await btn.click()
-                            print(f"Clicked form submit: {sel}")
-                            await asyncio.sleep(1)
-                            break
+                        ck = await facebook_cookies(context)
+                        if has_login_cookies(ck) and require_verified:
+                            await verify_cookie_candidate(ck, verify_output_path or (ROOT / "cookies.json"), verify_user_agent, verify_proxy)
+                            print("[trust] cookies verified post-2FA while still on trust page!")
+                            return ck
                     except Exception:
-                        continue
-                else:
-                    continue
-                break
-            # If clicking the submit button still didn't navigate, try
-            # requestSubmit which triggers all JS event handlers (unlike
-            # form.submit() which bypasses them)
-            if not any(m in (page.url or "").lower() for m in
-                       ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth")):
-                print("[trust] page navigated after submit click")
+                        pass
             else:
-                for scope in page_scopes(page):
-                    try:
-                        result = await scope.evaluate("""() => {
-                            const form = document.querySelector('form');
-                            const btn = document.querySelector('input[type="submit"], button[type="submit"]');
-                            if (!form) return 'no-form';
-                            if (!btn) return 'no-submit-btn';
-                            try {
-                                form.requestSubmit(btn);
-                                return 'requestSubmit-called';
-                            } catch(e) {
-                                return 'requestSubmit-failed:' + e.message;
-                            }
-                        }""")
-                        print(f"[trust] requestSubmit result: {result}")
-                        await asyncio.sleep(2)
-                        break
-                    except Exception as e:
-                        print(f"[trust] scope evaluate failed: {e}")
-                        continue
+                print("[trust] trust page did not process within 60s; proceeding with fallback")
+        else:
+            await click_safe_facebook_step(page)
             # After trust + submit, try verifying cookies without navigation
             await asyncio.sleep(2)
             try:
