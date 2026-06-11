@@ -974,7 +974,7 @@ async def submit_totp_if_needed(
 
     # Set the code value
     try:
-        await code_box.fill(code, timeout=2000)
+        await code_box.fill(code, timeout=5000)
     except Exception:
         pass
     try:
@@ -984,7 +984,8 @@ async def submit_totp_if_needed(
                 window.HTMLInputElement.prototype, 'value'
             ).set;
             setter.call(el, '{code}');
-            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertFromPaste' }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
         }}""")
         await page.wait_for_timeout(300)
     except Exception:
