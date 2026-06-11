@@ -1179,64 +1179,47 @@ async def wait_for_login(
             continue
         if page.url and "/remember_browser/" in page.url:
             # On the "Trust this device" page.
-            # Facebook's trust page has no <form> element; all handling is
-            # via JS event handlers on div buttons.  Native event dispatch
-            # didn't trigger any request.  Instead, extract the session
-            # tokens from the page and POST directly to Facebook's
-            # remember_browser endpoint via fetch().
+            # Facebook's trust page has no <form> element and the
+            # remember_browser endpoint returns 404 on direct POST.
+            # The trust action uses a GraphQL API call. Use request
+            # interception to capture the endpoint, then replicate it.
+            captured = []
+            def capture(req):
+                captured.append({'url': req.url, 'method': req.method, 'headers': req.headers, 'postData': req.post_data})
+            page.on('request', capture)
+            await click_safe_facebook_step(page)
+            await asyncio.sleep(3)
+            page.remove_listener('request', capture)
+            if captured:
+                for c in captured:
+                    print(f"[trust] captured request: {c['method']} {c['url'][:200]}")
+                    if c.get('postData'):
+                        print(f"[trust]   postData: {c['postData'][:300]}")
+            else:
+                print("[trust] no fr request captured from button click")
+            # Also dump ALL input/select/textarea elements on the page
             for scope in page_scopes(page):
                 try:
-                    tokens = await scope.evaluate("""() => {
-                        const t = {};
-                        const m = document.cookie.match(/c_user=([^;]+)/);
-                        if (m) t.c_user = m[1];
-                        const m2 = document.querySelector('input[name="fb_dtsg"]');
-                        if (m2) t.fb_dtsg = m2.value;
-                        // Look for form input values
-                        document.querySelectorAll('input[name], select[name]').forEach(el => {
-                            t[el.name] = el.value;
+                    result = await scope.evaluate("""() => {
+                        const fields = {};
+                        document.querySelectorAll('input, select, textarea').forEach(el => {
+                            fields[el.name || '(no name)'] = el.value || '(empty)';
                         });
-                        // Also check for __user, __a, __dyn etc from the ajax layer
-                        t.__user = null;
-                        return t;
+                        // Also extract fb_dtsg from any source
+                        const dtsgMeta = document.querySelector('meta[name="fb_dtsg"]');
+                        if (dtsgMeta) fields['meta_fb_dtsg'] = dtsgMeta.content;
+                        const dtsgEl = document.querySelector('[name="fb_dtsg"], [data-name="fb_dtsg"]');
+                        if (dtsgEl) fields['el_fb_dtsg'] = dtsgEl.value || '(found)';
+                        // Any fb_dtsg in data attributes
+                        document.querySelectorAll('*').forEach(el => {
+                            if (el.dataset && el.dataset.fb_dtsg) fields['data_fb_dtsg'] = el.dataset.fb_dtsg;
+                        });
+                        return JSON.stringify(fields);
                     }""")
-                    print(f"[trust] page tokens: fb_dtsg={tokens.get('fb_dtsg','?')} c_user={tokens.get('c_user','?')} inputs={len(tokens)-2}")
+                    print(f"[trust] page fields: {result[:500]}")
                 except Exception as e:
-                    print(f"[trust] token extraction failed: {e}")
-                # Try POST via fetch with credentials include
-                try:
-                    result = await scope.evaluate("""async () => {
-                        // Find the fb_dtsg and build the request
-                        const m = document.cookie.match(/c_user=([^;]+)/);
-                        const uid = m ? m[1] : '';
-                        const dtsgEl = document.querySelector('input[name="fb_dtsg"], input[name="fb_dtsg"]');
-                        const dtsg = dtsgEl ? dtsgEl.value : '';
-                        const jazoestEl = document.querySelector('input[name="jazoest"]');
-                        const jazoest = jazoestEl ? jazoestEl.value : '';
-                        const body = new URLSearchParams();
-                        if (uid) body.set('uid', uid);
-                        if (dtsg) body.set('fb_dtsg', dtsg);
-                        if (jazoest) body.set('jazoest', jazoest);
-                        body.set('remember_browser', '1');
-                        body.set('confirmed', '1');
-                        try {
-                            const resp = await fetch('/two_factor/remember_browser/', {
-                                method: 'POST',
-                                credentials: 'include',
-                                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                                body: body.toString()
-                            });
-                            return 'fetch-status:' + resp.status + ' type:' + (resp.headers.get('content-type') || '?') + ' url:' + resp.url;
-                        } catch(e) {
-                            return 'fetch-error:' + e.message;
-                        }
-                    }""")
-                    print(f"[trust] remember_browser POST: {result}")
-                    await asyncio.sleep(3)
-                    break
-                except Exception as e:
-                    print(f"[trust] remember_browser POST failed: {e}")
-                    continue
+                    print(f"[trust] field extraction failed: {e}")
+                break
             # Wait up to 60s for the page to process
             for waited in range(30):
                 await asyncio.sleep(2)
