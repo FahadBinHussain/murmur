@@ -1195,6 +1195,23 @@ async def wait_for_login(
                 else:
                     continue
                 break
+            # After trust + submit, try verifying cookies without navigation
+            # (Facebook's response may have set post-2FA cookies even if page didn't redirect)
+            await asyncio.sleep(2)
+            try:
+                immediate = await facebook_cookies(context)
+                if has_login_cookies(immediate) and require_verified:
+                    await verify_cookie_candidate(
+                        immediate,
+                        verify_output_path or (ROOT / "cookies.json"),
+                        verify_user_agent,
+                        verify_proxy,
+                    )
+                    # verify passed — re-snapshot and return
+                    cookies = await facebook_cookies(context)
+                    return cookies
+            except Exception:
+                pass
         # Wait for the Trust-this-device confirmation to take effect
         for waited in range(10):
             await asyncio.sleep(1)
@@ -1211,14 +1228,10 @@ async def wait_for_login(
                 except Exception:
                     pass
                 try:
-                    await page.goto("https://www.facebook.com/", wait_until="networkidle", timeout=45000)
-                    await asyncio.sleep(3)
+                    await page.goto("https://www.facebook.com/", wait_until="commit", timeout=30000)
+                    # commit fires as soon as headers are received; cookies from response are set
                 except Exception:
-                    try:
-                        await page.goto("https://www.facebook.com/", wait_until="load", timeout=30000)
-                        await asyncio.sleep(3)
-                    except Exception:
-                        pass
+                    pass
             continue
     screenshot_path = ROOT / "output" / "facebook_login_refresh_timeout.png"
     try:
