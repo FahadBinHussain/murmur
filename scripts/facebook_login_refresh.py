@@ -1111,6 +1111,15 @@ async def wait_for_login(
             continue
         await click_safe_facebook_step(page)
         await asyncio.sleep(2)
+        url = (page.url or "").lower()
+        if any(m in url for m in ("two_step_verification", "two_factor", "checkpoint", "approvals", "login/reauth")):
+            print("Still on auth page after safe click; navigating to Facebook home to complete login.")
+            try:
+                await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3)
+            except Exception:
+                pass
+            continue
     screenshot_path = ROOT / "output" / "facebook_login_refresh_timeout.png"
     try:
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
