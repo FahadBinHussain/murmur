@@ -864,13 +864,18 @@ async def facebook_totp_page(page) -> bool:
     return False
 
 
-async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -> str | None:
+async def submit_totp_if_needed(
+    page, totp_secret: str, tried_codes: set[str]
+) -> str | None:
+    """Submit TOTP code if on 2FA page. Returns the submitted code, or None if no code was submitted."""
     if not totp_secret:
-        return last_code
+        return None
     if not await facebook_totp_page(page):
-        return last_code
+        return None
+
+    # Guard against log-in-password page appearing interleaved with 2FA
     for scope in page_scopes(page):
-        login_password = await first_visible(
+        if await first_visible(
             scope,
             [
                 'input[name="pass"]',
@@ -879,10 +884,39 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
                 'input[autocomplete="current-password"]',
             ],
             timeout_ms=100,
-        )
-        if login_password is not None:
-            return last_code
+        ):
+            return None
 
+    # If "Input Code is being validated" overlay is showing, wait briefly
+    # for the result. If it times out (network issue), reload the page to
+    # get a fresh 2FA page and let the next call try again.
+    for scope in page_scopes(page):
+        try:
+            body = await scope.locator("body").inner_text(timeout=500)
+        except Exception:
+            continue
+        if "input code is being validated" in body.lower():
+            for waited in range(12):  # up to ~12s
+                await asyncio.sleep(1)
+                if not await facebook_totp_page(page):
+                    return None  # success – caller checks cookies
+                try:
+                    body = await scope.locator("body").inner_text(timeout=300)
+                except Exception:
+                    continue
+                if "input code is being validated" not in body.lower():
+                    return None  # overlay gone (error or result)
+            # Still stuck after 12s – reload so the next loop pass retries
+            print("TOTP validation overlay did not resolve; reloading 2FA page.")
+            try:
+                await page.reload(timeout=30000)
+                await asyncio.sleep(3)
+            except Exception:
+                pass
+            return None
+        break
+
+    # Find the code input box
     code_box = None
     for scope in page_scopes(page):
         code_box = await first_visible_locator(
@@ -904,50 +938,41 @@ async def submit_totp_if_needed(page, totp_secret: str, last_code: str | None) -
         if code_box is not None:
             break
     if code_box is None:
-        return last_code
+        return None
 
+    # Pick the first untried TOTP window code
     codes = generate_totp_codes(totp_secret)
-    code = codes[0]
-    if code == last_code:
-        for candidate in codes[1:]:
-            if candidate != last_code:
-                code = candidate
-                break
-        else:
-            return last_code
+    code = next((c for c in codes if c not in tried_codes), None)
+    if code is None:
+        return None
 
-    # Try fill() first — works when element is enabled/normal
-    filled = False
+    # Set the code value
     try:
         await code_box.fill(code, timeout=2000)
-        filled = True
     except Exception:
         pass
-
-    if not filled:
-        # React hooks into the native value setter, so el.value = x won't
-        # trigger its virtual-DOM tracking. Use the setter directly so
-        # React sees the change, then dispatch an input event.
-        try:
-            await code_box.evaluate(f"""el => {{
-                el.disabled = false;
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
-                setter.call(el, '{code}');
-                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            }}""")
-            await page.wait_for_timeout(300)
-        except Exception:
-            return last_code
+    try:
+        await code_box.evaluate(f"""el => {{
+            el.disabled = false;
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+            ).set;
+            setter.call(el, '{code}');
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}""")
+        await page.wait_for_timeout(300)
+    except Exception:
+        return None
 
     await page.wait_for_timeout(500)
+
     if not await click_submit_or_continue(page):
         try:
             await code_box.press("Enter")
         except Exception:
             pass
-    print("Submitted authenticator code.")
+
+    print(f"Submitted authenticator code for window offset #{len(tried_codes) + 1}.")
     return code
 
 
@@ -965,7 +990,7 @@ async def wait_for_login(
     verify_proxy: str | None = None,
 ) -> list[dict[str, Any]]:
     deadline = time.monotonic() + timeout_seconds
-    last_totp_code: str | None = None
+    tried_totp_codes: set[str] = set()
     last_status_log = 0.0
     login_resubmits = 0
     last_login_submit = 0.0
@@ -1042,7 +1067,9 @@ async def wait_for_login(
             except Exception:
                 pass
             last_status_log = time.monotonic()
-        last_totp_code = await submit_totp_if_needed(page, totp_secret, last_totp_code)
+        submitted_code = await submit_totp_if_needed(page, totp_secret, tried_totp_codes)
+        if submitted_code is not None:
+            tried_totp_codes.add(submitted_code)
         await click_authentication_app_option(page)
         if await click_cookie_consent_continue(page):
             await asyncio.sleep(2)
