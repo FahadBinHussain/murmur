@@ -1178,10 +1178,40 @@ async def wait_for_login(
             await asyncio.sleep(3)
             continue
         if page.url and "/remember_browser/" in page.url:
-            # On the "Trust this device" page — this is the post-2FA confirmation.
-            # Click the trust button and wait for the AJAX response / redirect.
+            # On the "Trust this device" page.
+            # Instead of clicking UI buttons that may trigger broken JS/AJAX,
+            # submit the form directly via fetch() with credentials='include'
+            # so the browser stores Set-Cookie responses automatically.
             await click_safe_facebook_step(page)
-            # Wait up to 60s for the page to process (AJAX may be slow on HF Space)
+            await asyncio.sleep(1)
+            for scope in page_scopes(page):
+                try:
+                    result = await scope.evaluate("""async () => {
+                        const form = document.querySelector('form');
+                        if (!form) return 'no-form';
+                        const formData = new FormData(form);
+                        // Ensure trust is selected
+                        if (!formData.has('submit')) formData.set('submit', 'Trust this device');
+                        const url = form.action || '/two_factor/remember_browser/';
+                        try {
+                            const resp = await fetch(url, {
+                                method: 'POST',
+                                body: formData,
+                                credentials: 'include',
+                                redirect: 'follow'
+                            });
+                            return 'fetch-status:' + resp.status + ' url:' + resp.url;
+                        } catch(e) {
+                            return 'fetch-error:' + e.message;
+                        }
+                    }""")
+                    print(f"[trust] fetch submit result: {result}")
+                    await asyncio.sleep(3)
+                    break
+                except Exception as e:
+                    print(f"[trust] fetch evaluate failed: {e}")
+                    continue
+            # Wait up to 60s for the page to process
             for waited in range(30):
                 await asyncio.sleep(2)
                 url = (page.url or "").lower()
