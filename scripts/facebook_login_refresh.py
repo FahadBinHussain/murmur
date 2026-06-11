@@ -1348,6 +1348,15 @@ async def main_async() -> int:
                     print("Submitted Facebook login form. Waiting for c_user/xs cookies...")
                 else:
                     print("Could not find the login form automatically. Use the browser manually.")
+                await asyncio.sleep(5)
+                await facebook_page_debug(page)
+                try:
+                    debug_dir = ROOT / "output"
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    await page.screenshot(path=str(debug_dir / "login_after_fill.png"), full_page=True)
+                    print(f"Saved login debug screenshot: {debug_dir / 'login_after_fill.png'}")
+                except Exception as exc:
+                    print(f"Could not save login debug screenshot: {exc}")
                 cookies = await wait_for_login(
                     context,
                     page,
@@ -1478,6 +1487,15 @@ async def main_async() -> int:
                         print("Submitted Facebook login form. Waiting for c_user/xs cookies...")
                     else:
                         print("Could not find the login form automatically. Use the browser manually.")
+                    await asyncio.sleep(5)
+                    await facebook_page_debug(page)
+                    try:
+                        debug_dir = ROOT / "output"
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        await page.screenshot(path=str(debug_dir / "login_after_fill_2.png"), full_page=True)
+                        print(f"Saved login debug screenshot: {debug_dir / 'login_after_fill_2.png'}")
+                    except Exception as exc:
+                        print(f"Could not save login debug screenshot: {exc}")
                     cookies = await wait_for_login(
                         context,
                         page,

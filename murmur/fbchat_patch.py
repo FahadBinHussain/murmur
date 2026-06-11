@@ -373,6 +373,8 @@ async def _login_with_bootstrap_fallback(cls: Any, session: Any, jar: Any, user_
     from fbchat_muqit.utils.stateHelper import get_user_id
 
     logger = get_logger()
+    urls = _bootstrap_urls()
+    logger.info(f"fbchat-patch: bootstrap starting with {len(urls)} URL(s): {urls}")
     try:
         user_id = get_user_id(session)
         logger.debug(f"Extracted user ID: {user_id}")
@@ -489,3 +491,9 @@ def apply_fbchat_patches() -> None:
     muqit.Mqtt._configure_mqtt_options = _configure_mqtt_options
     _configure_http_session_timeout()
     _PATCHED = True
+
+    logger = stateHelper.get_logger() if hasattr(stateHelper, "get_logger") else None
+    if logger:
+        logger.info("fbchat-patch: applied bootstrap, mqtt, and timeout patches.")
+    else:
+        print("fbchat-patch: applied bootstrap, mqtt, and timeout patches.", flush=True)
