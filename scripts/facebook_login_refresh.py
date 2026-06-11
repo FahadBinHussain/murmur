@@ -1048,6 +1048,18 @@ async def submit_totp_if_needed(
         print(f"[totp-overlay] page did not transition within {16+2}s; proceeding anyway.")
 
     print(f"Submitted authenticator code for window offset #{len(tried_codes) + 1}.")
+    # Debug: log full page state after TOTP flow
+    try:
+        await facebook_page_debug(page)
+    except Exception:
+        pass
+    try:
+        ss_path = ROOT / "output" / "facebook_post_totp.png"
+        ss_path.parent.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(ss_path), full_page=True)
+        print(f"Saved post-TOTP screenshot: {ss_path}")
+    except Exception as exc:
+        print(f"Could not save post-TOTP screenshot: {exc}")
     return code
 
 
@@ -1165,7 +1177,22 @@ async def wait_for_login(
             print(f"Resubmitted Facebook login form after redirect ({login_resubmits}/3).")
             await asyncio.sleep(3)
             continue
-        await click_safe_facebook_step(page)
+        if await click_safe_facebook_step(page):
+            # After clicking a safe step (e.g. Trust this device), also try
+            # Continue/OK/Done in case it was a checkbox that needs form submission.
+            await asyncio.sleep(0.5)
+            for fallback_text in ("Continue", "OK", "Done", "Submit"):
+                for scope in page_scopes(page):
+                    sel = f'button:has-text("{fallback_text}"), div[role="button"]:has-text("{fallback_text}"), input[type="submit"][value="{fallback_text}"]'
+                    try:
+                        fb = await scope.locator(sel).first.is_visible(timeout=300)
+                        if fb:
+                            await scope.locator(sel).first.click()
+                            print(f"Clicked fallback step: {fallback_text}")
+                            await asyncio.sleep(1)
+                            break
+                    except Exception:
+                        continue
         # Wait for the Trust-this-device confirmation to take effect
         for waited in range(10):
             await asyncio.sleep(1)
@@ -1178,10 +1205,18 @@ async def wait_for_login(
             if tried_totp_codes:
                 print("Still on auth page after TOTP; navigating to Facebook home to complete login.")
                 try:
-                    await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(3)
+                    await facebook_page_debug(page)
                 except Exception:
                     pass
+                try:
+                    await page.goto("https://www.facebook.com/", wait_until="networkidle", timeout=45000)
+                    await asyncio.sleep(3)
+                except Exception:
+                    try:
+                        await page.goto("https://www.facebook.com/", wait_until="load", timeout=30000)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        pass
             continue
     screenshot_path = ROOT / "output" / "facebook_login_refresh_timeout.png"
     try:
