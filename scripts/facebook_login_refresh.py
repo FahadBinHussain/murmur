@@ -1178,21 +1178,23 @@ async def wait_for_login(
             await asyncio.sleep(3)
             continue
         if await click_safe_facebook_step(page):
-            # After clicking a safe step (e.g. Trust this device), also try
-            # Continue/OK/Done in case it was a checkbox that needs form submission.
+            # After clicking a safe step (e.g. Trust this device), try to
+            # submit the form by clicking any visible submit button.
             await asyncio.sleep(0.5)
-            for fallback_text in ("Continue", "OK", "Done", "Submit"):
-                for scope in page_scopes(page):
-                    sel = f'button:has-text("{fallback_text}"), div[role="button"]:has-text("{fallback_text}"), input[type="submit"][value="{fallback_text}"]'
+            for scope in page_scopes(page):
+                for sel in ('input[type="submit"]', 'button[type="submit"]'):
                     try:
-                        fb = await scope.locator(sel).first.is_visible(timeout=300)
-                        if fb:
-                            await scope.locator(sel).first.click()
-                            print(f"Clicked fallback step: {fallback_text}")
+                        btn = scope.locator(sel).first
+                        if await btn.is_visible(timeout=300):
+                            await btn.click()
+                            print(f"Clicked form submit: {sel}")
                             await asyncio.sleep(1)
                             break
                     except Exception:
                         continue
+                else:
+                    continue
+                break
         # Wait for the Trust-this-device confirmation to take effect
         for waited in range(10):
             await asyncio.sleep(1)
