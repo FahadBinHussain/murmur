@@ -23,3 +23,4 @@ EXPOSE 7860
 
 CMD ["bash", "/app/murmur/scripts/start-hf.sh"]
 # FORCE REBUILD 06/14/2026 23:36:35
+# FORCE REBUILD 2 06/15/2026 05:22:55
