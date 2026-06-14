@@ -22,3 +22,4 @@ COPY scripts ./scripts
 EXPOSE 7860
 
 CMD ["bash", "/app/murmur/scripts/start-hf.sh"]
+# FORCE REBUILD 06/14/2026 23:36:35
