@@ -1238,7 +1238,32 @@ async def wait_for_login(
                     except Exception:
                         pass
             else:
-                print("[trust] trust page did not process within 60s; proceeding with fallback")
+                print("[trust] trust page did not process within 60s; attempting direct trust via bnzai re-submit")
+                # retry bnzai trust action via page.evaluate if we captured one
+                for c in captured:
+                    if c['method'] == 'POST' and '/ajax/bnzai' in c['url']:
+                        try:
+                            await page.evaluate(f"""
+                                (async () => {{
+                                    const r = await fetch({json.dumps(c['url'])}, {{
+                                        method: 'POST',
+                                        credentials: 'include',
+                                        headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                                        body: {json.dumps(c.get('postData') or '')}
+                                    }});
+                                    await r.text();
+                                }})();
+                            """)
+                            await asyncio.sleep(5)
+                            print("[trust] bnzai re-submit done")
+                            break
+                        except Exception as e:
+                            print(f"[trust] bnzai re-submit failed: {e}")
+                # still on trust page - navigate to home
+                try:
+                    await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
         else:
             await click_safe_facebook_step(page)
             # After trust + submit, try verifying cookies without navigation

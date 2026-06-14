@@ -186,13 +186,25 @@ def _bootstrap_retry_delay_seconds() -> float:
 
 
 def _html_markers(html: str) -> str:
+    # careful: "checkpoint" and "/login" appear in JS route tables on every page
+    # only flag if it's an actual checkpoint page we're ON, not route definitions
+    is_checkpoint = (
+        bool(re.search(r'<title>[^<]*checkpoint[^<]*</title>', html, re.I))
+        or bool(re.search(r'<form[^>]*checkpoint', html, re.I))
+        or 'checkpoint_submit' in html
+    )
+    is_login = (
+        bool(re.search(r'<title>[^<]*login[^<]*</title>', html, re.I))
+        or 'id="login_form"' in html
+        or 'action="/login"' in html
+    )
     markers = {
         "dtsg": '"DTSGInitialData"' in html,
         "async": "async_get_token" in html,
         "mqtt": "MqttWebConfig" in html or "edge-chat" in html,
         "region": "region=" in html,
-        "checkpoint": "checkpoint" in html.lower(),
-        "login": "login_form" in html or "/login" in html.lower(),
+        "checkpoint": is_checkpoint,
+        "login": is_login,
     }
     return ", ".join(f"{key}={value}" for key, value in markers.items())
 
