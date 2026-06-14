@@ -331,6 +331,7 @@ def _configure_http_session_timeout() -> None:
             timeout=timeout,
         )
         if proxy_arg:
+            session._murmur_curl_proxy = proxy_arg
             original_request = session._request
 
             async def proxied_request(method, url, **kwargs):
@@ -357,9 +358,28 @@ async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: st
     headers["Origin"] = origin
     headers["Referer"] = str(current_url)
 
-    async with session.get(str(current_url), headers=headers, allow_redirects=False) as response:
-        if 300 <= response.status < 400:
-            location = response.headers.get("Location")
+    from curl_cffi.requests import AsyncSession as CurlSession
+
+    cookie_dict: dict[str, str] = {}
+    if session and hasattr(session, "cookie_jar") and session.cookie_jar:
+        for name, morsel in session.cookie_jar.filter_cookies(current_url).items():
+            cookie_dict[name] = morsel.value
+
+    proxy = getattr(session, "_murmur_curl_proxy", None)
+
+    async with CurlSession(impersonate="chrome") as curl_session:
+        if cookie_dict:
+            curl_session.cookies.update(cookie_dict)
+
+        resp = await curl_session.get(
+            str(current_url),
+            headers=headers,
+            allow_redirects=False,
+            proxies={"http": proxy, "https": proxy} if proxy else None,
+        )
+
+        if 300 <= resp.status_code < 400:
+            location = resp.headers.get("Location")
             if location:
                 redirected_url = URL(location)
                 if not redirected_url.is_absolute():
@@ -367,15 +387,35 @@ async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: st
                 host = str(redirected_url.host or host)
                 origin = f"{redirected_url.scheme}://{host}"
                 headers.update({"Host": host, "Origin": origin, "Referer": str(redirected_url)})
-                response = await session.get(str(redirected_url), headers=headers)
+                resp = await curl_session.get(
+                    str(redirected_url),
+                    headers=headers,
+                    proxies={"http": proxy, "https": proxy} if proxy else None,
+                )
 
-        if response.status != 200:
+        if resp.status_code != 200:
             raise NetworkError(
-                f"Failed to fetch Facebook bootstrap page {url}: HTTP {response.status}",
-                error_code=str(response.status),
+                f"Failed to fetch Facebook bootstrap page {url}: HTTP {resp.status_code}",
+                error_code=str(resp.status_code),
             )
 
-        html = await response.text()
+        html = resp.text
+
+    if session and hasattr(session, "cookie_jar") and session.cookie_jar:
+        from http.cookies import SimpleCookie
+
+        for name, cookie in dict(resp.cookies).items():
+            sc = SimpleCookie()
+            sc[name] = cookie.value
+            domain = cookie.get("domain", "") or f".{host}"
+            path = cookie.get("path", "/")
+            sc[name]["domain"] = domain
+            sc[name]["path"] = path
+            expires = cookie.get("expires")
+            if expires:
+                sc[name]["expires"] = expires
+            session.cookie_jar.update_cookies(sc, URL(f"https://{host}"))
+
     return host, html
 
 
