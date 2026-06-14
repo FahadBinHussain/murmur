@@ -1796,8 +1796,17 @@ class Murmur:
             return ChatCommandResult(response=self.status_message(thread_id))
 
         if subcommand == "models":
+            model_args = rest_parts[1:]
+            if model_args and model_args[0].lower() == "refresh":
+                self.model_options_cache = []
+                self.model_options_cache_at = 0.0
+                fresh = await self.fetch_model_options(include_all=True)
+                count = len(fresh)
+                return ChatCommandResult(
+                    response=f"✅ Model list refreshed: {count} models fetched from {self.gateway_label()}."
+                )
             include_all, free_only, usable_only, provider_filter, page = self.model_list_args(
-                rest_parts[1:]
+                model_args
             )
             return ChatCommandResult(
                 response=await self.model_list_message(
