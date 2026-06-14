@@ -410,3 +410,4 @@ The project keeps most application logic in `murmur/app.py`, the public proxy an
 ## License
 
 Review the licenses for `fbchat-muqit` and any gateway/provider you connect before redistribution.
+# CONFIG ERROR FIX 06/14/2026 23:20:07
