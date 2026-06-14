@@ -1092,50 +1092,19 @@ class Murmur:
             raise
 
     def configure_facebook_http_timeout(self) -> None:
-        timeout_seconds = max(30, self.settings.fb_http_timeout_seconds)
-        timeout = aiohttp.ClientTimeout(
-            total=timeout_seconds,
-            connect=timeout_seconds,
-            sock_connect=timeout_seconds,
-            sock_read=timeout_seconds,
-        )
+        from .fbchat_patch import _make_curl_session
 
         def get_session(cookie_jar=None, proxy=None):
-            proxy_arg = None
-            if proxy:
-                scheme = urlparse(proxy).scheme.lower()
-                if scheme in {"http", "https"}:
-                    proxy_arg = proxy
-                    connector = aiohttp.TCPConnector(
-                        family=socket.AF_INET,
-                        ttl_dns_cache=300,
-                        enable_cleanup_closed=True,
-                    )
-                else:
-                    from aiohttp_socks import ProxyConnector
-
-                    connector = ProxyConnector.from_url(proxy)
-            else:
-                connector = aiohttp.TCPConnector(
-                    family=socket.AF_INET,
-                    ttl_dns_cache=300,
-                    enable_cleanup_closed=True,
-                )
-
-            session = aiohttp.ClientSession(
+            return _make_curl_session(
                 cookie_jar=cookie_jar,
-                connector=connector,
-                timeout=timeout,
+                proxy=proxy,
+                timeout=aiohttp.ClientTimeout(
+                    total=max(30, self.settings.fb_http_timeout_seconds),
+                    connect=max(30, self.settings.fb_http_timeout_seconds),
+                    sock_connect=max(30, self.settings.fb_http_timeout_seconds),
+                    sock_read=max(30, self.settings.fb_http_timeout_seconds),
+                ),
             )
-            if proxy_arg:
-                original_request = session._request
-
-                async def proxied_request(method, url, **kwargs):
-                    kwargs.setdefault("proxy", proxy_arg)
-                    return await original_request(method, url, **kwargs)
-
-                session._request = proxied_request
-            return session
 
         fb_state.get_session = get_session
         fb_state_helper.get_session = get_session

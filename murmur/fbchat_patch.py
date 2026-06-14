@@ -291,12 +291,13 @@ def _facebook_http_timeout_seconds() -> int:
 
 
 def _configure_http_session_timeout() -> None:
-    import aiohttp
     from fbchat_muqit import state as fb_state
     from fbchat_muqit.utils import stateHelper as fb_state_helper
 
     timeout_seconds = _facebook_http_timeout_seconds()
-    timeout = aiohttp.ClientTimeout(
+
+    from aiohttp import ClientTimeout
+    timeout = ClientTimeout(
         total=timeout_seconds,
         connect=timeout_seconds,
         sock_connect=timeout_seconds,
@@ -304,45 +305,247 @@ def _configure_http_session_timeout() -> None:
     )
 
     def get_session(cookie_jar=None, proxy=None):
-        proxy_arg = None
-        if proxy:
-            scheme = urlparse(proxy).scheme.lower()
-            if scheme in {"http", "https"}:
-                proxy_arg = proxy
-                connector = aiohttp.TCPConnector(
-                    family=socket.AF_INET,
-                    ttl_dns_cache=300,
-                    enable_cleanup_closed=True,
-                )
-            else:
-                from aiohttp_socks import ProxyConnector
-
-                connector = ProxyConnector.from_url(proxy)
-        else:
-            connector = aiohttp.TCPConnector(
-                family=socket.AF_INET,
-                ttl_dns_cache=300,
-                enable_cleanup_closed=True,
-            )
-
-        session = aiohttp.ClientSession(
+        return _make_curl_session(
             cookie_jar=cookie_jar,
-            connector=connector,
+            proxy=proxy,
             timeout=timeout,
         )
-        if proxy_arg:
-            session._murmur_curl_proxy = proxy_arg
-            original_request = session._request
-
-            async def proxied_request(method, url, **kwargs):
-                kwargs.setdefault("proxy", proxy_arg)
-                return await original_request(method, url, **kwargs)
-
-            session._request = proxied_request
-        return session
 
     fb_state.get_session = get_session
     fb_state_helper.get_session = get_session
+
+
+class _CurlCompatResponse:
+    __slots__ = ("_resp", "status", "headers", "ok", "url", "cookies")
+
+    def __init__(self, response):
+        self._resp = response
+        self.status = response.status_code
+        self.headers = response.headers
+        self.ok = response.ok
+        self.url = response.url
+        self.cookies = response.cookies
+
+    async def text(self, encoding=None):
+        t = self._resp.text
+        if encoding and encoding.lower() not in ("utf-8", "utf8"):
+            return t.encode("utf-8").decode(encoding)
+        return t
+
+    async def json(self, content_type=None):
+        return self._resp.json()
+
+    async def read(self):
+        return self._resp.content
+
+    def raise_for_status(self):
+        if not self.ok:
+            from aiohttp import ClientResponseError
+            raise ClientResponseError(
+                self.url, self.status, headers=self.headers,
+            )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+class _CurlCompatSession:
+    def __init__(self, cookie_jar=None, connector=None, timeout=None, headers=None, proxy=None):
+        from curl_cffi.requests import AsyncSession as CurlSession
+
+        self.closed = False
+        self._cookie_jar = cookie_jar
+        self._timeout = timeout
+
+        curl_kwargs = {"impersonate": "chrome"}
+        if timeout and hasattr(timeout, "total"):
+            curl_kwargs["timeout"] = timeout.total
+
+        self._proxy = proxy
+        if not self._proxy and connector:
+            proxy_url = getattr(connector, "_proxy_url", None)
+            if proxy_url is not None:
+                self._proxy = str(proxy_url)
+
+        self._session = CurlSession(**curl_kwargs)
+
+        if cookie_jar:
+            from yarl import URL as _URL
+            for domain in (
+                "https://www.facebook.com",
+                "https://www.messenger.com",
+                "https://m.facebook.com",
+            ):
+                for name, morsel in cookie_jar.filter_cookies(_URL(domain)).items():
+                    self._session.cookies.set(name, morsel.value, domain=domain)
+
+    @property
+    def cookie_jar(self):
+        return self._cookie_jar
+
+    @cookie_jar.setter
+    def cookie_jar(self, value):
+        self._cookie_jar = value
+
+    async def get(self, url, **kwargs):
+        return await self._do_request("GET", url, **kwargs)
+
+    async def post(self, url, **kwargs):
+        return await self._do_request("POST", url, **kwargs)
+
+    async def options(self, url, **kwargs):
+        return await self._do_request("OPTIONS", url, **kwargs)
+
+    def _sync_jar_to_session(self):
+        if not self._cookie_jar:
+            return
+        from yarl import URL as _URL
+        for domain in (
+            "https://www.facebook.com",
+            "https://www.messenger.com",
+            "https://m.facebook.com",
+        ):
+            for name, morsel in self._cookie_jar.filter_cookies(_URL(domain)).items():
+                self._session.cookies.set(name, morsel.value, domain=f".{_URL(domain).host}")
+
+    async def _do_request(self, method, url, **kwargs):
+        proxy = kwargs.pop("proxy", None) or self._proxy
+        allow_redirects = kwargs.pop("allow_redirects", True)
+        data = kwargs.pop("data", None)
+        params = kwargs.pop("params", None)
+        headers = kwargs.pop("headers", None)
+
+        self._sync_jar_to_session()
+
+        curl_kwargs = {}
+        if headers:
+            curl_kwargs["headers"] = headers
+        if params:
+            curl_kwargs["params"] = params
+        curl_kwargs["allow_redirects"] = allow_redirects
+        if proxy:
+            curl_kwargs["proxies"] = {"http": proxy, "https": proxy}
+
+        if data is not None:
+            form_data, files_data = self._convert_and_split_data(data)
+            if form_data is not None:
+                curl_kwargs["data"] = form_data
+            if files_data is not None:
+                curl_kwargs["files"] = files_data
+
+        resp = await self._session.request(method, url, **curl_kwargs)
+        self._sync_cookies(resp, url)
+        return _CurlCompatResponse(resp)
+
+    def _convert_and_split_data(self, data):
+        if isinstance(data, bytes):
+            return data, None
+        if isinstance(data, str):
+            return data, None
+        if isinstance(data, dict):
+            files = {k: v for k, v in data.items() if isinstance(v, tuple) and len(v) >= 2}
+            form = {k: v for k, v in data.items() if k not in files}
+            return form or None, files or None
+
+        if hasattr(data, "_fields"):
+            form: dict[str, str] = {}
+            files: dict[str, tuple] = {}
+            for field in data._fields:
+                name = field[0]
+                val = field[1]
+                if hasattr(val, "value") and hasattr(val, "filename") and val.filename:
+                    files[name] = (val.filename, val.value, val.content_type)
+                elif hasattr(val, "value"):
+                    v = val.value
+                    form[name] = v if isinstance(v, str) else str(v)
+                else:
+                    form[name] = val if isinstance(val, str) else str(val)
+            return form or None, files or None
+
+        if hasattr(data, "__iter__"):
+            try:
+                d = dict(data)
+                return d if d else None, None
+            except (TypeError, ValueError):
+                pass
+
+        return data, None
+
+    def _sync_cookies(self, response, url):
+        if not self._cookie_jar or not hasattr(response, "cookies") or not response.cookies:
+            return
+
+        from http.cookies import SimpleCookie
+        from yarl import URL
+
+        parsed = URL(str(url)) if isinstance(url, str) else url
+        host = parsed.host or "www.facebook.com"
+
+        has_domain = False
+        for name, cookie in response.cookies.items():
+            if not isinstance(cookie, str) and hasattr(cookie, "get"):
+                has_domain = True
+            break
+
+        for name, cookie in response.cookies.items():
+            if isinstance(cookie, str) or not hasattr(cookie, "value"):
+                val = str(cookie)
+                sc = SimpleCookie()
+                sc[name] = val
+                sc[name]["domain"] = f".{host}"
+                sc[name]["path"] = "/"
+                self._cookie_jar.update_cookies(sc, URL(f"https://{host}"))
+            else:
+                sc = SimpleCookie()
+                sc[name] = str(cookie.value)
+                domain = cookie.get("domain", "") if hasattr(cookie, "get") else ""
+                path = cookie.get("path", "/") if hasattr(cookie, "get") else "/"
+                sc[name]["domain"] = domain or f".{host}"
+                sc[name]["path"] = path
+                if hasattr(cookie, "get") and cookie.get("expires"):
+                    sc[name]["expires"] = cookie["expires"]
+                self._cookie_jar.update_cookies(sc, URL(f"https://{host}"))
+
+    async def close(self):
+        if not self.closed:
+            await self._session.close()
+            self.closed = True
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+
+def _make_curl_session(
+    cookie_jar=None, proxy=None, timeout=None,
+) -> _CurlCompatSession:
+    if proxy:
+        from urllib.parse import urlparse as parse_url
+        scheme = parse_url(proxy).scheme.lower()
+        if scheme in ("http", "https"):
+            connector = None
+        else:
+            from aiohttp_socks import ProxyConnector
+            connector = ProxyConnector.from_url(proxy)
+            return _CurlCompatSession(
+                cookie_jar=cookie_jar,
+                connector=connector,
+                timeout=timeout,
+            )
+    else:
+        connector = None
+
+    return _CurlCompatSession(
+        cookie_jar=cookie_jar,
+        connector=connector,
+        timeout=timeout,
+        proxy=proxy,
+    )
 
 
 async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: str | None) -> tuple[str, str]:
@@ -358,16 +561,17 @@ async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: st
     headers["Origin"] = origin
     headers["Referer"] = str(current_url)
 
-    from curl_cffi.requests import AsyncSession as CurlSession
-
     cookie_dict: dict[str, str] = {}
     if session and hasattr(session, "cookie_jar") and session.cookie_jar:
         for name, morsel in session.cookie_jar.filter_cookies(current_url).items():
             cookie_dict[name] = morsel.value
 
-    proxy = getattr(session, "_murmur_curl_proxy", None)
+    proxy = getattr(session, "_murmur_curl_proxy", None) or getattr(session, "_proxy", None)
+    timeout = getattr(session, "_murmur_curl_timeout", None)
 
-    async with CurlSession(impersonate="chrome") as curl_session:
+    from curl_cffi.requests import AsyncSession as CurlSession
+
+    async with CurlSession(impersonate="chrome", timeout=timeout or 120) as curl_session:
         if cookie_dict:
             curl_session.cookies.update(cookie_dict)
 
@@ -405,13 +609,17 @@ async def _fetch_bootstrap_html(cls: Any, session: Any, url: str, user_agent: st
         from http.cookies import SimpleCookie
 
         for name, cookie in dict(resp.cookies).items():
+            try:
+                val = cookie.value
+            except AttributeError:
+                val = str(cookie)
             sc = SimpleCookie()
-            sc[name] = cookie.value
-            domain = cookie.get("domain", "") or f".{host}"
-            path = cookie.get("path", "/")
-            sc[name]["domain"] = domain
+            sc[name] = val
+            domain = cookie.get("domain", "") if hasattr(cookie, "get") else ""
+            path = cookie.get("path", "/") if hasattr(cookie, "get") else "/"
+            sc[name]["domain"] = domain or f".{host}"
             sc[name]["path"] = path
-            expires = cookie.get("expires")
+            expires = cookie.get("expires") if hasattr(cookie, "get") else None
             if expires:
                 sc[name]["expires"] = expires
             session.cookie_jar.update_cookies(sc, URL(f"https://{host}"))
