@@ -315,6 +315,24 @@ def _configure_http_session_timeout() -> None:
     fb_state_helper.get_session = get_session
 
 
+class _CurlRequestContextManager:
+    __slots__ = ("_session", "_method", "_url", "_kwargs", "_response")
+
+    def __init__(self, session, method, url, **kwargs):
+        self._session = session
+        self._method = method
+        self._url = url
+        self._kwargs = kwargs
+        self._response = None
+
+    async def __aenter__(self):
+        self._response = await self._session._do_request(self._method, self._url, **self._kwargs)
+        return self._response
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
 class _CurlCompatResponse:
     __slots__ = ("_resp", "status", "headers", "ok", "url", "cookies")
 
@@ -344,12 +362,6 @@ class _CurlCompatResponse:
             raise ClientResponseError(
                 self.url, self.status, headers=self.headers,
             )
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
 
 
 class _CurlCompatSession:
@@ -390,14 +402,14 @@ class _CurlCompatSession:
     def cookie_jar(self, value):
         self._cookie_jar = value
 
-    async def get(self, url, **kwargs):
-        return await self._do_request("GET", url, **kwargs)
+    def get(self, url, **kwargs):
+        return _CurlRequestContextManager(self, "GET", url, **kwargs)
 
-    async def post(self, url, **kwargs):
-        return await self._do_request("POST", url, **kwargs)
+    def post(self, url, **kwargs):
+        return _CurlRequestContextManager(self, "POST", url, **kwargs)
 
-    async def options(self, url, **kwargs):
-        return await self._do_request("OPTIONS", url, **kwargs)
+    def options(self, url, **kwargs):
+        return _CurlRequestContextManager(self, "OPTIONS", url, **kwargs)
 
     def _sync_jar_to_session(self):
         if not self._cookie_jar:
