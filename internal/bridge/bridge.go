@@ -284,8 +284,6 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	select {
 	case <-sigCh:
 		log.Info().Msg("Signal received, shutting down")
-	case <-stdinDone:
-		log.Info().Msg("Stdin closed, shutting down")
 	case <-ctx.Done():
 		log.Info().Msg("Context cancelled, shutting down")
 	}
