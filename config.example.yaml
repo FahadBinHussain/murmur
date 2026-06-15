@@ -1,0 +1,7 @@
+# murmur config example
+# Environment variables override these values
+# MURMUR_COOKIES, MURMUR_PLATFORM, MURMUR_LOG_LEVEL
+
+cookies_path: "~/.config/murmur/cookies.json"
+platform: "messenger"  # messenger | facebook | messenger-lite
+log_level: "info"      # debug | info | warn | error
