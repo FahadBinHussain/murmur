@@ -14,9 +14,12 @@ const (
 )
 
 type Config struct {
-	CookiesPath string
-	Platform    Platform
-	LogLevel    string
+	CookiesPath  string
+	Platform     Platform
+	LogLevel     string
+	LiteLLMBase  string
+	DefaultChat  string
+	DefaultImage string
 }
 
 func Load() *Config {
@@ -38,6 +41,16 @@ func Load() *Config {
 	if cfg.CookiesPath == "" {
 		home, _ := os.UserHomeDir()
 		cfg.CookiesPath = home + "/.config/murmur/cookies.json"
+	}
+
+	if v := os.Getenv("LITELLM_BASE"); v != "" {
+		cfg.LiteLLMBase = v
+	}
+	if v := os.Getenv("DEFAULT_CHAT"); v != "" {
+		cfg.DefaultChat = v
+	}
+	if v := os.Getenv("DEFAULT_IMAGE"); v != "" {
+		cfg.DefaultImage = v
 	}
 
 	return cfg

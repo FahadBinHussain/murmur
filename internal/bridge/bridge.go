@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/user/murmur/internal/ai"
 	"github.com/user/murmur/internal/config"
 	"github.com/user/murmur/internal/cookies"
 
@@ -67,8 +68,10 @@ type ReadyData struct {
 type Bridge struct {
 	cfg    *config.Config
 	client *messagix.Client
+	ai     *ai.Client
 	logger zerolog.Logger
 	cancel context.CancelFunc
+	uid    int64
 }
 
 func writeEvent(w io.Writer, evt OutgoingEvent) {
@@ -115,6 +118,7 @@ func New(cfg *config.Config) *Bridge {
 	return &Bridge{
 		cfg:    cfg,
 		client: client,
+		ai:     ai.NewClient(cfg.LiteLLMBase, cfg.DefaultChat, cfg.DefaultImage),
 		logger: logger,
 	}
 }
@@ -124,6 +128,8 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	b.cancel = cancel
 	defer cancel()
 
+	startTime := time.Now()
+
 	writeEvent(stdout, OutgoingEvent{Type: "log", Data: "Loading messages page..."})
 
 	userInfo, _, err := b.client.LoadMessagesPage(ctx)
@@ -131,13 +137,13 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		log.Fatal().Err(err).Msg("Failed to load messages page")
 	}
 
-	userID := userInfo.GetFBID()
+	b.uid = userInfo.GetFBID()
 	userName := userInfo.GetName()
-	log.Info().Int64("uid", userID).Str("name", userName).Msg("Logged in")
+	log.Info().Int64("uid", b.uid).Str("name", userName).Msg("Logged in")
 
 	writeEvent(stdout, OutgoingEvent{
 		Type: "ready",
-		Data: ReadyData{UID: userID, Name: userName},
+		Data: ReadyData{UID: b.uid, Name: userName},
 	})
 
 	writeEvent(stdout, OutgoingEvent{Type: "log", Data: "Connecting to MQTT..."})
@@ -152,7 +158,68 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 			if e.Table == nil {
 				return
 			}
-			b.handlePublishResponse(ctx, stdout, e.Table)
+			upsertMessages, insertMessages := e.Table.WrapMessages()
+
+			for _, msg := range insertMessages {
+				if msg == nil || msg.LSInsertMessage == nil {
+					continue
+				}
+				if msg.IsUnsent {
+					continue
+				}
+				evt := MessageEventData{
+					MessageID: msg.MessageId,
+					ThreadID:  msg.ThreadKey,
+					SenderID:  msg.SenderId,
+					Text:      msg.Text,
+					Timestamp: msg.TimestampMs,
+					IsUnsent:  msg.IsUnsent,
+				}
+				writeEvent(stdout, OutgoingEvent{Type: "message", Data: evt})
+
+				if msg.SenderId != b.uid {
+					ts := time.UnixMilli(msg.TimestampMs)
+					if ts.Before(startTime.Add(-5 * time.Second)) {
+						continue
+					}
+					if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
+						reply := b.ai.HandleCommand(msg.Text)
+						b.sendMessage(ctx, msg.ThreadKey, reply)
+					}
+				}
+				_ = upsertMessages
+			}
+
+			for threadID, upsert := range upsertMessages {
+				for _, msg := range upsert.Messages {
+					if msg == nil || msg.LSInsertMessage == nil {
+						continue
+					}
+					if msg.IsUnsent {
+						continue
+					}
+					evt := MessageEventData{
+						MessageID: msg.MessageId,
+						ThreadID:  threadID,
+						SenderID:  msg.SenderId,
+						Text:      msg.Text,
+						Timestamp: msg.TimestampMs,
+						IsUnsent:  msg.IsUnsent,
+					}
+					writeEvent(stdout, OutgoingEvent{Type: "message", Data: evt})
+
+					if msg.SenderId != b.uid {
+						ts := time.UnixMilli(msg.TimestampMs)
+						if ts.Before(startTime.Add(-5 * time.Second)) {
+							continue
+						}
+						if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
+							reply := b.ai.HandleCommand(msg.Text)
+							b.sendMessage(ctx, threadID, reply)
+						}
+					}
+				}
+			}
 
 		case *messagix.Event_SocketError:
 			log.Error().Err(e.Err).Int("attempts", e.ConnectionAttempts).Msg("Socket error")
@@ -228,12 +295,22 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	time.Sleep(500 * time.Millisecond)
 }
 
-func (b *Bridge) handlePublishResponse(ctx context.Context, stdout io.Writer, tbl interface{}) {
-	// Use type assertion for the actual table type from mautrix-meta
-	type messageWrapper interface {
-		WrapMessages() ([]*struct{}, map[int64]*struct{})
+func (b *Bridge) sendMessage(ctx context.Context, threadID int64, text string) {
+	otid := time.Now().UnixMilli()
+	_, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
+		ThreadId:          threadID,
+		Otid:              otid,
+		Source:            table.MESSENGER_INBOX_IN_THREAD,
+		SendType:          table.TEXT,
+		Text:              text,
+		SyncGroup:         1,
+		InitiatingSource:  table.FACEBOOK_INBOX,
+		SkipUrlPreviewGen: 1,
+		MultiTabEnv:       0,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to send AI reply")
 	}
-	// Placeholder - actual implementation depends on mautrix-meta table type
 }
 
 func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd IncomingCommand) {

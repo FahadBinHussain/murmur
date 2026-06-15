@@ -9,11 +9,13 @@
 #>
 param(
     [string]$CookiesPath = "$PSScriptRoot\..\cookies_map.json",
-    [string]$Platform = "messenger"
+    [string]$Platform = "messenger",
+    [string]$LiteLLMBase = "https://alchoholpad-litellm-huggingface-template.hf.space/v1"
 )
 
 $env:MURMUR_COOKIES = $CookiesPath
 $env:MURMUR_PLATFORM = $Platform
+$env:LITELLM_BASE = $LiteLLMBase
 $env:NO_COLOR = "1"
 
 $bridge = "$PSScriptRoot\..\bin\murmur-bridge.exe"
