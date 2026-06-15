@@ -11,6 +11,9 @@ dist/
 build/
 *.whl
 
+# Go / compiled binaries
+*.exe
+
 # Testing & Caching
 .pytest_cache/
 .ruff_cache/
@@ -50,6 +53,7 @@ messenger-cookies.json
 # Logs
 *.log
 logs/
+wrapper-stderr.log
 
 # Browser profile data
 .murmur-facebook-profile/
@@ -71,3 +75,11 @@ output/
 # OS files
 Thumbs.db
 desktop.ini
+messenger-state.json
+fresh-messenger-state.json
+bridge-commands.jsonl
+bridge-input.jsonl
+.gitignore
+bridge-stderr.txt
+bridge-stdout.txt
+bridge-input2.jsonl
