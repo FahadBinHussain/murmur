@@ -21,6 +21,9 @@ import fbchat_muqit.utils.stateHelper as fb_state_helper
 from dotenv import load_dotenv
 from fbchat_muqit import Client, EventType, Message
 
+from .fbchat_v2_client import Client as FBV2Client, is_fbchat_v2
+from .fca_client import Client as FCAClient, is_fca_unofficial
+
 from .bnp_notifications import BnpNotificationWorker
 from .automation_notifications import AutomationNotificationWorker
 from .fbchat_patch import apply_fbchat_patches
@@ -153,6 +156,7 @@ class Settings:
     thread_registry_path: str
     thread_allowlist_path: str
     system_prompt: str
+    messenger_backend: str
 
 
 @dataclass(frozen=True)
@@ -437,6 +441,7 @@ def load_settings() -> Settings:
             "You are a helpful AI assistant replying inside a Messenger group chat. "
             "Be concise unless the user asks for detail.",
         ),
+        messenger_backend=os.getenv("MURMUR_MESSENGER_BACKEND", "fbchat_muqit").strip().lower(),
     )
 
 
@@ -494,14 +499,29 @@ class Murmur:
         self.thread_allowlist_ids: set[str] = set(settings.allowed_thread_ids)
         self.load_thread_model_selections()
         self.load_facebook_name_cache()
-        self.configure_facebook_http_timeout()
-        self.configure_mqtt()
-        self.client = Client(
-            cookies_file_path=settings.fb_cookies_path,
-            userAgent=settings.fb_user_agent,
-            proxy=settings.fb_proxy,
-        )
-        self.patch_facebook_event_logs()
+
+        if is_fbchat_v2():
+            self.client = FBV2Client(
+                cookies_file_path=settings.fb_cookies_path,
+                userAgent=settings.fb_user_agent,
+                proxy=settings.fb_proxy,
+            )
+        elif is_fca_unofficial():
+            self.client = FCAClient(
+                cookies_file_path=settings.fb_cookies_path,
+                userAgent=settings.fb_user_agent,
+                proxy=settings.fb_proxy,
+            )
+        else:
+            self.configure_facebook_http_timeout()
+            self.configure_mqtt()
+            self.client = Client(
+                cookies_file_path=settings.fb_cookies_path,
+                userAgent=settings.fb_user_agent,
+                proxy=settings.fb_proxy,
+            )
+            self.patch_facebook_event_logs()
+
         self.client.event(EventType.LISTENING)(self.on_listening)
         self.client.event(EventType.MESSAGE)(self.on_message)
         self.bnp_notification_worker = BnpNotificationWorker(self.client)
@@ -1068,7 +1088,8 @@ class Murmur:
                 await self.warmup_gateway()
             except Exception as exc:
                 print(f"{self.gateway_label()} warmup failed: {exc}")
-        self.client._initial_state = await self.preflight_facebook_cookie_login()
+        if not is_fbchat_v2() and not is_fca_unofficial():
+            self.client._initial_state = await self.preflight_facebook_cookie_login()
         await self.client._runner()
 
     async def preflight_facebook_cookie_login(self):
@@ -1294,6 +1315,8 @@ class Murmur:
             )
 
     async def watch_mqtt_listener(self) -> None:
+        if is_fbchat_v2() or is_fca_unofficial():
+            return
         await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)
         while True:
             await asyncio.sleep(self.settings.fb_mqtt_watchdog_seconds)

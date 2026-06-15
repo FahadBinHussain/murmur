@@ -411,6 +411,15 @@ class _CurlCompatSession:
     def options(self, url, **kwargs):
         return _CurlRequestContextManager(self, "OPTIONS", url, **kwargs)
 
+    async def ws_connect(self, url, *, headers=None, heartbeat=None, autoping=True, **kwargs):
+        import aiohttp
+        jar = self._cookie_jar
+        if jar is None:
+            jar = aiohttp.CookieJar()
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(cookie_jar=jar, connector=connector) as sess:
+            return await sess.ws_connect(url, headers=headers, heartbeat=heartbeat, autoping=autoping, **kwargs)
+
     def _sync_jar_to_session(self):
         if not self._cookie_jar:
             return
@@ -748,6 +757,29 @@ async def _login_with_bootstrap_fallback(cls: Any, session: Any, jar: Any, user_
         ) from exc
 
 
+def _patch_mqtt_connect() -> None:
+    """Wrap Mqtt.connect to skip tls_set() when TLS context is already configured.
+
+    configure_mqtt() in app.py passes tls_context to aiomqtt.Client, which
+    calls tls_set_context() on the paho client. Mqtt.connect then calls
+    tls_set() again, which raises ValueError because _ssl_context is already
+    set. This wrapper detects that case and skips the redundant call.
+    """
+    from fbchat_muqit.muqit import Mqtt
+    import paho.mqtt.client as paho
+
+    _original_connect = Mqtt.connect.__func__
+
+    _original_tls_set = paho.Client.tls_set
+
+    def _patched_tls_set(self, *args, **kwargs):
+        if self._ssl_context is not None:
+            return
+        return _original_tls_set(self, *args, **kwargs)
+
+    paho.Client.tls_set = _patched_tls_set
+
+
 def apply_fbchat_patches() -> None:
     global _PATCHED
     if _PATCHED:
@@ -762,6 +794,7 @@ def apply_fbchat_patches() -> None:
     state.State.login = classmethod(_login_with_bootstrap_fallback)
     muqit.Mqtt._configure_mqtt_options = _configure_mqtt_options
     _configure_http_session_timeout()
+    _patch_mqtt_connect()
     _PATCHED = True
 
     logger = stateHelper.get_logger() if hasattr(stateHelper, "get_logger") else None
