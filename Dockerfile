@@ -1,15 +1,8 @@
-FROM golang:1.22 AS builder
-WORKDIR /build
-RUN go mod init bridge && \
-    go mod edit -require go.mau.fi/mautrix-meta@v0.0.0-20260612210338-d7d8128567b5 && \
-    go mod tidy
-COPY bridge/main.go .
-RUN go build -o /messenger-bridge .
-
 FROM python:3.12-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /messenger-bridge .
+COPY messenger-bridge-linux.part.* /app/
+RUN cat /app/messenger-bridge-linux.part.* > /app/messenger-bridge && rm /app/messenger-bridge-linux.part.* && chmod +x /app/messenger-bridge
 COPY ai-bridge-wrapper.py .
 COPY start.sh .
 RUN chmod +x start.sh
