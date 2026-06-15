@@ -495,7 +495,7 @@ class Murmur:
         self.load_thread_model_selections()
         self.load_facebook_name_cache()
         self.configure_facebook_http_timeout()
-        self.configure_mqtt_proxy()
+        self.configure_mqtt()
         self.client = Client(
             cookies_file_path=settings.fb_cookies_path,
             userAgent=settings.fb_user_agent,
@@ -1190,34 +1190,42 @@ class Murmur:
                 except Exception as exc:
                     print(f"{self.gateway_label()} chat warmup failed: {exc}")
 
-    def configure_mqtt_proxy(self) -> None:
-        if not self.settings.fb_mqtt_proxy:
-            return
+    def configure_mqtt(self) -> None:
+        import ssl
+        import fbchat_muqit.muqit as muqit
 
+        proxy_args: dict | None = None
+        if self.settings.fb_mqtt_proxy:
+            try:
+                import socks
+                proxy_args = self.mqtt_proxy_args(self.settings.fb_mqtt_proxy, socks)
+            except ImportError as exc:
+                print(f"MQTT proxy requested but proxy support is unavailable: {exc}")
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
         try:
-            import socks
-            import fbchat_muqit.muqit as muqit
-        except ImportError as exc:
-            print(f"MQTT proxy requested but proxy support is unavailable: {exc}")
-            return
-
-        proxy_args = self.mqtt_proxy_args(self.settings.fb_mqtt_proxy, socks)
-        if proxy_args is None:
-            print("MQTT proxy requested but FB_MQTT_PROXY/FB_PROXY is invalid.")
-            return
+            ctx.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
+        except AttributeError:
+            pass
 
         original_client = muqit.aiomqtt.Client
-        if getattr(original_client, "_murmur_proxy_wrapped", False):
+        wrapped_attr = "_murmur_mqtt_wrapped"
+        if getattr(original_client, wrapped_attr, False):
             return
 
-        def proxied_client(*args, **kwargs):
+        def mqtt_client(*args, **kwargs):
+            kwargs.setdefault("tls_context", ctx)
+            kwargs.setdefault("tls_insecure", True)
             client = original_client(*args, **kwargs)
-            client._client.proxy_set(**proxy_args)
+            if proxy_args:
+                client._client.proxy_set(**proxy_args)
             return client
 
-        proxied_client._murmur_proxy_wrapped = True
-        muqit.aiomqtt.Client = proxied_client
-        print("Configured Messenger MQTT proxy.")
+        mqtt_client._murmur_mqtt_wrapped = True
+        muqit.aiomqtt.Client = mqtt_client
+        print(f"Configured MQTT client (proxy={'yes' if proxy_args else 'no'}, ssl=relaxed).")
 
     def mqtt_proxy_args(self, proxy_url: str, socks_module) -> dict | None:
         parsed = urlparse(proxy_url)
