@@ -98,6 +98,7 @@ func (c *Client) request(method, path string, body interface{}) (map[string]inte
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
