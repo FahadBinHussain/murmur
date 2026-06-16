@@ -480,8 +480,25 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	if strings.HasPrefix(lower, "/ai image ") {
 		prompt := strings.TrimSpace(text[len("/ai image "):])
 		imgModel := b.threadImgModels[threadID]
-		b.sendMessage(ctx, threadID, "[thinking...]")
+		msgID := b.sendMessage(ctx, threadID, "thinking.")
+		stop := make(chan struct{})
+		go func() {
+			dots := []string{"thinking.", "thinking..", "thinking..."}
+			i := 0
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(500 * time.Millisecond):
+					i = (i + 1) % len(dots)
+					if msgID != "" {
+						b.editMessage(ctx, msgID, dots[i])
+					}
+				}
+			}
+		}()
 		imageData, mimeType, err := b.ai.ImageRawWithModel(prompt, imgModel)
+		close(stop)
 		if err != nil {
 			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
 			return
@@ -501,8 +518,25 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	}
 
 	model := b.threadModels[threadID]
-	msgID := b.sendMessage(ctx, threadID, "[thinking...]")
+	msgID := b.sendMessage(ctx, threadID, "thinking.")
+	stop := make(chan struct{})
+	go func() {
+		dots := []string{"thinking.", "thinking..", "thinking..."}
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(500 * time.Millisecond):
+				i = (i + 1) % len(dots)
+				if msgID != "" {
+					b.editMessage(ctx, msgID, dots[i])
+				}
+			}
+		}
+	}()
 	resp, err := b.ai.ChatWithModel(prompt, model)
+	close(stop)
 	if err != nil {
 		b.sendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
 		return
