@@ -592,6 +592,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 
 	model := b.threadModels[threadID]
 	msgID := b.sendMessage(ctx, threadID, "thinking.")
+	log.Info().Str("prompt", prompt).Str("model", model).Msg("Chat request")
 	stop := make(chan struct{})
 	go func() {
 		dots := []string{"thinking.", "thinking..", "thinking..."}
@@ -611,9 +612,11 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	resp, err := b.ai.ChatWithModel(prompt, model)
 	close(stop)
 	if err != nil {
+		log.Error().Err(err).Msg("Chat error")
 		b.sendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
 		return
 	}
+	log.Info().Str("resp", resp[:min(50, len(resp))]).Msg("Chat response")
 	finalModel := model
 	if finalModel == "" {
 		finalModel = b.ai.DefaultChat
