@@ -213,7 +213,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 					if ts.Before(startTime.Add(-5 * time.Second)) {
 						continue
 					}
-					if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
+					if b.shouldRespond(msg.LSInsertMessage) {
 						b.handleAICommand(ctx, msg.ThreadKey, msg.Text)
 					}
 				}
@@ -243,7 +243,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 						if ts.Before(startTime.Add(-5 * time.Second)) {
 							continue
 						}
-						if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
+						if b.shouldRespond(msg.LSInsertMessage) {
 							b.handleAICommand(ctx, threadID, msg.Text)
 						}
 					}
@@ -399,6 +399,25 @@ func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send image message")
 	}
+}
+
+func (b *Bridge) shouldRespond(msg *table.LSInsertMessage) bool {
+	text := strings.TrimSpace(msg.Text)
+	if strings.HasPrefix(text, "/ai") {
+		return true
+	}
+	if msg.ReplySourceId != "" && msg.ReplyToUserId == b.uid {
+		return true
+	}
+	if msg.MentionIds != "" {
+		for _, idStr := range strings.Split(msg.MentionIds, ",") {
+			idStr = strings.TrimSpace(idStr)
+			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil && id == b.uid {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text string) {
