@@ -214,7 +214,15 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 						continue
 					}
 					if b.shouldRespond(msg.LSInsertMessage) {
-						b.handleAICommand(ctx, msg.ThreadKey, msg.Text)
+						text := msg.Text
+						if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
+							b.handleAICommand(ctx, msg.ThreadKey, text)
+						} else {
+							cleaned := b.cleanPrompt(text, msg.LSInsertMessage)
+							if cleaned != "" {
+								b.handleAICommand(ctx, msg.ThreadKey, "/ai "+cleaned)
+							}
+						}
 					}
 				}
 				_ = upsertMessages
@@ -244,7 +252,15 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 							continue
 						}
 						if b.shouldRespond(msg.LSInsertMessage) {
-							b.handleAICommand(ctx, threadID, msg.Text)
+							text := msg.Text
+							if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
+								b.handleAICommand(ctx, threadID, text)
+							} else {
+								cleaned := b.cleanPrompt(text, msg.LSInsertMessage)
+								if cleaned != "" {
+									b.handleAICommand(ctx, threadID, "/ai "+cleaned)
+								}
+							}
 						}
 					}
 				}
@@ -418,6 +434,46 @@ func (b *Bridge) shouldRespond(msg *table.LSInsertMessage) bool {
 		}
 	}
 	return false
+}
+
+func (b *Bridge) cleanPrompt(text string, msg *table.LSInsertMessage) string {
+	if msg.MentionIds == "" || msg.MentionOffsets == "" || msg.MentionLengths == "" {
+		return text
+	}
+	ids := strings.Split(msg.MentionIds, ",")
+	offsets := strings.Split(msg.MentionOffsets, ",")
+	lengths := strings.Split(msg.MentionLengths, ",")
+	runes := []rune(text)
+	var toRemove [][2]int
+	for i, idStr := range ids {
+		idStr = strings.TrimSpace(idStr)
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id != b.uid {
+			continue
+		}
+		if i >= len(offsets) || i >= len(lengths) {
+			continue
+		}
+		off, err := strconv.Atoi(strings.TrimSpace(offsets[i]))
+		if err != nil {
+			continue
+		}
+		ln, err := strconv.Atoi(strings.TrimSpace(lengths[i]))
+		if err != nil {
+			continue
+		}
+		toRemove = append(toRemove, [2]int{off, off + ln})
+	}
+	if len(toRemove) == 0 {
+		return text
+	}
+	for i := len(toRemove) - 1; i >= 0; i-- {
+		start, end := toRemove[i][0], toRemove[i][1]
+		if start >= 0 && end <= len(runes) {
+			runes = append(runes[:start], runes[end:]...)
+		}
+	}
+	return strings.TrimSpace(string(runes))
 }
 
 func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text string) {
