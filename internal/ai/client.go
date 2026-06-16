@@ -105,9 +105,14 @@ func (c *Client) request(method, path string, body interface{}) (map[string]inte
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP %d: read error: %w", resp.StatusCode, err)
+	}
+
 	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("HTTP %d: decode error", resp.StatusCode)
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("HTTP %d: decode error (body: %.200s)", resp.StatusCode, string(respBody))
 	}
 	return result, nil
 }
@@ -179,7 +184,10 @@ func (c *Client) ImageRawWithModel(prompt string, model string) ([]byte, string,
 			}
 		}
 	}
-	return nil, "", fmt.Errorf("no image data in response")
+	if url, ok := result["url"].(string); ok && url != "" {
+		return nil, url, nil
+	}
+	return nil, "", fmt.Errorf("no image data in response: %v", result)
 }
 
 func (c *Client) Image(prompt string) (string, error) {
