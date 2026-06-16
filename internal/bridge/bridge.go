@@ -425,31 +425,29 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	if strings.HasPrefix(lower, "/ai image models full") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 4)
-		text, models := b.ai.ListImageModelsWithList(page)
-		b.pendingImgModels[threadID] = models
-		b.sendMessage(ctx, threadID, text)
+		b.pendingImgModels[threadID] = b.ai.AllImageModels()
+		b.sendMessage(ctx, threadID, b.ai.ListImageModels(page))
 		return
 	}
 	if strings.HasPrefix(lower, "/ai image models") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 3)
-		text, models := b.ai.ListImageModelsWithList(page)
-		b.pendingImgModels[threadID] = models
-		b.sendMessage(ctx, threadID, text)
+		b.pendingImgModels[threadID] = b.ai.AllImageModels()
+		b.sendMessage(ctx, threadID, b.ai.ListImageModels(page))
 		return
 	}
 	if strings.HasPrefix(lower, "/ai models full") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 3)
+		b.pendingModels[threadID] = b.ai.AllChatModels()
 		b.sendMessage(ctx, threadID, b.ai.ListAllModels(page))
 		return
 	}
 	if strings.HasPrefix(lower, "/ai models") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 2)
-		text, models := b.ai.ListModelsWithList(page)
-		b.pendingModels[threadID] = models
-		b.sendMessage(ctx, threadID, text)
+		b.pendingModels[threadID] = b.ai.AllChatModels()
+		b.sendMessage(ctx, threadID, b.ai.ListModels(page))
 		return
 	}
 

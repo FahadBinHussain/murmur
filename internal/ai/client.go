@@ -208,9 +208,14 @@ func (c *Client) ListModels(page int) string {
 }
 
 func (c *Client) ListModelsWithList(page int) (string, []string) {
+	all := c.AllChatModels()
+	return paginateWithList(all, page, "Chat Models", "models")
+}
+
+func (c *Client) AllChatModels() []string {
 	result, err := c.request("GET", "/model-catalog", nil)
 	if err != nil {
-		return fmt.Sprintf("[error] %v", err), nil
+		return nil
 	}
 	var models []string
 	if data, ok := result["data"].([]interface{}); ok {
@@ -226,7 +231,7 @@ func (c *Client) ListModelsWithList(page int) (string, []string) {
 			}
 		}
 	}
-	return paginateWithList(models, page, "Chat Models", "models")
+	return models
 }
 
 func (c *Client) ListImageModels(page int) string {
@@ -235,9 +240,14 @@ func (c *Client) ListImageModels(page int) string {
 }
 
 func (c *Client) ListImageModelsWithList(page int) (string, []string) {
+	all := c.AllImageModels()
+	return paginateWithList(all, page, "Image Models", "image models")
+}
+
+func (c *Client) AllImageModels() []string {
 	result, err := c.request("GET", "/model-catalog", nil)
 	if err != nil {
-		return fmt.Sprintf("[error] %v", err), nil
+		return nil
 	}
 	var models []string
 	if data, ok := result["data"].([]interface{}); ok {
@@ -251,7 +261,7 @@ func (c *Client) ListImageModelsWithList(page int) (string, []string) {
 			}
 		}
 	}
-	return paginateWithList(models, page, "Image Models", "image models")
+	return models
 }
 
 func (c *Client) ListAllModels(page int) string {
