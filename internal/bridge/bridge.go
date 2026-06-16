@@ -132,6 +132,44 @@ func New(cfg *config.Config) *Bridge {
 	}
 }
 
+func (b *Bridge) ReloadCookies(ctx context.Context) error {
+	cookieMap, err := cookies.LoadFromFile(b.cfg.CookiesPath)
+	if err != nil {
+		return fmt.Errorf("load cookies: %w", err)
+	}
+
+	var plat types.Platform
+	switch b.cfg.Platform {
+	case config.PlatformFacebook:
+		plat = types.Facebook
+	case config.PlatformMessengerLite:
+		plat = types.MessengerLite
+	default:
+		plat = types.Messenger
+	}
+
+	c := cookies.ToMessagix(cookieMap, plat)
+	if missing := cookies.GetMissing(c); len(missing) > 0 {
+		return fmt.Errorf("missing cookies: %v", missing)
+	}
+
+	b.client.Disconnect()
+
+	logger := log.Logger.With().Str("component", "messagix").Logger()
+	b.client = messagix.NewClient(c, logger, &messagix.Config{
+		MayConnectToDGW: false,
+	})
+
+	go func() {
+		err := b.client.Connect(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("Reconnect failed")
+		}
+	}()
+
+	return nil
+}
+
 func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	ctx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel

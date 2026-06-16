@@ -19,6 +19,8 @@ var (
 	mu          sync.Mutex
 	cookieState = "ok"
 	cookieMsg   = "cookies loaded"
+	theBridge   *bridge.Bridge
+	theCtx      context.Context
 )
 
 func main() {
@@ -92,15 +94,29 @@ func main() {
 		cookieState = "ok"
 		cookieMsg = "cookies updated"
 		mu.Unlock()
+
+		// auto-reload bridge
+		if theBridge != nil && theCtx != nil {
+			if err := theBridge.ReloadCookies(theCtx); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]string{
+					"status":  "partial",
+					"message": fmt.Sprintf("saved, reload failed: %v", err),
+				})
+				return
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":  "ok",
-			"message": "cookies saved, restart space to apply",
+			"message": "cookies saved and reloaded",
 		})
 	})
 
 	go http.ListenAndServe(":7860", nil)
 
-	b := bridge.New(cfg)
-	b.Run(context.Background(), os.Stdin, os.Stdout)
+	theCtx = context.Background()
+	theBridge = bridge.New(cfg)
+	theBridge.Run(theCtx, os.Stdin, os.Stdout)
 }
