@@ -558,7 +558,8 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		go func() {
 			dots := []string{"thinking.", "thinking..", "thinking..."}
 			i := 0
-			for {
+			edits := 0
+			for edits < 4 {
 				select {
 				case <-stop:
 					return
@@ -567,6 +568,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 					if msgID != "" {
 						b.editMessage(ctx, msgID, dots[i])
 					}
+					edits++
 				}
 			}
 		}()
@@ -597,7 +599,8 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	go func() {
 		dots := []string{"thinking.", "thinking..", "thinking..."}
 		i := 0
-		for {
+		edits := 0
+		for edits < 4 {
 			select {
 			case <-stop:
 				return
@@ -606,6 +609,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 				if msgID != "" {
 					b.editMessage(ctx, msgID, dots[i])
 				}
+				edits++
 			}
 		}
 	}()
