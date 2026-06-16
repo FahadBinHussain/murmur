@@ -616,6 +616,13 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
 			return
 		}
+		finalModel := imgModel
+		if finalModel == "" {
+			finalModel = b.ai.DefaultImage
+		}
+		if msgID != "" {
+			b.editMessage(ctx, msgID, fmt.Sprintf("[%s]", finalModel))
+		}
 		if len(imageData) > 0 {
 			b.sendImage(ctx, threadID, imageData, mimeType)
 		} else {
