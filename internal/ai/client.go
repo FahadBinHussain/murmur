@@ -325,19 +325,19 @@ func (c *Client) HandleCommand(text string) string {
 
 	if strings.HasPrefix(lower, "/ai image models full") {
 		page := ParsePage(parts, 4)
-		return fmt.Sprintf("[system]\n%s", c.ListAllImageModels(page))
+		return c.ListAllImageModels(page)
 	}
 	if strings.HasPrefix(lower, "/ai image models") {
 		page := ParsePage(parts, 3)
-		return fmt.Sprintf("[system]\n%s", c.ListImageModels(page))
+		return c.ListImageModels(page)
 	}
 	if strings.HasPrefix(lower, "/ai models full") {
 		page := ParsePage(parts, 3)
-		return fmt.Sprintf("[system]\n%s", c.ListAllModels(page))
+		return c.ListAllModels(page)
 	}
 	if strings.HasPrefix(lower, "/ai models") {
 		page := ParsePage(parts, 2)
-		return fmt.Sprintf("[system]\n%s", c.ListModels(page))
+		return c.ListModels(page)
 	}
 
 	if strings.HasPrefix(lower, "/ai image ") {
@@ -361,7 +361,8 @@ func (c *Client) HandleCommand(text string) string {
 }
 
 func (c *Client) Help() string {
-	return `[system] murmur ai bot
+	return `murmur
+github.com/FahadBinHussain/murmur
 
 chat:
   /ai <prompt>              talk to the ai
@@ -381,14 +382,12 @@ info:
 }
 
 func (c *Client) Status() string {
-	return fmt.Sprintf(`[system] murmur ai status
+	return fmt.Sprintf(`murmur
 
 platform: messenger
-gateway:  %s
 chat:     %s
 image:    %s
 version:  1.0.0`,
-		c.BaseURL,
 		c.DefaultChat,
 		c.DefaultImage,
 	)

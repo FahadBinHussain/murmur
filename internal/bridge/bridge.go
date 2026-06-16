@@ -316,9 +316,9 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	time.Sleep(500 * time.Millisecond)
 }
 
-func (b *Bridge) sendMessage(ctx context.Context, threadID int64, text string) {
+func (b *Bridge) sendMessage(ctx context.Context, threadID int64, text string) string {
 	otid := time.Now().UnixMilli()
-	_, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
+	resp, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
 		ThreadId:          threadID,
 		Otid:              otid,
 		Source:            table.MESSENGER_INBOX_IN_THREAD,
@@ -331,6 +331,28 @@ func (b *Bridge) sendMessage(ctx context.Context, threadID int64, text string) {
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send AI reply")
+		return ""
+	}
+	var msgID string
+	if resp != nil {
+		otidStr := fmt.Sprintf("%d", otid)
+		for _, replace := range resp.LSReplaceOptimsiticMessage {
+			if replace.OfflineThreadingId == otidStr {
+				msgID = replace.MessageId
+				break
+			}
+		}
+	}
+	return msgID
+}
+
+func (b *Bridge) editMessage(ctx context.Context, messageID string, text string) {
+	_, err := b.client.ExecuteTasks(ctx, &socket.EditMessageTask{
+		MessageID: messageID,
+		Text:      text,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to edit message")
 	}
 }
 
@@ -372,10 +394,45 @@ func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte
 
 func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text string) {
 	lower := strings.ToLower(strings.TrimSpace(text))
-	if strings.HasPrefix(lower, "/ai image ") && !strings.HasPrefix(lower, "/ai image models") {
+
+	if lower == "/ai" || lower == "/ai " || lower == "/ai help" {
+		b.sendMessage(ctx, threadID, b.ai.Help())
+		return
+	}
+
+	if lower == "/ai status" {
+		b.sendMessage(ctx, threadID, b.ai.Status())
+		return
+	}
+
+	if strings.HasPrefix(lower, "/ai image models full") {
+		parts := strings.Fields(text)
+		page := ai.ParsePage(parts, 4)
+		b.sendMessage(ctx, threadID, b.ai.ListAllImageModels(page))
+		return
+	}
+	if strings.HasPrefix(lower, "/ai image models") {
+		parts := strings.Fields(text)
+		page := ai.ParsePage(parts, 3)
+		b.sendMessage(ctx, threadID, b.ai.ListImageModels(page))
+		return
+	}
+	if strings.HasPrefix(lower, "/ai models full") {
+		parts := strings.Fields(text)
+		page := ai.ParsePage(parts, 3)
+		b.sendMessage(ctx, threadID, b.ai.ListAllModels(page))
+		return
+	}
+	if strings.HasPrefix(lower, "/ai models") {
+		parts := strings.Fields(text)
+		page := ai.ParsePage(parts, 2)
+		b.sendMessage(ctx, threadID, b.ai.ListModels(page))
+		return
+	}
+
+	if strings.HasPrefix(lower, "/ai image ") {
 		prompt := strings.TrimSpace(text[len("/ai image "):])
-		b.sendMessage(ctx, threadID, fmt.Sprintf("[%s]", b.ai.DefaultImage))
-		time.Sleep(500 * time.Millisecond)
+		b.sendMessage(ctx, threadID, "[thinking...]")
 		imageData, mimeType, err := b.ai.ImageRaw(prompt)
 		if err != nil {
 			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
@@ -388,8 +445,25 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		}
 		return
 	}
-	reply := b.ai.HandleCommand(text)
-	b.sendMessage(ctx, threadID, reply)
+
+	prompt := strings.TrimSpace(text[len("/ai "):])
+	if prompt == "" {
+		b.sendMessage(ctx, threadID, b.ai.Help())
+		return
+	}
+
+	msgID := b.sendMessage(ctx, threadID, "[thinking...]")
+	resp, err := b.ai.Chat(prompt)
+	if err != nil {
+		b.sendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
+		return
+	}
+	final := fmt.Sprintf("[%s]\n%s", b.ai.DefaultChat, resp)
+	if msgID != "" {
+		b.editMessage(ctx, msgID, final)
+	} else {
+		b.sendMessage(ctx, threadID, final)
+	}
 }
 
 func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd IncomingCommand) {
