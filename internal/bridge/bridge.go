@@ -20,6 +20,7 @@ import (
 	"github.com/user/murmur/internal/ai"
 	"github.com/user/murmur/internal/config"
 	"github.com/user/murmur/internal/cookies"
+	"github.com/user/murmur/internal/database"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
@@ -67,15 +68,16 @@ type ReadyData struct {
 }
 
 type Bridge struct {
-	cfg            *config.Config
-	client         *messagix.Client
-	ai             *ai.Client
-	logger         zerolog.Logger
-	cancel         context.CancelFunc
-	uid            int64
-	threadModels   map[int64]string
-	threadImgModels map[int64]string
-	pendingModels  map[int64][]string
+	cfg              *config.Config
+	client           *messagix.Client
+	ai               *ai.Client
+	db               *database.DB
+	logger           zerolog.Logger
+	cancel           context.CancelFunc
+	uid              int64
+	threadModels     map[int64]string
+	threadImgModels  map[int64]string
+	pendingModels    map[int64][]string
 	pendingImgModels map[int64][]string
 }
 
@@ -88,7 +90,7 @@ func writeEvent(w io.Writer, evt OutgoingEvent) {
 	fmt.Fprintln(w, string(data))
 }
 
-func New(cfg *config.Config) *Bridge {
+func New(ctx context.Context, cfg *config.Config) *Bridge {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 	log.Logger = log.Output(zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.NoColor = true
@@ -120,7 +122,7 @@ func New(cfg *config.Config) *Bridge {
 		MayConnectToDGW: false,
 	})
 
-	return &Bridge{
+	b := &Bridge{
 		cfg:              cfg,
 		client:           client,
 		ai:               ai.NewClient(cfg.LiteLLMBase, cfg.DefaultChat, cfg.DefaultImage),
@@ -130,6 +132,38 @@ func New(cfg *config.Config) *Bridge {
 		pendingModels:    make(map[int64][]string),
 		pendingImgModels: make(map[int64][]string),
 	}
+
+	if cfg.DatabaseURL != "" {
+		db, err := database.New(ctx, cfg.DatabaseURL)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to connect to database, running without persistence")
+		} else {
+			b.db = db
+			b.loadSavedModels(ctx)
+		}
+	}
+
+	return b
+}
+
+func (b *Bridge) loadSavedModels(ctx context.Context) {
+	if b.db == nil {
+		return
+	}
+	models, err := b.db.GetAllThreadModels(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to load saved models")
+		return
+	}
+	for threadID, m := range models {
+		if m.ChatModel != "" {
+			b.threadModels[threadID] = m.ChatModel
+		}
+		if m.ImageModel != "" {
+			b.threadImgModels[threadID] = m.ImageModel
+		}
+	}
+	log.Info().Int("threads", len(models)).Msg("Loaded saved model selections")
 }
 
 func (b *Bridge) ReloadCookies(ctx context.Context) error {
@@ -680,19 +714,24 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 
 func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice int, isImage bool) {
 	if isImage {
-		if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
-			if choice >= 1 && choice <= len(models) {
-				selected := models[choice-1]
-				b.threadImgModels[threadID] = selected
-				delete(b.pendingImgModels, threadID)
-				b.sendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
-				return
+	if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
+		if choice >= 1 && choice <= len(models) {
+			selected := models[choice-1]
+			b.threadImgModels[threadID] = selected
+			delete(b.pendingImgModels, threadID)
+			if b.db != nil {
+				if err := b.db.SetImageModel(ctx, threadID, selected); err != nil {
+					log.Error().Err(err).Msg("Failed to save image model")
+				}
 			}
-			b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+			b.sendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
 			return
 		}
-		b.sendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
+		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
 		return
+	}
+	b.sendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
+	return
 	}
 
 	if models, ok := b.pendingModels[threadID]; ok && len(models) > 0 {
@@ -700,6 +739,11 @@ func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice i
 			selected := models[choice-1]
 			b.threadModels[threadID] = selected
 			delete(b.pendingModels, threadID)
+			if b.db != nil {
+				if err := b.db.SetChatModel(ctx, threadID, selected); err != nil {
+					log.Error().Err(err).Msg("Failed to save chat model")
+				}
+			}
 			b.sendMessage(ctx, threadID, fmt.Sprintf("[chat model set to %s]", selected))
 			return
 		}

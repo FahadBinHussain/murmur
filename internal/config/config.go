@@ -20,6 +20,7 @@ type Config struct {
 	LiteLLMBase  string
 	DefaultChat  string
 	DefaultImage string
+	DatabaseURL  string
 }
 
 func Load() *Config {
@@ -51,6 +52,9 @@ func Load() *Config {
 	}
 	if v := os.Getenv("DEFAULT_IMAGE"); v != "" {
 		cfg.DefaultImage = v
+	}
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.DatabaseURL = v
 	}
 
 	return cfg

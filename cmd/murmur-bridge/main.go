@@ -117,6 +117,6 @@ func main() {
 	go http.ListenAndServe(":7860", nil)
 
 	theCtx = context.Background()
-	theBridge = bridge.New(cfg)
+	theBridge = bridge.New(theCtx, cfg)
 	theBridge.Run(theCtx, os.Stdin, os.Stdout)
 }
