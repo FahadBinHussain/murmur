@@ -372,8 +372,10 @@ func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte
 
 func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text string) {
 	lower := strings.ToLower(strings.TrimSpace(text))
-	if strings.HasPrefix(lower, "/ai image ") {
+	if strings.HasPrefix(lower, "/ai image ") && !strings.HasPrefix(lower, "/ai image models") {
 		prompt := strings.TrimSpace(text[len("/ai image "):])
+		b.sendMessage(ctx, threadID, fmt.Sprintf("[%s]", b.ai.DefaultImage))
+		time.Sleep(500 * time.Millisecond)
 		imageData, mimeType, err := b.ai.ImageRaw(prompt)
 		if err != nil {
 			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
