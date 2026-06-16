@@ -365,17 +365,13 @@ func (c *Client) Help() string {
 
 chat:
   /ai <prompt>        talk to the ai
-  /ai <prompt> page N use a specific model page
 
 image:
   /ai image <prompt>  generate an image
-  /ai image models    list image models
 
 models:
   /ai models          list chat models
-  /ai models full     list all models
   /ai image models    list image models
-  /ai image models full  list all image models
 
 info:
   /ai status          show current config
