@@ -406,7 +406,8 @@ models:
   /ai image models full     list all image models
 
 select:
-  reply with a number        pick a model from the list
+  /ai model <number>        set chat model
+  /ai image model <number>  set image model
 
 info:
   /ai status                show current config

@@ -213,11 +213,8 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 					if ts.Before(startTime.Add(-5 * time.Second)) {
 						continue
 					}
-					text := strings.TrimSpace(msg.Text)
-					if strings.HasPrefix(text, "/ai") {
+					if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
 						b.handleAICommand(ctx, msg.ThreadKey, msg.Text)
-					} else if n, err := strconv.Atoi(text); err == nil && n > 0 {
-						b.handleModelSelect(ctx, msg.ThreadKey, n)
 					}
 				}
 				_ = upsertMessages
@@ -246,11 +243,8 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 						if ts.Before(startTime.Add(-5 * time.Second)) {
 							continue
 						}
-						text := strings.TrimSpace(msg.Text)
-						if strings.HasPrefix(text, "/ai") {
+						if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
 							b.handleAICommand(ctx, threadID, msg.Text)
-						} else if n, err := strconv.Atoi(text); err == nil && n > 0 {
-							b.handleModelSelect(ctx, threadID, n)
 						}
 					}
 				}
@@ -459,6 +453,30 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		return
 	}
 
+	if strings.HasPrefix(lower, "/ai image model ") {
+		parts := strings.Fields(text)
+		if len(parts) >= 4 {
+			if n, err := strconv.Atoi(parts[3]); err == nil && n > 0 {
+				b.handleModelSelect(ctx, threadID, n, true)
+				return
+			}
+		}
+		b.sendMessage(ctx, threadID, "[usage] /ai image model <number>")
+		return
+	}
+
+	if strings.HasPrefix(lower, "/ai model ") {
+		parts := strings.Fields(text)
+		if len(parts) >= 3 {
+			if n, err := strconv.Atoi(parts[2]); err == nil && n > 0 {
+				b.handleModelSelect(ctx, threadID, n, false)
+				return
+			}
+		}
+		b.sendMessage(ctx, threadID, "[usage] /ai model <number>")
+		return
+	}
+
 	if strings.HasPrefix(lower, "/ai image ") {
 		prompt := strings.TrimSpace(text[len("/ai image "):])
 		imgModel := b.threadImgModels[threadID]
@@ -501,7 +519,23 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	}
 }
 
-func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice int) {
+func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice int, isImage bool) {
+	if isImage {
+		if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
+			if choice >= 1 && choice <= len(models) {
+				selected := models[choice-1]
+				b.threadImgModels[threadID] = selected
+				delete(b.pendingImgModels, threadID)
+				b.sendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
+				return
+			}
+			b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+			return
+		}
+		b.sendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
+		return
+	}
+
 	if models, ok := b.pendingModels[threadID]; ok && len(models) > 0 {
 		if choice >= 1 && choice <= len(models) {
 			selected := models[choice-1]
@@ -513,17 +547,7 @@ func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice i
 		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
 		return
 	}
-	if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
-		if choice >= 1 && choice <= len(models) {
-			selected := models[choice-1]
-			b.threadImgModels[threadID] = selected
-			delete(b.pendingImgModels, threadID)
-			b.sendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
-			return
-		}
-		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
-		return
-	}
+	b.sendMessage(ctx, threadID, "[no models listed yet, run /ai models first]")
 }
 
 func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd IncomingCommand) {
