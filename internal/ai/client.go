@@ -312,7 +312,15 @@ func (c *Client) HandleCommand(text string) string {
 	parts := strings.Fields(text)
 
 	if lower == "/ai" || lower == "/ai " {
-		return "usage: /ai <text> | /ai image <prompt> | /ai models | /ai image models"
+		return c.Help()
+	}
+
+	if lower == "/ai help" {
+		return c.Help()
+	}
+
+	if lower == "/ai status" {
+		return c.Status()
 	}
 
 	if strings.HasPrefix(lower, "/ai image models full") {
@@ -343,11 +351,47 @@ func (c *Client) HandleCommand(text string) string {
 
 	prompt := strings.TrimSpace(text[len("/ai "):])
 	if prompt == "" {
-		return "usage: /ai <text> | /ai image <prompt> | /ai models"
+		return c.Help()
 	}
 	resp, err := c.Chat(prompt)
 	if err != nil {
 		return fmt.Sprintf("[chat error] %v", err)
 	}
 	return fmt.Sprintf("[%s]\n%s", c.DefaultChat, resp)
+}
+
+func (c *Client) Help() string {
+	return `[system] Murmur AI Bot
+
+Chat:
+  /ai <text>          Chat with AI
+  /ai <text> page N   Chat with specific model page
+
+Image:
+  /ai image <prompt>  Generate an image
+  /ai image models    List image models
+
+Models:
+  /ai models          List chat models
+  /ai models full     List all models
+  /ai image models    List image models
+  /ai image models full  List all image models
+
+Info:
+  /ai status          Show current config
+  /ai help            Show this help`
+}
+
+func (c *Client) Status() string {
+	return fmt.Sprintf(`[system] Murmur AI Status
+
+Platform: Messenger
+Gateway:  %s
+Chat:     %s
+Image:    %s
+Version:  1.0.0`,
+		c.BaseURL,
+		c.DefaultChat,
+		c.DefaultImage,
+	)
 }
