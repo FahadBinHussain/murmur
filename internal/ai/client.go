@@ -364,8 +364,8 @@ func (c *Client) Help() string {
 	return `[system] murmur ai bot
 
 chat:
-  /ai <text>          talk to the ai
-  /ai <text> page N   use a specific model page
+  /ai <prompt>        talk to the ai
+  /ai <prompt> page N use a specific model page
 
 image:
   /ai image <prompt>  generate an image
