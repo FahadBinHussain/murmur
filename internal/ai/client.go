@@ -361,35 +361,35 @@ func (c *Client) HandleCommand(text string) string {
 }
 
 func (c *Client) Help() string {
-	return `[system] Murmur AI Bot
+	return `[system] murmur ai bot
 
-Chat:
-  /ai <text>          Chat with AI
-  /ai <text> page N   Chat with specific model page
+chat:
+  /ai <text>          talk to the ai
+  /ai <text> page N   use a specific model page
 
-Image:
-  /ai image <prompt>  Generate an image
-  /ai image models    List image models
+image:
+  /ai image <prompt>  generate an image
+  /ai image models    list image models
 
-Models:
-  /ai models          List chat models
-  /ai models full     List all models
-  /ai image models    List image models
-  /ai image models full  List all image models
+models:
+  /ai models          list chat models
+  /ai models full     list all models
+  /ai image models    list image models
+  /ai image models full  list all image models
 
-Info:
-  /ai status          Show current config
-  /ai help            Show this help`
+info:
+  /ai status          show current config
+  /ai help            show this help`
 }
 
 func (c *Client) Status() string {
-	return fmt.Sprintf(`[system] Murmur AI Status
+	return fmt.Sprintf(`[system] murmur ai status
 
-Platform: Messenger
-Gateway:  %s
-Chat:     %s
-Image:    %s
-Version:  1.0.0`,
+platform: messenger
+gateway:  %s
+chat:     %s
+image:    %s
+version:  1.0.0`,
 		c.BaseURL,
 		c.DefaultChat,
 		c.DefaultImage,
