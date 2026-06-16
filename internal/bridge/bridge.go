@@ -205,8 +205,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 						continue
 					}
 					if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
-						reply := b.ai.HandleCommand(msg.Text)
-						b.sendMessage(ctx, msg.ThreadKey, reply)
+						b.handleAICommand(ctx, msg.ThreadKey, msg.Text)
 					}
 				}
 				_ = upsertMessages
@@ -236,8 +235,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 							continue
 						}
 						if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
-							reply := b.ai.HandleCommand(msg.Text)
-							b.sendMessage(ctx, threadID, reply)
+							b.handleAICommand(ctx, threadID, msg.Text)
 						}
 					}
 				}
@@ -334,6 +332,62 @@ func (b *Bridge) sendMessage(ctx context.Context, threadID int64, text string) {
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send AI reply")
 	}
+}
+
+func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte, mimeType string) {
+	resp, err := b.client.SendMercuryUploadRequest(ctx, threadID, &messagix.MercuryUploadMedia{
+		Filename:  "image.png",
+		MimeType:  mimeType,
+		MediaData: imageData,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to upload image")
+		b.sendMessage(ctx, threadID, "[image upload failed]")
+		return
+	}
+	attachmentID := resp.Payload.RealMetadata.GetFbId()
+	if attachmentID == 0 {
+		log.Error().Msg("No attachment FBID returned from upload")
+		b.sendMessage(ctx, threadID, "[image upload returned no ID]")
+		return
+	}
+	log.Info().Int64("attachment_id", attachmentID).Msg("Image uploaded successfully")
+
+	otid := time.Now().UnixMilli()
+	_, err = b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
+		ThreadId:          threadID,
+		Otid:              otid,
+		Source:            table.MESSENGER_INBOX_IN_THREAD,
+		SendType:          table.MEDIA,
+		AttachmentFBIds:   []int64{attachmentID},
+		SyncGroup:         1,
+		InitiatingSource:  table.FACEBOOK_INBOX,
+		SkipUrlPreviewGen: 1,
+		MultiTabEnv:       0,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to send image message")
+	}
+}
+
+func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text string) {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if strings.HasPrefix(lower, "/ai image ") {
+		prompt := strings.TrimSpace(text[len("/ai image "):])
+		imageData, mimeType, err := b.ai.ImageRaw(prompt)
+		if err != nil {
+			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
+			return
+		}
+		if len(imageData) > 0 {
+			b.sendImage(ctx, threadID, imageData, mimeType)
+		} else {
+			b.sendMessage(ctx, threadID, "[image generation returned no data]")
+		}
+		return
+	}
+	reply := b.ai.HandleCommand(text)
+	b.sendMessage(ctx, threadID, reply)
 }
 
 func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd IncomingCommand) {

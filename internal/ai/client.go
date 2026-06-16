@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -135,7 +136,7 @@ func (c *Client) Chat(prompt string) (string, error) {
 	return "no response from model", nil
 }
 
-func (c *Client) Image(prompt string) (string, error) {
+func (c *Client) ImageRaw(prompt string) ([]byte, string, error) {
 	if prompt == "" {
 		prompt = "a cute cat"
 	}
@@ -145,19 +146,37 @@ func (c *Client) Image(prompt string) (string, error) {
 		N:      1,
 	})
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if e, ok := result["error"]; ok {
-		return "", fmt.Errorf("%v", e)
+		return nil, "", fmt.Errorf("%v", e)
 	}
 	if data, ok := result["data"].([]interface{}); ok && len(data) > 0 {
 		if item, ok := data[0].(map[string]interface{}); ok {
-			if url, ok := item["url"].(string); ok {
-				return fmt.Sprintf("[%s]\n%s", c.DefaultImage, url), nil
+			if b64, ok := item["b64_json"].(string); ok && b64 != "" {
+				decoded, err := base64.StdEncoding.DecodeString(b64)
+				if err != nil {
+					return nil, "", fmt.Errorf("base64 decode: %w", err)
+				}
+				return decoded, "image/png", nil
+			}
+			if url, ok := item["url"].(string); ok && url != "" {
+				return nil, url, nil
 			}
 		}
 	}
-	return "generated but no url in response", nil
+	return nil, "", fmt.Errorf("no image data in response")
+}
+
+func (c *Client) Image(prompt string) (string, error) {
+	data, url, err := c.ImageRaw(prompt)
+	if err != nil {
+		return "", err
+	}
+	if url != "" {
+		return fmt.Sprintf("[%s]\n%s", c.DefaultImage, url), nil
+	}
+	return fmt.Sprintf("[%s]\nImage generated (%d bytes)", c.DefaultImage, len(data)), nil
 }
 
 func (c *Client) ListModels(page int) string {
