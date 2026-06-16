@@ -364,18 +364,20 @@ func (c *Client) Help() string {
 	return `[system] murmur ai bot
 
 chat:
-  /ai <prompt>        talk to the ai
+  /ai <prompt>              talk to the ai
 
 image:
-  /ai image <prompt>  generate an image
+  /ai image <prompt>        generate an image
 
 models:
-  /ai models          list chat models
-  /ai image models    list image models
+  /ai models                list chat models
+  /ai models full           list all models
+  /ai image models          list image models
+  /ai image models full     list all image models
 
 info:
-  /ai status          show current config
-  /ai help            show this help`
+  /ai status                show current config
+  /ai help                  show this help`
 }
 
 func (c *Client) Status() string {
