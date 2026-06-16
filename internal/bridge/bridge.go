@@ -153,8 +153,30 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		case *messagix.Event_Ready:
 			log.Info().Any("connection_code", e.ConnectionCode).Msg("MQTT connected")
 			writeEvent(stdout, OutgoingEvent{Type: "mqtt_connected"})
+			// Start periodic foreground state keepalive
+			go func() {
+				ticker := time.NewTicker(60 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						_, err := b.client.ExecuteTasks(ctx, &socket.ReportAppStateTask{
+							AppState:  table.FOREGROUND,
+							RequestID: fmt.Sprintf("keepalive-%d", time.Now().UnixMilli()),
+						})
+						if err != nil {
+							log.Warn().Err(err).Msg("Foreground keepalive failed")
+						}
+					}
+				}
+			}()
 
 		case *messagix.Event_PublishResponse:
+			log.Info().Any("topic", e.Topic).Int64("request_id", e.Data.RequestID).
+				Bool("table_nil", e.Table == nil).
+				Msg("PublishResponse received")
 			if e.Table == nil {
 				return
 			}
@@ -241,6 +263,9 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		case *messagix.Event_Reconnected:
 			log.Info().Msg("MQTT reconnected")
 			writeEvent(stdout, OutgoingEvent{Type: "reconnected"})
+
+		default:
+			log.Info().Str("type", fmt.Sprintf("%T", evt)).Msg("Unhandled event type")
 		}
 	})
 

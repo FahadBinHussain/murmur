@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/user/murmur/internal/bridge"
@@ -26,6 +28,12 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		panic(err)
 	}
+
+	// HF health check endpoint
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "OK")
+	})
+	go http.ListenAndServe(":7860", nil)
 
 	b := bridge.New(cfg)
 	b.Run(context.Background(), os.Stdin, os.Stdout)
