@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,12 +67,16 @@ type ReadyData struct {
 }
 
 type Bridge struct {
-	cfg    *config.Config
-	client *messagix.Client
-	ai     *ai.Client
-	logger zerolog.Logger
-	cancel context.CancelFunc
-	uid    int64
+	cfg            *config.Config
+	client         *messagix.Client
+	ai             *ai.Client
+	logger         zerolog.Logger
+	cancel         context.CancelFunc
+	uid            int64
+	threadModels   map[int64]string
+	threadImgModels map[int64]string
+	pendingModels  map[int64][]string
+	pendingImgModels map[int64][]string
 }
 
 func writeEvent(w io.Writer, evt OutgoingEvent) {
@@ -116,10 +121,14 @@ func New(cfg *config.Config) *Bridge {
 	})
 
 	return &Bridge{
-		cfg:    cfg,
-		client: client,
-		ai:     ai.NewClient(cfg.LiteLLMBase, cfg.DefaultChat, cfg.DefaultImage),
-		logger: logger,
+		cfg:              cfg,
+		client:           client,
+		ai:               ai.NewClient(cfg.LiteLLMBase, cfg.DefaultChat, cfg.DefaultImage),
+		logger:           logger,
+		threadModels:     make(map[int64]string),
+		threadImgModels:  make(map[int64]string),
+		pendingModels:    make(map[int64][]string),
+		pendingImgModels: make(map[int64][]string),
 	}
 }
 
@@ -204,8 +213,11 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 					if ts.Before(startTime.Add(-5 * time.Second)) {
 						continue
 					}
-					if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
+					text := strings.TrimSpace(msg.Text)
+					if strings.HasPrefix(text, "/ai") {
 						b.handleAICommand(ctx, msg.ThreadKey, msg.Text)
+					} else if n, err := strconv.Atoi(text); err == nil && n > 0 {
+						b.handleModelSelect(ctx, msg.ThreadKey, n)
 					}
 				}
 				_ = upsertMessages
@@ -234,8 +246,11 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 						if ts.Before(startTime.Add(-5 * time.Second)) {
 							continue
 						}
-						if strings.HasPrefix(strings.TrimSpace(msg.Text), "/ai") {
+						text := strings.TrimSpace(msg.Text)
+						if strings.HasPrefix(text, "/ai") {
 							b.handleAICommand(ctx, threadID, msg.Text)
+						} else if n, err := strconv.Atoi(text); err == nil && n > 0 {
+							b.handleModelSelect(ctx, threadID, n)
 						}
 					}
 				}
@@ -401,20 +416,32 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	}
 
 	if lower == "/ai status" {
-		b.sendMessage(ctx, threadID, b.ai.Status())
+		model := b.threadModels[threadID]
+		if model == "" {
+			model = b.ai.DefaultChat
+		}
+		imgModel := b.threadImgModels[threadID]
+		if imgModel == "" {
+			imgModel = b.ai.DefaultImage
+		}
+		b.sendMessage(ctx, threadID, fmt.Sprintf("murmur\n\nplatform: messenger\nchat: %s\nimage: %s\nversion: 1.0.0", model, imgModel))
 		return
 	}
 
 	if strings.HasPrefix(lower, "/ai image models full") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 4)
-		b.sendMessage(ctx, threadID, b.ai.ListAllImageModels(page))
+		text, models := b.ai.ListImageModelsWithList(page)
+		b.pendingImgModels[threadID] = models
+		b.sendMessage(ctx, threadID, text)
 		return
 	}
 	if strings.HasPrefix(lower, "/ai image models") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 3)
-		b.sendMessage(ctx, threadID, b.ai.ListImageModels(page))
+		text, models := b.ai.ListImageModelsWithList(page)
+		b.pendingImgModels[threadID] = models
+		b.sendMessage(ctx, threadID, text)
 		return
 	}
 	if strings.HasPrefix(lower, "/ai models full") {
@@ -426,14 +453,17 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	if strings.HasPrefix(lower, "/ai models") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 2)
-		b.sendMessage(ctx, threadID, b.ai.ListModels(page))
+		text, models := b.ai.ListModelsWithList(page)
+		b.pendingModels[threadID] = models
+		b.sendMessage(ctx, threadID, text)
 		return
 	}
 
 	if strings.HasPrefix(lower, "/ai image ") {
 		prompt := strings.TrimSpace(text[len("/ai image "):])
+		imgModel := b.threadImgModels[threadID]
 		b.sendMessage(ctx, threadID, "[thinking...]")
-		imageData, mimeType, err := b.ai.ImageRaw(prompt)
+		imageData, mimeType, err := b.ai.ImageRawWithModel(prompt, imgModel)
 		if err != nil {
 			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
 			return
@@ -452,17 +482,47 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		return
 	}
 
+	model := b.threadModels[threadID]
 	msgID := b.sendMessage(ctx, threadID, "[thinking...]")
-	resp, err := b.ai.Chat(prompt)
+	resp, err := b.ai.ChatWithModel(prompt, model)
 	if err != nil {
 		b.sendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
 		return
 	}
-	final := fmt.Sprintf("[%s]\n%s", b.ai.DefaultChat, resp)
+	finalModel := model
+	if finalModel == "" {
+		finalModel = b.ai.DefaultChat
+	}
+	final := fmt.Sprintf("[%s]\n%s", finalModel, resp)
 	if msgID != "" {
 		b.editMessage(ctx, msgID, final)
 	} else {
 		b.sendMessage(ctx, threadID, final)
+	}
+}
+
+func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice int) {
+	if models, ok := b.pendingModels[threadID]; ok && len(models) > 0 {
+		if choice >= 1 && choice <= len(models) {
+			selected := models[choice-1]
+			b.threadModels[threadID] = selected
+			delete(b.pendingModels, threadID)
+			b.sendMessage(ctx, threadID, fmt.Sprintf("[chat model set to %s]", selected))
+			return
+		}
+		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+		return
+	}
+	if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
+		if choice >= 1 && choice <= len(models) {
+			selected := models[choice-1]
+			b.threadImgModels[threadID] = selected
+			delete(b.pendingImgModels, threadID)
+			b.sendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
+			return
+		}
+		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+		return
 	}
 }
 

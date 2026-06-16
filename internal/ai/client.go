@@ -113,8 +113,15 @@ func (c *Client) request(method, path string, body interface{}) (map[string]inte
 }
 
 func (c *Client) Chat(prompt string) (string, error) {
+	return c.ChatWithModel(prompt, c.DefaultChat)
+}
+
+func (c *Client) ChatWithModel(prompt string, model string) (string, error) {
+	if model == "" {
+		model = c.DefaultChat
+	}
 	result, err := c.request("POST", "/chat/completions", chatRequest{
-		Model:     c.DefaultChat,
+		Model:     model,
 		Messages:  []chatMessage{{Role: "user", Content: prompt}},
 		MaxTokens: 1024,
 	})
@@ -137,11 +144,18 @@ func (c *Client) Chat(prompt string) (string, error) {
 }
 
 func (c *Client) ImageRaw(prompt string) ([]byte, string, error) {
+	return c.ImageRawWithModel(prompt, c.DefaultImage)
+}
+
+func (c *Client) ImageRawWithModel(prompt string, model string) ([]byte, string, error) {
 	if prompt == "" {
 		prompt = "a cute cat"
 	}
+	if model == "" {
+		model = c.DefaultImage
+	}
 	result, err := c.request("POST", "/images/generations", imageRequest{
-		Model:  c.DefaultImage,
+		Model:  model,
 		Prompt: prompt,
 		N:      1,
 	})
@@ -180,9 +194,14 @@ func (c *Client) Image(prompt string) (string, error) {
 }
 
 func (c *Client) ListModels(page int) string {
+	text, _ := c.ListModelsWithList(page)
+	return text
+}
+
+func (c *Client) ListModelsWithList(page int) (string, []string) {
 	result, err := c.request("GET", "/model-catalog", nil)
 	if err != nil {
-		return fmt.Sprintf("[error] %v", err)
+		return fmt.Sprintf("[error] %v", err), nil
 	}
 	var models []string
 	if data, ok := result["data"].([]interface{}); ok {
@@ -198,13 +217,18 @@ func (c *Client) ListModels(page int) string {
 			}
 		}
 	}
-	return paginate(models, page, "Chat Models", "models")
+	return paginateWithList(models, page, "Chat Models", "models")
 }
 
 func (c *Client) ListImageModels(page int) string {
+	text, _ := c.ListImageModelsWithList(page)
+	return text
+}
+
+func (c *Client) ListImageModelsWithList(page int) (string, []string) {
 	result, err := c.request("GET", "/model-catalog", nil)
 	if err != nil {
-		return fmt.Sprintf("[error] %v", err)
+		return fmt.Sprintf("[error] %v", err), nil
 	}
 	var models []string
 	if data, ok := result["data"].([]interface{}); ok {
@@ -218,7 +242,7 @@ func (c *Client) ListImageModels(page int) string {
 			}
 		}
 	}
-	return paginate(models, page, "Image Models", "image models")
+	return paginateWithList(models, page, "Image Models", "image models")
 }
 
 func (c *Client) ListAllModels(page int) string {
@@ -263,6 +287,11 @@ func (c *Client) ListAllImageModels(page int) string {
 }
 
 func paginate(models []string, page int, header, cmd string) string {
+	text, _ := paginateWithList(models, page, header, cmd)
+	return text
+}
+
+func paginateWithList(models []string, page int, header, cmd string) (string, []string) {
 	const pageSize = 25
 	total := len(models)
 	totalPages := (total + pageSize - 1) / pageSize
@@ -294,7 +323,7 @@ func paginate(models []string, page int, header, cmd string) string {
 	if page < totalPages {
 		lines = append(lines, fmt.Sprintf("Next: /ai %s %d", cmd, page+1))
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), models[start:end]
 }
 
 func ParsePage(parts []string, cmdIdx int) int {
@@ -375,6 +404,9 @@ models:
   /ai models full           list all models
   /ai image models          list image models
   /ai image models full     list all image models
+
+select:
+  reply with a number        pick a model from the list
 
 info:
   /ai status                show current config
