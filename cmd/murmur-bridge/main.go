@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 
 	"github.com/rs/zerolog/log"
@@ -10,6 +11,7 @@ import (
 	"github.com/user/murmur/internal/bridge"
 	"github.com/user/murmur/internal/config"
 	"github.com/user/murmur/internal/cookies"
+	"github.com/user/murmur/internal/whatsapp"
 )
 
 var (
@@ -52,6 +54,24 @@ func main() {
 	// Start BNP notification worker
 	bnpWorker := bnp.NewWorker(theBridge, nil)
 	go bnpWorker.Run(theCtx)
+
+	// Start WhatsApp sync if enabled
+	if cfg.WhatsAppEnabled {
+		webhookURL := fmt.Sprintf("http://localhost:7860/wacli/webhook")
+		syncMgr := whatsapp.NewSyncManager(
+			cfg.WhatsAppBinary,
+			cfg.WhatsAppStore,
+			cfg.WhatsAppAccount,
+			webhookURL,
+			cfg.WhatsAppWebhookSecret,
+			cfg.WhatsAppMaxMessages,
+			cfg.WhatsAppDownloadMedia,
+			log.Logger.With().Str("component", "wacli-sync").Logger(),
+		)
+		if err := syncMgr.Start(theCtx); err != nil {
+			log.Error().Err(err).Msg("Failed to start WhatsApp sync")
+		}
+	}
 
 	// Run bridge (blocks until context cancelled)
 	theBridge.Run(theCtx, os.Stdin, os.Stdout)

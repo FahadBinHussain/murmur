@@ -22,6 +22,7 @@ import (
 	"github.com/user/murmur/internal/config"
 	"github.com/user/murmur/internal/cookies"
 	"github.com/user/murmur/internal/database"
+	"github.com/user/murmur/internal/whatsapp"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
@@ -81,6 +82,9 @@ type Bridge struct {
 	pendingModels    map[int64][]string
 	pendingImgModels map[int64][]string
 	httpServer       *http.Server
+	waSender         *whatsapp.Sender
+	threadChannel    map[int64]string
+	waJIDs           map[int64]string
 }
 
 func writeEvent(w io.Writer, evt OutgoingEvent) {
@@ -133,6 +137,8 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 		threadImgModels:  make(map[int64]string),
 		pendingModels:    make(map[int64][]string),
 		pendingImgModels: make(map[int64][]string),
+		threadChannel:    make(map[int64]string),
+		waJIDs:           make(map[int64]string),
 	}
 
 	if cfg.DatabaseURL != "" {
@@ -143,6 +149,12 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 			b.db = db
 			b.loadSavedModels(ctx)
 		}
+	}
+
+	if cfg.WhatsAppEnabled {
+		waLogger := log.Logger.With().Str("component", "whatsapp").Logger()
+		b.waSender = whatsapp.NewSender(cfg.WhatsAppBinary, cfg.WhatsAppStore, cfg.WhatsAppAccount, waLogger)
+		log.Info().Msg("WhatsApp integration enabled")
 	}
 
 	return b
@@ -419,6 +431,16 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 }
 
 func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) string {
+	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
+		jid := b.waJIDs[threadID]
+		if jid != "" && b.waSender != nil {
+			b.waSender.SendText(ctx, jid, text)
+			return ""
+		}
+		b.logger.Warn().Int64("thread_id", threadID).Msg("WhatsApp JID not found")
+		return ""
+	}
+
 	otid := time.Now().UnixMilli()
 	resp, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
 		ThreadId:          threadID,
@@ -448,7 +470,15 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 	return msgID
 }
 
-func (b *Bridge) editMessage(ctx context.Context, messageID string, text string) {
+func (b *Bridge) editMessage(ctx context.Context, threadID int64, messageID string, text string) {
+	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
+		if messageID == "" {
+			b.SendMessage(ctx, threadID, text)
+			return
+		}
+		return
+	}
+
 	_, err := b.client.ExecuteTasks(ctx, &socket.EditMessageTask{
 		MessageID: messageID,
 		Text:      text,
@@ -643,7 +673,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 				case <-time.After(500 * time.Millisecond):
 					i = (i + 1) % len(dots)
 					if msgID != "" {
-						b.editMessage(ctx, msgID, dots[i])
+						b.editMessage(ctx, threadID, msgID, dots[i])
 					}
 					edits++
 				}
@@ -660,7 +690,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 			finalModel = b.ai.DefaultImage
 		}
 		if msgID != "" {
-			b.editMessage(ctx, msgID, fmt.Sprintf("[%s]", finalModel))
+			b.editMessage(ctx, threadID, msgID, fmt.Sprintf("[%s]", finalModel))
 		}
 		if len(imageData) > 0 {
 			b.sendImage(ctx, threadID, imageData, mimeType)
@@ -706,7 +736,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 			case <-time.After(500 * time.Millisecond):
 				i = (i + 1) % len(dots)
 				if msgID != "" {
-					b.editMessage(ctx, msgID, dots[i])
+					b.editMessage(ctx, threadID, msgID, dots[i])
 				}
 				edits++
 			}
@@ -726,7 +756,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	}
 	final := fmt.Sprintf("[%s]\n%s", finalModel, resp)
 	if msgID != "" {
-		b.editMessage(ctx, msgID, final)
+		b.editMessage(ctx, threadID, msgID, final)
 	} else {
 		b.SendMessage(ctx, threadID, final)
 	}
@@ -915,6 +945,75 @@ func toDBMessages(msgs []ai.ChatMessage) []database.Message {
 	return out
 }
 
+func (b *Bridge) HandleWhatsAppMessage(ctx context.Context, msg whatsapp.ParsedMessage) {
+	if msg.FromMe {
+		return
+	}
+	if msg.Text == "" && msg.Media == nil && msg.Poll == nil {
+		return
+	}
+
+	chatJID := msg.Chat.String()
+	threadID := whatsapp.JIDToThreadID(chatJID)
+
+	b.threadChannel[threadID] = "whatsapp"
+	b.waJIDs[threadID] = chatJID
+
+	b.logger.Info().
+		Str("chat", chatJID).
+		Str("sender", msg.SenderJID).
+		Str("text", truncateStr(msg.Text, 100)).
+		Int64("thread_id", threadID).
+		Msg("Processing WhatsApp message")
+
+	text := msg.Text
+	if text == "" {
+		if msg.Media != nil {
+			text = fmt.Sprintf("[media: %s]", msg.Media.Type)
+		} else if msg.Poll != nil {
+			text = fmt.Sprintf("Poll: %s", msg.Poll.Question)
+		}
+	}
+
+	if !b.shouldRespondWhatsApp(text) {
+		return
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
+		b.handleAICommand(ctx, threadID, text)
+	} else {
+		cleaned := strings.TrimSpace(text)
+		if cleaned != "" {
+			b.handleAICommand(ctx, threadID, "/ai "+cleaned)
+		}
+	}
+}
+
+func (b *Bridge) shouldRespondWhatsApp(text string) bool {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "/ai") {
+		return true
+	}
+	return false
+}
+
+func (b *Bridge) SendMessageWhatsApp(ctx context.Context, chatJID string, text string) {
+	if b.waSender == nil {
+		b.logger.Warn().Msg("WhatsApp sender not configured")
+		return
+	}
+	if err := b.waSender.SendText(ctx, chatJID, text); err != nil {
+		b.logger.Error().Err(err).Msg("Failed to send WhatsApp message")
+	}
+}
+
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 func (b *Bridge) startHTTPServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cookies/upload", b.handleCookieUpload)
@@ -922,6 +1021,10 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+
+	if b.cfg.WhatsAppEnabled {
+		mux.HandleFunc("/wacli/webhook", b.handleWhatsAppWebhook)
+	}
 
 	b.httpServer = &http.Server{
 		Addr:    ":7860",
@@ -976,4 +1079,38 @@ func (b *Bridge) handleCookieUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "Cookies uploaded and bridge reloaded"})
+}
+
+func (b *Bridge) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	if b.cfg.WhatsAppWebhookSecret != "" {
+		sig := r.Header.Get("X-Wacli-Signature")
+		if !whatsapp.VerifySignature(body, sig, b.cfg.WhatsAppWebhookSecret) {
+			b.logger.Warn().Str("sig", sig).Msg("Invalid WhatsApp webhook signature")
+			http.Error(w, "Invalid signature", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	var msg whatsapp.ParsedMessage
+	if err := json.Unmarshal(body, &msg); err != nil {
+		b.logger.Error().Err(err).Msg("Failed to parse WhatsApp webhook payload")
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	b.HandleWhatsAppMessage(r.Context(), msg)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
 }

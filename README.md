@@ -9,12 +9,13 @@ pinned: false
 
 # murmur
 
-Messenger AI bridge
+Messenger + WhatsApp AI bridge
 
 ## stack
 
-- Go (wrapper around [mautrix-meta](https://github.com/mautrix/meta))
-- config via env vars or YAML
+- Go (wrapper around [mautrix-meta](https://github.com/mautrix/meta) + [wacli](https://github.com/openclaw/wacli))
+- LiteLLM gateway as AI brain
+- config via env vars
 - Scoop manifest for Windows install
 
 ## structure
@@ -22,11 +23,14 @@ Messenger AI bridge
 ```
 cmd/murmur-bridge/    entrypoint (thin main)
 internal/
-  bridge/             wrapper around mautrix-meta
-  config/             env/yaml config loader
+  ai/                 LiteLLM gateway client
+  bnp/                BNP notification worker
+  bridge/             core bridge logic (Messenger + WhatsApp)
+  config/             env config loader
   cookies/            cookie parsing (array or map format)
+  database/           Postgres persistence
+  whatsapp/           wacli webhook + sender + sync manager
 scoop/                scoop manifest
-config.example.yaml   example config
 ```
 
 ## usage
@@ -37,18 +41,27 @@ MURMUR_COOKIES=path/to/cookies.json murmur-bridge
 
 # flags
 murmur-bridge --cookies path/to/cookies.json --platform messenger
-
-# config file
-murmur-bridge --config config.yaml
 ```
 
 ## config
 
-| env | flag | yaml | default |
-|-----|------|------|---------|
-| MURMUR_COOKIES | --cookies | cookies_path | ~/.config/murmur/cookies.json |
-| MURMUR_PLATFORM | --platform | platform | messenger |
-| MURMUR_LOG_LEVEL | | log_level | info |
+| env | default | description |
+|-----|---------|-------------|
+| MURMUR_COOKIES | ~/.config/murmur/cookies.json | Facebook cookies path |
+| MURMUR_PLATFORM | messenger | messenger/facebook/messenger-lite |
+| MURMUR_LOG_LEVEL | info | Log level |
+| LITELLM_BASE | https://alchoholpad-litellm-huggingface-template.hf.space/v1 | LiteLLM gateway |
+| DEFAULT_CHAT | openrouter/google/gemma-4-31b-it:free | Default chat model |
+| DEFAULT_IMAGE | cloudflare/@cf/black-forest-labs/flux-1-schnell | Default image model |
+| DATABASE_URL | | Postgres URL for persistence |
+| CONTEXT_WINDOW | 100 | Conversation history window |
+| WHATSAPP_ENABLED | 0 | Enable WhatsApp integration |
+| WHATSAPP_BINARY | wacli | Path to wacli binary |
+| WHATSAPP_STORE | ~/.wacli | wacli store directory |
+| WHATSAPP_ACCOUNT | | wacli account name |
+| WHATSAPP_WEBHOOK_SECRET | | HMAC secret for webhook verification |
+| WHATSAPP_MAX_MESSAGES | | Max messages to store locally |
+| WHATSAPP_DOWNLOAD_MEDIA | 0 | Download media during sync |
 
 ## install (scoop)
 

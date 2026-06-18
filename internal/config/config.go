@@ -15,14 +15,21 @@ const (
 )
 
 type Config struct {
-	CookiesPath   string
-	Platform      Platform
-	LogLevel      string
-	LiteLLMBase   string
-	DefaultChat   string
-	DefaultImage  string
-	DatabaseURL   string
-	ContextWindow int
+	CookiesPath          string
+	Platform             Platform
+	LogLevel             string
+	LiteLLMBase          string
+	DefaultChat          string
+	DefaultImage         string
+	DatabaseURL          string
+	ContextWindow        int
+	WhatsAppEnabled      bool
+	WhatsAppBinary       string
+	WhatsAppStore        string
+	WhatsAppAccount      string
+	WhatsAppWebhookSecret string
+	WhatsAppMaxMessages  int
+	WhatsAppDownloadMedia bool
 }
 
 func Load() *Config {
@@ -65,6 +72,32 @@ func Load() *Config {
 	}
 	if cfg.ContextWindow == 0 {
 		cfg.ContextWindow = 100
+	}
+
+	if v := os.Getenv("WHATSAPP_ENABLED"); v == "1" || strings.ToLower(v) == "true" {
+		cfg.WhatsAppEnabled = true
+	}
+	if v := os.Getenv("WHATSAPP_BINARY"); v != "" {
+		cfg.WhatsAppBinary = v
+	} else {
+		cfg.WhatsAppBinary = "wacli"
+	}
+	if v := os.Getenv("WHATSAPP_STORE"); v != "" {
+		cfg.WhatsAppStore = v
+	}
+	if v := os.Getenv("WHATSAPP_ACCOUNT"); v != "" {
+		cfg.WhatsAppAccount = v
+	}
+	if v := os.Getenv("WHATSAPP_WEBHOOK_SECRET"); v != "" {
+		cfg.WhatsAppWebhookSecret = v
+	}
+	if v := os.Getenv("WHATSAPP_MAX_MESSAGES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.WhatsAppMaxMessages = n
+		}
+	}
+	if v := os.Getenv("WHATSAPP_DOWNLOAD_MEDIA"); v == "1" || strings.ToLower(v) == "true" {
+		cfg.WhatsAppDownloadMedia = true
 	}
 
 	return cfg
