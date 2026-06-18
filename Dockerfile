@@ -9,10 +9,9 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/murmur-bridge .
-COPY cookies.hf.json .
 ENV MURMUR_COOKIES=/app/cookies.hf.json
 ENV LITELLM_BASE=https://alchoholpad-litellm-huggingface-template.hf.space/v1
 ENV DEFAULT_CHAT=openrouter/google/gemma-4-31b-it:free
 ENV DEFAULT_IMAGE=cloudflare/@cf/black-forest-labs/flux-1-schnell
 ENV NO_COLOR=1
-CMD ["./murmur-bridge"]
+CMD ["/bin/sh", "-c", "if [ -n \"$MURMUR_COOKIES_JSON\" ]; then echo \"$MURMUR_COOKIES_JSON\" > /app/cookies.hf.json; fi; exec ./murmur-bridge"]
