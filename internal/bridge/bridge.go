@@ -1024,6 +1024,7 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 
 	if b.cfg.WhatsAppEnabled {
 		mux.HandleFunc("/wacli/webhook", b.handleWhatsAppWebhook)
+		mux.HandleFunc("/api/wacli/session", b.handleWacliSessionUpload)
 	}
 
 	b.httpServer = &http.Server{
@@ -1113,4 +1114,82 @@ func (b *Bridge) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (b *Bridge) handleWacliSessionUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	storeDir := b.cfg.WhatsAppStore
+	if storeDir == "" {
+		home, _ := os.UserHomeDir()
+		storeDir = home + "/.wacli"
+	}
+
+	if err := os.MkdirAll(storeDir, 0700); err != nil {
+		http.Error(w, "Failed to create store dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	contentType := r.Header.Get("Content-Type")
+
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		for _, fileHeader := range r.MultipartForm.File["file"] {
+			src, err := fileHeader.Open()
+			if err != nil {
+				http.Error(w, "Failed to open file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer src.Close()
+
+			filename := fileHeader.Filename
+			if filename == "" {
+				continue
+			}
+
+			dstPath := storeDir + "/" + filename
+			dst, err := os.Create(dstPath)
+			if err != nil {
+				http.Error(w, "Failed to create file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer dst.Close()
+
+			if _, err := io.Copy(dst, src); err != nil {
+				http.Error(w, "Failed to write file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			b.logger.Info().Str("path", dstPath).Int64("size", fileHeader.Size).Msg("Wacli session file uploaded")
+		}
+	} else {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read body", http.StatusBadRequest)
+			return
+		}
+
+		filename := r.Header.Get("X-Filename")
+		if filename == "" {
+			filename = "session.db"
+		}
+
+		dstPath := storeDir + "/" + filename
+		if err := os.WriteFile(dstPath, body, 0600); err != nil {
+			http.Error(w, "Failed to write file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		b.logger.Info().Str("path", dstPath).Int("size", len(body)).Msg("Wacli session file uploaded")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "store": storeDir})
 }
