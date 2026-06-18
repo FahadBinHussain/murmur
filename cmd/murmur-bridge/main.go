@@ -68,6 +68,7 @@ func main() {
 			cfg.WhatsAppDownloadMedia,
 			log.Logger.With().Str("component", "wacli-sync").Logger(),
 		)
+		theBridge.SetSyncManager(syncMgr)
 		if err := syncMgr.Start(theCtx); err != nil {
 			log.Error().Err(err).Msg("Failed to start WhatsApp sync")
 		}

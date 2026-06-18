@@ -83,6 +83,7 @@ type Bridge struct {
 	pendingImgModels map[int64][]string
 	httpServer       *http.Server
 	waSender         *whatsapp.Sender
+	waSync           *whatsapp.SyncManager
 	threadChannel    map[int64]string
 	waJIDs           map[int64]string
 }
@@ -158,6 +159,10 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 	}
 
 	return b
+}
+
+func (b *Bridge) SetSyncManager(sm *whatsapp.SyncManager) {
+	b.waSync = sm
 }
 
 func (b *Bridge) loadSavedModels(ctx context.Context) {
@@ -1190,6 +1195,16 @@ func (b *Bridge) handleWacliSessionUpload(w http.ResponseWriter, r *http.Request
 		b.logger.Info().Str("path", dstPath).Int("size", len(body)).Msg("Wacli session file uploaded")
 	}
 
+	if b.waSync != nil {
+		if err := b.waSync.Restart(); err != nil {
+			b.logger.Error().Err(err).Msg("Failed to restart wacli sync after session upload")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok", "store": storeDir, "restart": "failed", "error": err.Error()})
+			return
+		}
+		b.logger.Info().Msg("Wacli sync restarted after session upload")
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "store": storeDir})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "store": storeDir, "restart": "ok"})
 }

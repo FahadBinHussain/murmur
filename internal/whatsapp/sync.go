@@ -10,15 +10,16 @@ import (
 )
 
 type SyncManager struct {
-	binary       string
-	store        string
-	account      string
-	webhookURL   string
+	binary        string
+	store         string
+	account       string
+	webhookURL    string
 	webhookSecret string
-	maxMessages  int
+	maxMessages   int
 	downloadMedia bool
-	logger       zerolog.Logger
-	cmd          *exec.Cmd
+	logger        zerolog.Logger
+	cmd           *exec.Cmd
+	ctx           context.Context
 }
 
 func NewSyncManager(binary, store, account, webhookURL, webhookSecret string, maxMessages int, downloadMedia bool, logger zerolog.Logger) *SyncManager {
@@ -35,10 +36,17 @@ func NewSyncManager(binary, store, account, webhookURL, webhookSecret string, ma
 }
 
 func (sm *SyncManager) Start(ctx context.Context) error {
+	sm.ctx = ctx
+	return sm.start()
+}
+
+func (sm *SyncManager) start() error {
+	sm.Stop()
+
 	args := sm.buildArgs()
 	sm.logger.Info().Strs("args", args).Msg("Starting wacli sync")
 
-	sm.cmd = exec.CommandContext(ctx, sm.binary, args...)
+	sm.cmd = exec.CommandContext(sm.ctx, sm.binary, args...)
 	sm.cmd.Stdout = nil
 	sm.cmd.Stderr = nil
 
@@ -64,6 +72,11 @@ func (sm *SyncManager) Stop() error {
 		return sm.cmd.Process.Kill()
 	}
 	return nil
+}
+
+func (sm *SyncManager) Restart() error {
+	sm.logger.Info().Msg("Restarting wacli sync")
+	return sm.start()
 }
 
 func (sm *SyncManager) buildArgs() []string {
