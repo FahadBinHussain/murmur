@@ -6,13 +6,14 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o murmur-bridge ./cmd/murmur-bridge
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg wget && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/murmur-bridge .
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
-    wget -q https://github.com/openclaw/wacli/releases/download/v0.11.1/wacli-linux-amd64 -O /usr/local/bin/wacli && \
+RUN wget -q https://github.com/openclaw/wacli/releases/download/v0.11.1/wacli_0.11.1_linux_amd64.tar.gz -O /tmp/wacli.tar.gz && \
+    tar -xzf /tmp/wacli.tar.gz -C /tmp && \
+    mv /tmp/wacli /usr/local/bin/wacli && \
     chmod +x /usr/local/bin/wacli && \
-    apt-get purge -y wget && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    rm -rf /tmp/wacli*
 ENV MURMUR_COOKIES=/app/cookies.hf.json
 ENV LITELLM_BASE=https://alchoholpad-litellm-huggingface-template.hf.space/v1
 ENV DEFAULT_CHAT=openrouter/google/gemma-4-31b-it:free
