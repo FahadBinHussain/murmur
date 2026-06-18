@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -79,6 +80,7 @@ type Bridge struct {
 	threadImgModels  map[int64]string
 	pendingModels    map[int64][]string
 	pendingImgModels map[int64][]string
+	httpServer       *http.Server
 }
 
 func writeEvent(w io.Writer, evt OutgoingEvent) {
@@ -208,6 +210,9 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	ctx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
 	defer cancel()
+
+	// Start HTTP API server for cookie uploads
+	b.startHTTPServer(ctx)
 
 	startTime := time.Now()
 
@@ -908,4 +913,67 @@ func toDBMessages(msgs []ai.ChatMessage) []database.Message {
 		out[i] = database.Message{Role: m.Role, Content: m.Content}
 	}
 	return out
+}
+
+func (b *Bridge) startHTTPServer(ctx context.Context) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/cookies/upload", b.handleCookieUpload)
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	b.httpServer = &http.Server{
+		Addr:    ":7860",
+		Handler: mux,
+	}
+
+	go func() {
+		log.Info().Msg("Starting HTTP API server on :7860")
+		if err := b.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error().Err(err).Msg("HTTP server error")
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		log.Info().Msg("Shutting down HTTP server")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		b.httpServer.Shutdown(ctx)
+	}()
+}
+
+func (b *Bridge) handleCookieUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var cookieMap cookies.CookieMap
+	if err := json.NewDecoder(r.Body).Decode(&cookieMap); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Write to file
+	data, err := json.MarshalIndent(cookieMap, "", "  ")
+	if err != nil {
+		http.Error(w, "Failed to marshal cookies: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.WriteFile(b.cfg.CookiesPath, data, 0644); err != nil {
+		http.Error(w, "Failed to write cookies file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Reload cookies in bridge
+	if err := b.ReloadCookies(r.Context()); err != nil {
+		http.Error(w, "Failed to reload cookies: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "Cookies uploaded and bridge reloaded"})
 }
