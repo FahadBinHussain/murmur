@@ -37,12 +37,12 @@ func NewClient(baseURL, defaultChat, defaultImage string) *Client {
 }
 
 type chatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
+	Model     string         `json:"model"`
+	Messages  []ChatMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
 }
 
-type chatMessage struct {
+type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
@@ -123,12 +123,19 @@ func (c *Client) Chat(prompt string) (string, error) {
 }
 
 func (c *Client) ChatWithModel(prompt string, model string) (string, error) {
+	return c.ChatWithHistory(prompt, model, nil)
+}
+
+func (c *Client) ChatWithHistory(prompt string, model string, history []ChatMessage) (string, error) {
 	if model == "" {
 		model = c.DefaultChat
 	}
+	messages := make([]ChatMessage, 0, len(history)+1)
+	messages = append(messages, history...)
+	messages = append(messages, ChatMessage{Role: "user", Content: prompt})
 	result, err := c.request("POST", "/chat/completions", chatRequest{
 		Model:     model,
-		Messages:  []chatMessage{{Role: "user", Content: prompt}},
+		Messages:  messages,
 		MaxTokens: 1024,
 	})
 	if err != nil {

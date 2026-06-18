@@ -413,7 +413,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	time.Sleep(500 * time.Millisecond)
 }
 
-func (b *Bridge) sendMessage(ctx context.Context, threadID int64, text string) string {
+func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) string {
 	otid := time.Now().UnixMilli()
 	resp, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
 		ThreadId:          threadID,
@@ -461,13 +461,13 @@ func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to upload image")
-		b.sendMessage(ctx, threadID, "[image upload failed]")
+		b.SendMessage(ctx, threadID, "[image upload failed]")
 		return
 	}
 	attachmentID := resp.Payload.RealMetadata.GetFbId()
 	if attachmentID == 0 {
 		log.Error().Msg("No attachment FBID returned from upload")
-		b.sendMessage(ctx, threadID, "[image upload returned no ID]")
+		b.SendMessage(ctx, threadID, "[image upload returned no ID]")
 		return
 	}
 	log.Info().Int64("attachment_id", attachmentID).Msg("Image uploaded successfully")
@@ -552,7 +552,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	lower := strings.ToLower(strings.TrimSpace(text))
 
 	if lower == "/ai" || lower == "/ai " || lower == "/ai help" {
-		b.sendMessage(ctx, threadID, b.ai.Help())
+		b.SendMessage(ctx, threadID, b.ai.Help())
 		return
 	}
 
@@ -565,7 +565,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		if imgModel == "" {
 			imgModel = b.ai.DefaultImage
 		}
-		b.sendMessage(ctx, threadID, fmt.Sprintf("murmur\n\nplatform: messenger\nchat: %s\nimage: %s\nversion: 1.0.0", model, imgModel))
+		b.SendMessage(ctx, threadID, fmt.Sprintf("murmur\n\nplatform: messenger\nchat: %s\nimage: %s\nversion: 1.0.0", model, imgModel))
 		return
 	}
 
@@ -573,28 +573,28 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 4)
 		b.pendingImgModels[threadID] = b.ai.AllImageModels()
-		b.sendMessage(ctx, threadID, b.ai.ListImageModels(page))
+		b.SendMessage(ctx, threadID, b.ai.ListImageModels(page))
 		return
 	}
 	if strings.HasPrefix(lower, "/ai image models") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 3)
 		b.pendingImgModels[threadID] = b.ai.AllImageModels()
-		b.sendMessage(ctx, threadID, b.ai.ListImageModels(page))
+		b.SendMessage(ctx, threadID, b.ai.ListImageModels(page))
 		return
 	}
 	if strings.HasPrefix(lower, "/ai models full") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 3)
 		b.pendingModels[threadID] = b.ai.AllChatModels()
-		b.sendMessage(ctx, threadID, b.ai.ListAllModels(page))
+		b.SendMessage(ctx, threadID, b.ai.ListAllModels(page))
 		return
 	}
 	if strings.HasPrefix(lower, "/ai models") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 2)
 		b.pendingModels[threadID] = b.ai.AllChatModels()
-		b.sendMessage(ctx, threadID, b.ai.ListModels(page))
+		b.SendMessage(ctx, threadID, b.ai.ListModels(page))
 		return
 	}
 
@@ -606,7 +606,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 				return
 			}
 		}
-		b.sendMessage(ctx, threadID, "[usage] /ai image model <number>")
+		b.SendMessage(ctx, threadID, "[usage] /ai image model <number>")
 		return
 	}
 
@@ -618,14 +618,14 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 				return
 			}
 		}
-		b.sendMessage(ctx, threadID, "[usage] /ai model <number>")
+		b.SendMessage(ctx, threadID, "[usage] /ai model <number>")
 		return
 	}
 
 	if strings.HasPrefix(lower, "/ai image ") {
 		prompt := strings.TrimSpace(text[len("/ai image "):])
 		imgModel := b.threadImgModels[threadID]
-		msgID := b.sendMessage(ctx, threadID, "thinking.")
+		msgID := b.SendMessage(ctx, threadID, "thinking.")
 		stop := make(chan struct{})
 		go func() {
 			dots := []string{"thinking.", "thinking..", "thinking..."}
@@ -647,7 +647,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		imageData, mimeType, err := b.ai.ImageRawWithModel(prompt, imgModel)
 		close(stop)
 		if err != nil {
-			b.sendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
+			b.SendMessage(ctx, threadID, fmt.Sprintf("[image error] %v", err))
 			return
 		}
 		finalModel := imgModel
@@ -660,20 +660,35 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		if len(imageData) > 0 {
 			b.sendImage(ctx, threadID, imageData, mimeType)
 		} else {
-			b.sendMessage(ctx, threadID, "[image generation returned no data]")
+			b.SendMessage(ctx, threadID, "[image generation returned no data]")
 		}
 		return
 	}
 
 	prompt := strings.TrimSpace(text[len("/ai "):])
 	if prompt == "" {
-		b.sendMessage(ctx, threadID, b.ai.Help())
+		b.SendMessage(ctx, threadID, b.ai.Help())
 		return
 	}
 
 	model := b.threadModels[threadID]
-	msgID := b.sendMessage(ctx, threadID, "thinking.")
-	log.Info().Str("prompt", prompt).Str("model", model).Msg("Chat request")
+
+	// Load conversation history
+	var history []ai.ChatMessage
+	if b.db != nil {
+		dbMsgs, err := b.db.GetRecentMessages(ctx, threadID, b.cfg.ContextWindow)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to load conversation history")
+		} else {
+			history = make([]ai.ChatMessage, len(dbMsgs))
+			for i, m := range dbMsgs {
+				history[i] = ai.ChatMessage{Role: m.Role, Content: m.Content}
+			}
+		}
+	}
+
+	msgID := b.SendMessage(ctx, threadID, "thinking.")
+	log.Info().Str("prompt", prompt).Str("model", model).Int("history", len(history)).Msg("Chat request")
 	stop := make(chan struct{})
 	go func() {
 		dots := []string{"thinking.", "thinking..", "thinking..."}
@@ -692,11 +707,11 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 			}
 		}
 	}()
-	resp, err := b.ai.ChatWithModel(prompt, model)
+	resp, err := b.ai.ChatWithHistory(prompt, model, history)
 	close(stop)
 	if err != nil {
 		log.Error().Err(err).Msg("Chat error")
-		b.sendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
+		b.SendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
 		return
 	}
 	log.Info().Str("resp", resp[:min(50, len(resp))]).Msg("Chat response")
@@ -708,7 +723,16 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	if msgID != "" {
 		b.editMessage(ctx, msgID, final)
 	} else {
-		b.sendMessage(ctx, threadID, final)
+		b.SendMessage(ctx, threadID, final)
+	}
+
+	// Save conversation history
+	if b.db != nil {
+		messages := append(history, ai.ChatMessage{Role: "user", Content: prompt})
+		messages = append(messages, ai.ChatMessage{Role: "assistant", Content: resp})
+		if err := b.db.SaveMessages(ctx, threadID, toDBMessages(messages)); err != nil {
+			log.Error().Err(err).Msg("Failed to save conversation history")
+		}
 	}
 }
 
@@ -724,13 +748,13 @@ func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice i
 					log.Error().Err(err).Msg("Failed to save image model")
 				}
 			}
-			b.sendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
+			b.SendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
 			return
 		}
-		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+		b.SendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
 		return
 	}
-	b.sendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
+	b.SendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
 	return
 	}
 
@@ -744,13 +768,13 @@ func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice i
 					log.Error().Err(err).Msg("Failed to save chat model")
 				}
 			}
-			b.sendMessage(ctx, threadID, fmt.Sprintf("[chat model set to %s]", selected))
+			b.SendMessage(ctx, threadID, fmt.Sprintf("[chat model set to %s]", selected))
 			return
 		}
-		b.sendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+		b.SendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
 		return
 	}
-	b.sendMessage(ctx, threadID, "[no models listed yet, run /ai models first]")
+	b.SendMessage(ctx, threadID, "[no models listed yet, run /ai models first]")
 }
 
 func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd IncomingCommand) {
@@ -876,4 +900,12 @@ func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd Incomi
 	default:
 		log.Warn().Str("type", cmd.Type).Msg("Unknown command type")
 	}
+}
+
+func toDBMessages(msgs []ai.ChatMessage) []database.Message {
+	out := make([]database.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = database.Message{Role: m.Role, Content: m.Content}
+	}
+	return out
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -14,13 +15,14 @@ const (
 )
 
 type Config struct {
-	CookiesPath  string
-	Platform     Platform
-	LogLevel     string
-	LiteLLMBase  string
-	DefaultChat  string
-	DefaultImage string
-	DatabaseURL  string
+	CookiesPath   string
+	Platform      Platform
+	LogLevel      string
+	LiteLLMBase   string
+	DefaultChat   string
+	DefaultImage  string
+	DatabaseURL   string
+	ContextWindow int
 }
 
 func Load() *Config {
@@ -55,6 +57,14 @@ func Load() *Config {
 	}
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		cfg.DatabaseURL = v
+	}
+	if v := os.Getenv("CONTEXT_WINDOW"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.ContextWindow = n
+		}
+	}
+	if cfg.ContextWindow == 0 {
+		cfg.ContextWindow = 100
 	}
 
 	return cfg

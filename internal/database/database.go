@@ -39,6 +39,24 @@ func (db *DB) migrate(ctx context.Context) error {
 			updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
 	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS messages (
+			id SERIAL PRIMARY KEY,
+			thread_id   BIGINT NOT NULL,
+			role        TEXT NOT NULL,
+			content     TEXT NOT NULL,
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.pool.Exec(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)
+	`)
 	return err
 }
 
@@ -94,4 +112,53 @@ func (db *DB) GetAllThreadModels(ctx context.Context) (map[int64]ThreadModel, er
 		result[threadID] = m
 	}
 	return result, rows.Err()
+}
+
+type Message struct {
+	Role    string
+	Content string
+}
+
+func (db *DB) SaveMessages(ctx context.Context, threadID int64, messages []Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, m := range messages {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO messages (thread_id, role, content) VALUES ($1, $2, $3)`,
+			threadID, m.Role, m.Content)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (db *DB) GetRecentMessages(ctx context.Context, threadID int64, limit int) ([]Message, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT role, content FROM messages WHERE thread_id = $1 ORDER BY created_at DESC LIMIT $2`,
+		threadID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.Role, &m.Content); err != nil {
+			return nil, err
+		}
+		messages = append(messages, m)
+	}
+	// reverse to chronological order
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+	return messages, rows.Err()
 }
