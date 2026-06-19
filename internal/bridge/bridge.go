@@ -1109,6 +1109,7 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/api/send_message", b.handleSendMessage)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1176,6 +1177,33 @@ func (b *Bridge) handleCookieUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "Cookies uploaded and bridge reloaded"})
+}
+
+func (b *Bridge) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ThreadID string `json:"thread_id"`
+		Text     string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	threadID, err := strconv.ParseInt(req.ThreadID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid thread_id", http.StatusBadRequest)
+		return
+	}
+
+	b.SendMessage(r.Context(), threadID, req.Text)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (b *Bridge) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
