@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -59,7 +60,7 @@ type Poll struct {
 	SelectableCount uint32   `json:"SelectableCount"`
 }
 
-type MessageHandler func(msg ParsedMessage)
+type MessageHandler func(ctx context.Context, msg ParsedMessage)
 
 type WebhookServer struct {
 	secret   string
@@ -139,7 +140,7 @@ func (ws *WebhookServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		Bool("from_me", msg.FromMe).
 		Msg("WhatsApp message received")
 
-	ws.handler(msg)
+	ws.handler(r.Context(), msg)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))

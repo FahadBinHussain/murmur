@@ -84,6 +84,7 @@ type Bridge struct {
 	httpServer       *http.Server
 	waSender         *whatsapp.Sender
 	waSync           *whatsapp.SyncManager
+	waClient         *whatsapp.WhatsmeowClient
 	threadChannel    map[int64]string
 	waJIDs           map[int64]string
 }
@@ -154,8 +155,19 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 
 	if cfg.WhatsAppEnabled {
 		waLogger := log.Logger.With().Str("component", "whatsapp").Logger()
-		b.waSender = whatsapp.NewSender(cfg.WhatsAppBinary, cfg.WhatsAppStore, cfg.WhatsAppAccount, waLogger)
-		log.Info().Msg("WhatsApp integration enabled")
+		storeDir := cfg.WhatsAppStore
+		if storeDir == "" {
+			home, _ := os.UserHomeDir()
+			storeDir = home + "/.murmur-whatsapp"
+		}
+		os.MkdirAll(storeDir, 0700)
+		dbPath := storeDir + "/whatsmeow.db"
+		b.waClient, err = whatsapp.NewWhatsmeowClient(dbPath, waLogger, b.HandleWhatsAppMessage)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to create whatsmeow client")
+		} else {
+			log.Info().Msg("WhatsApp integration enabled (whatsmeow)")
+		}
 	}
 
 	return b
@@ -163,6 +175,14 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 
 func (b *Bridge) SetSyncManager(sm *whatsapp.SyncManager) {
 	b.waSync = sm
+}
+
+func (b *Bridge) SetWhatsmeowClient(client *whatsapp.WhatsmeowClient) {
+	b.waClient = client
+}
+
+func (b *Bridge) WAClient() *whatsapp.WhatsmeowClient {
+	return b.waClient
 }
 
 func (b *Bridge) LoadSessionFromDB(ctx context.Context) error {
@@ -485,11 +505,11 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) string {
 	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
 		jid := b.waJIDs[threadID]
-		if jid != "" && b.waSender != nil {
-			b.waSender.SendText(ctx, jid, text)
+		if jid != "" && b.waClient != nil && b.waClient.IsConnected() {
+			b.waClient.SendText(ctx, jid, text)
 			return ""
 		}
-		b.logger.Warn().Int64("thread_id", threadID).Msg("WhatsApp JID not found")
+		b.logger.Warn().Int64("thread_id", threadID).Msg("WhatsApp client not connected or JID not found")
 		return ""
 	}
 

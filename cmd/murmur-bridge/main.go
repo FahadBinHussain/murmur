@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
 
 	"github.com/rs/zerolog/log"
@@ -11,7 +10,6 @@ import (
 	"github.com/user/murmur/internal/bridge"
 	"github.com/user/murmur/internal/config"
 	"github.com/user/murmur/internal/cookies"
-	"github.com/user/murmur/internal/whatsapp"
 )
 
 var (
@@ -62,20 +60,13 @@ func main() {
 			log.Error().Err(err).Msg("Failed to load WhatsApp session from database")
 		}
 
-		webhookURL := fmt.Sprintf("http://localhost:7860/wacli/webhook")
-		syncMgr := whatsapp.NewSyncManager(
-			cfg.WhatsAppBinary,
-			cfg.WhatsAppStore,
-			cfg.WhatsAppAccount,
-			webhookURL,
-			cfg.WhatsAppWebhookSecret,
-			cfg.WhatsAppMaxMessages,
-			cfg.WhatsAppDownloadMedia,
-			log.Logger.With().Str("component", "wacli-sync").Logger(),
-		)
-		theBridge.SetSyncManager(syncMgr)
-		if err := syncMgr.Start(theCtx); err != nil {
-			log.Error().Err(err).Msg("Failed to start WhatsApp sync")
+		// Connect whatsmeow client
+		if theBridge.WAClient() != nil {
+			go func() {
+				if err := theBridge.WAClient().Connect(theCtx); err != nil {
+					log.Error().Err(err).Msg("Failed to connect WhatsApp via whatsmeow")
+				}
+			}()
 		}
 	}
 
