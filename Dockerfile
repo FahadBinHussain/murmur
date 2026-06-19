@@ -14,6 +14,7 @@ RUN wget -q https://github.com/openclaw/wacli/releases/download/v0.11.1/wacli_0.
     mv /tmp/wacli /usr/local/bin/wacli && \
     chmod +x /usr/local/bin/wacli && \
     rm -rf /tmp/wacli*
+EXPOSE 7860
 ENV MURMUR_COOKIES=/app/cookies.hf.json
 ENV LITELLM_BASE=https://alchoholpad-litellm-huggingface-template.hf.space/v1
 ENV DEFAULT_CHAT=openrouter/google/gemma-4-31b-it:free
