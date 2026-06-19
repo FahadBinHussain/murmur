@@ -28,7 +28,7 @@ func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHan
 	log := waLog.Zerolog(logger.With().Str("component", "whatsmeow").Logger())
 
 	// Open database with modernc.org/sqlite driver (registers as "sqlite")
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?_foreign_keys=on")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_foreign_keys=on&_journal_mode=WAL")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
