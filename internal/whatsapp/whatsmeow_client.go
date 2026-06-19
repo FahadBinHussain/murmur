@@ -11,7 +11,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type WhatsmeowClient struct {
