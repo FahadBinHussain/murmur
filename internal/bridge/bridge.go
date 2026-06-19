@@ -1033,6 +1033,14 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("murmur"))
+	})
 
 	if b.cfg.WhatsAppEnabled {
 		mux.HandleFunc("/wacli/webhook", b.handleWhatsAppWebhook)
