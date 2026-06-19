@@ -166,6 +166,7 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 			os.MkdirAll(storeDir, 0700)
 		}
 		dbPath := storeDir + "/whatsmeow.db"
+		log.Info().Str("dbPath", dbPath).Msg("Creating whatsmeow client")
 		b.waClient, err = whatsapp.NewWhatsmeowClient(dbPath, waLogger, b.HandleWhatsAppMessage)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to create whatsmeow client")
