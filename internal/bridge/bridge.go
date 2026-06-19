@@ -160,13 +160,17 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 			home, _ := os.UserHomeDir()
 			storeDir = home + "/.murmur-whatsapp"
 		}
-		os.MkdirAll(storeDir, 0700)
+		// Try to create store dir, fall back to /app/whatsapp if read-only
+		if err := os.MkdirAll(storeDir, 0700); err != nil {
+			storeDir = "/app/whatsapp"
+			os.MkdirAll(storeDir, 0700)
+		}
 		dbPath := storeDir + "/whatsmeow.db"
 		b.waClient, err = whatsapp.NewWhatsmeowClient(dbPath, waLogger, b.HandleWhatsAppMessage)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to create whatsmeow client")
 		} else {
-			log.Info().Msg("WhatsApp integration enabled (whatsmeow)")
+			log.Info().Str("db", dbPath).Msg("WhatsApp integration enabled (whatsmeow)")
 		}
 	}
 
