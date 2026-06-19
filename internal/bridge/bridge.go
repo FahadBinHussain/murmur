@@ -161,9 +161,13 @@ func New(ctx context.Context, cfg *config.Config) *Bridge {
 			storeDir = home + "/.murmur-whatsapp"
 		}
 		// Try to create store dir, fall back to /app/whatsapp if read-only
-		if err := os.MkdirAll(storeDir, 0700); err != nil {
+		testFile := storeDir + "/.write-test"
+		if err := os.MkdirAll(storeDir, 0700); err != nil || os.WriteFile(testFile, []byte("test"), 0600) != nil {
 			storeDir = "/app/whatsapp"
 			os.MkdirAll(storeDir, 0700)
+			os.Remove(testFile)
+		} else {
+			os.Remove(testFile)
 		}
 		dbPath := storeDir + "/whatsmeow.db"
 		log.Info().Str("dbPath", dbPath).Msg("Creating whatsmeow client")
