@@ -1110,6 +1110,7 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/send_message", b.handleSendMessage)
+	mux.HandleFunc("/api/automation/notifications", b.handleAutomationNotification)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1204,6 +1205,57 @@ func (b *Bridge) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (b *Bridge) handleAutomationNotification(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Source    string `json:"source"`
+		ThreadID  string `json:"threadId"`
+		Title     string `json:"title"`
+		Message   string `json:"message"`
+		DedupeKey string `json:"dedupeKey"`
+		URL       string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	threadIDStr := req.ThreadID
+	if threadIDStr == "" {
+		http.Error(w, "threadId is required", http.StatusBadRequest)
+		return
+	}
+	threadID, err := strconv.ParseInt(threadIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid threadId", http.StatusBadRequest)
+		return
+	}
+
+	text := strings.TrimSpace(req.Message)
+	if text == "" {
+		text = strings.TrimSpace(req.Title)
+	} else if title := strings.TrimSpace(req.Title); title != "" {
+		text = title + "\n\n" + text
+	}
+	if text == "" {
+		http.Error(w, "message is required", http.StatusBadRequest)
+		return
+	}
+
+	b.SendMessage(r.Context(), threadID, text)
+
+	notifID := fmt.Sprintf("ntf_%d", time.Now().UnixMilli())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":     notifID,
+		"status": "sent",
+	})
 }
 
 func (b *Bridge) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
