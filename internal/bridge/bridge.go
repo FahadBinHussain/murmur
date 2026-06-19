@@ -181,21 +181,34 @@ func (b *Bridge) LoadSessionFromDB(ctx context.Context) error {
 		storeDir = home + "/.wacli"
 	}
 	if err := os.MkdirAll(storeDir, 0700); err != nil {
-		return fmt.Errorf("create store dir: %w", err)
+		b.logger.Warn().Err(err).Str("dir", storeDir).Msg("Cannot write to configured store, falling back to /app/wacli")
+		storeDir = "/app/wacli"
+		if err := os.MkdirAll(storeDir, 0700); err != nil {
+			return fmt.Errorf("create fallback store dir: %w", err)
+		}
+		b.cfg.WhatsAppStore = storeDir
 	}
 
 	if err := os.WriteFile(storeDir+"/session.db", session.SessionData, 0600); err != nil {
-		return fmt.Errorf("write session.db: %w", err)
+		b.logger.Warn().Err(err).Str("dir", storeDir).Msg("Cannot write to store, falling back to /app/wacli")
+		storeDir = "/app/wacli"
+		os.MkdirAll(storeDir, 0700)
+		b.cfg.WhatsAppStore = storeDir
+		if err := os.WriteFile(storeDir+"/session.db", session.SessionData, 0600); err != nil {
+			return fmt.Errorf("write session.db: %w", err)
+		}
 	}
 	b.logger.Info().Int("bytes", len(session.SessionData)).Str("updated", session.UpdatedAt).Msg("Loaded session.db from database")
 
 	if len(session.WacliData) > 0 {
 		if err := os.WriteFile(storeDir+"/wacli.db", session.WacliData, 0600); err != nil {
-			return fmt.Errorf("write wacli.db: %w", err)
+			b.logger.Warn().Err(err).Msg("Failed to write wacli.db")
+		} else {
+			b.logger.Info().Int("bytes", len(session.WacliData)).Msg("Loaded wacli.db from database")
 		}
-		b.logger.Info().Int("bytes", len(session.WacliData)).Msg("Loaded wacli.db from database")
 	}
 
+	b.logger.Info().Str("store", b.cfg.WhatsAppStore).Msg("WhatsApp session loaded from database")
 	return nil
 }
 
