@@ -23,4 +23,4 @@ ENV NO_COLOR=1
 ENV PORT=7860
 ENV WHATSAPP_ENABLED=0
 ENV WHATSAPP_BINARY=/usr/local/bin/wacli
-CMD ["/bin/sh", "-c", "echo \"MURMUR_COOKIES_JSON length: ${#MURMUR_COOKIES_JSON}\"; if [ -n \"$MURMUR_COOKIES_JSON_B64\" ]; then echo \"$MURMUR_COOKIES_JSON_B64\" | base64 -d > /app/cookies.hf.json; echo \"Decoded from base64\"; elif [ -n \"$MURMUR_COOKIES_JSON\" ]; then echo \"$MURMUR_COOKIES_JSON\" > /app/cookies.hf.json; fi; cat /app/cookies.hf.json | wc -c; exec ./murmur-bridge"]
+CMD ["/bin/sh", "-c", "echo \"MURMUR_COOKIES_JSON length: ${#MURMUR_COOKIES_JSON}\"; if [ -n \"$MURMUR_COOKIES_JSON_B64\" ]; then echo \"$MURMUR_COOKIES_JSON_B64\" | base64 -d > /app/cookies.hf.json; echo \"Decoded from base64\"; elif [ -n \"$MURMUR_COOKIES_JSON\" ]; then echo \"$MURMUR_COOKIES_JSON\" > /app/cookies.hf.json; fi; cat /app/cookies.hf.json | wc -c; mkdir -p /data/wacli; exec ./murmur-bridge"]
