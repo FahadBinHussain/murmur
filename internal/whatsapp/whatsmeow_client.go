@@ -33,6 +33,11 @@ func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHan
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
+	// Ensure the database is created by pinging it
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
 	// Create device store using the raw database connection
 	deviceStore := sqlstore.NewWithDB(db, "sqlite", log)
 	if err := deviceStore.Upgrade(context.Background()); err != nil {
