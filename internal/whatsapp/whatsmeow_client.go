@@ -34,14 +34,17 @@ func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHan
 	}
 
 	// Create device store using the raw database connection
-	device := &store.Device{}
 	deviceStore := sqlstore.NewWithDB(db, "sqlite", log)
+	if err := deviceStore.Upgrade(context.Background()); err != nil {
+		return nil, fmt.Errorf("upgrade device store: %w", err)
+	}
 
 	// Get or create device
 	devices, err := deviceStore.GetAllDevices(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("get devices: %w", err)
 	}
+	var device *store.Device
 	if len(devices) > 0 {
 		device = devices[0]
 	} else {
