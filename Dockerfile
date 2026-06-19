@@ -6,14 +6,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o murmur-bridge ./cmd/murmur-bridge
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg wget && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg wget curl gnupg && \
+    curl -fsSL https://pkg.cloudflareclient.com/install.sh | bash && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/murmur-bridge .
-RUN wget -q https://github.com/openclaw/wacli/releases/download/v0.11.1/wacli_0.11.1_linux_amd64.tar.gz -O /tmp/wacli.tar.gz && \
-    tar -xzf /tmp/wacli.tar.gz -C /tmp && \
-    mv /tmp/wacli /usr/local/bin/wacli && \
-    chmod +x /usr/local/bin/wacli && \
-    rm -rf /tmp/wacli*
 EXPOSE 7860
 ENV MURMUR_COOKIES=/app/cookies.hf.json
 ENV LITELLM_BASE=https://alchoholpad-litellm-huggingface-template.hf.space/v1
@@ -22,5 +19,5 @@ ENV DEFAULT_IMAGE=cloudflare/@cf/black-forest-labs/flux-1-schnell
 ENV NO_COLOR=1
 ENV PORT=7860
 ENV WHATSAPP_ENABLED=0
-ENV WHATSAPP_BINARY=/usr/local/bin/wacli
-CMD ["/bin/sh", "-c", "echo \"MURMUR_COOKIES_JSON length: ${#MURMUR_COOKIES_JSON}\"; if [ -n \"$MURMUR_COOKIES_JSON_B64\" ]; then echo \"$MURMUR_COOKIES_JSON_B64\" | base64 -d > /app/cookies.hf.json; echo \"Decoded from base64\"; elif [ -n \"$MURMUR_COOKIES_JSON\" ]; then echo \"$MURMUR_COOKIES_JSON\" > /app/cookies.hf.json; fi; cat /app/cookies.hf.json | wc -c; mkdir -p /data/wacli; exec ./murmur-bridge"]
+ENV WHATSAPP_PROXY=socks5://127.0.0.1:40000
+CMD ["/bin/sh", "-c", "echo \"MURMUR_COOKIES_JSON length: ${#MURMUR_COOKIES_JSON}\"; if [ -n \"$MURMUR_COOKIES_JSON_B64\" ]; then echo \"$MURMUR_COOKIES_JSON_B64\" | base64 -d > /app/cookies.hf.json; echo \"Decoded from base64\"; elif [ -n \"$MURMUR_COOKIES_JSON\" ]; then echo \"$MURMUR_COOKIES_JSON\" > /app/cookies.hf.json; fi; cat /app/cookies.hf.json | wc -c; mkdir -p /app/wacli; warp-cli registration new 2>/dev/null || true; warp-cli mode proxy 2>/dev/null || true; warp-cli connect 2>/dev/null || true; sleep 2; exec ./murmur-bridge"]
