@@ -2,10 +2,12 @@ package whatsapp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -25,23 +27,32 @@ type WhatsmeowClient struct {
 func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHandler) (*WhatsmeowClient, error) {
 	log := waLog.Zerolog(logger.With().Str("component", "whatsmeow").Logger())
 
-	// modernc.org/sqlite registers as "sqlite" driver
-	// whatsmeow expects "sqlite3" - use NewWithDB to bypass dialect check
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", log)
+	// Open database with modernc.org/sqlite driver (registers as "sqlite")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_foreign_keys=on")
 	if err != nil {
-		return nil, fmt.Errorf("create device store: %w", err)
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	deviceStore, err := container.GetFirstDevice(context.Background())
+	// Create device store using the raw database connection
+	device := &store.Device{}
+	deviceStore := sqlstore.NewWithDB(db, "sqlite", log)
+
+	// Get or create device
+	devices, err := deviceStore.GetAllDevices(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("get first device: %w", err)
+		return nil, fmt.Errorf("get devices: %w", err)
+	}
+	if len(devices) > 0 {
+		device = devices[0]
+	} else {
+		device = deviceStore.NewDevice()
 	}
 
-	client := whatsmeow.NewClient(deviceStore, log)
+	client := whatsmeow.NewClient(device, log)
 
 	w := &WhatsmeowClient{
 		client:      client,
-		deviceStore: container,
+		deviceStore: deviceStore,
 		logger:      logger,
 		handler:     handler,
 	}
