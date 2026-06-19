@@ -63,13 +63,6 @@ func NewWhatsmeowClient(dbPath string, proxyAddr string, logger zerolog.Logger, 
 
 	client := whatsmeow.NewClient(device, log)
 
-	// Set custom HTTP client with Chrome TLS fingerprint to bypass JA3 detection
-	wsHTTPClient := NewChromeHTTPClient(proxyAddr)
-	client.SetWebsocketHTTPClient(wsHTTPClient)
-	client.SetPreLoginHTTPClient(wsHTTPClient)
-	client.SetMediaHTTPClient(wsHTTPClient)
-	logger.Info().Msg("Chrome TLS fingerprint impersonation enabled (bypass JA3)")
-
 	w := &WhatsmeowClient{
 		client:      client,
 		deviceStore: deviceStore,
