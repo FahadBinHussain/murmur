@@ -30,6 +30,7 @@ type Config struct {
 	WhatsAppWebhookSecret string
 	WhatsAppMaxMessages  int
 	WhatsAppDownloadMedia bool
+	WhatsAppProxy        string
 }
 
 func Load() *Config {
@@ -98,6 +99,9 @@ func Load() *Config {
 	}
 	if v := os.Getenv("WHATSAPP_DOWNLOAD_MEDIA"); v == "1" || strings.ToLower(v) == "true" {
 		cfg.WhatsAppDownloadMedia = true
+	}
+	if v := os.Getenv("WHATSAPP_PROXY"); v != "" {
+		cfg.WhatsAppProxy = v
 	}
 
 	return cfg

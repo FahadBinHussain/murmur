@@ -24,7 +24,7 @@ type WhatsmeowClient struct {
 	connected   bool
 }
 
-func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHandler) (*WhatsmeowClient, error) {
+func NewWhatsmeowClient(dbPath string, proxyAddr string, logger zerolog.Logger, handler MessageHandler) (*WhatsmeowClient, error) {
 	log := waLog.Zerolog(logger.With().Str("component", "whatsmeow").Logger())
 
 	// Open database with modernc.org/sqlite driver (registers as "sqlite")
@@ -68,6 +68,15 @@ func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHan
 		deviceStore: deviceStore,
 		logger:      logger,
 		handler:     handler,
+	}
+
+	// Set proxy for WhatsApp E2EE connection only
+	if proxyAddr != "" {
+		if err := client.SetProxyAddress(proxyAddr); err != nil {
+			logger.Warn().Err(err).Str("proxy", proxyAddr).Msg("Failed to set WhatsApp proxy")
+		} else {
+			logger.Info().Str("proxy", proxyAddr).Msg("WhatsApp proxy configured (E2EE only)")
+		}
 	}
 
 	client.AddEventHandler(w.handleEvent)
