@@ -84,3 +84,11 @@ bridge-stderr.txt
 bridge-stdout.txt
 bridge-input2.jsonl
 cookies.hf.json
+
+# WhatsApp auth (SENSITIVE)
+session.db
+wacli.db
+*.db-journal
+*.db-wal
+*.db-shm
+wacli-data/

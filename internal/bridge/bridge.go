@@ -1019,6 +1019,13 @@ func truncateStr(s string, max int) string {
 	return s[:max] + "..."
 }
 
+func getPort() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return p
+	}
+	return "7860"
+}
+
 func (b *Bridge) startHTTPServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cookies/upload", b.handleCookieUpload)
@@ -1033,7 +1040,7 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 	}
 
 	b.httpServer = &http.Server{
-		Addr:    ":7860",
+		Addr:    ":" + getPort(),
 		Handler: mux,
 	}
 
