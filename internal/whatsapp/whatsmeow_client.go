@@ -28,9 +28,14 @@ func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHan
 	log := waLog.Zerolog(logger.With().Str("component", "whatsmeow").Logger())
 
 	// Open database with modernc.org/sqlite driver (registers as "sqlite")
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?_foreign_keys=on&_journal_mode=WAL")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// Enable foreign keys via pragma
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	// Ensure the database is created by pinging it
