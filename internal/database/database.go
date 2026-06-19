@@ -57,6 +57,17 @@ func (db *DB) migrate(ctx context.Context) error {
 	_, err = db.pool.Exec(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)
 	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS whatsapp_sessions (
+			id           TEXT PRIMARY KEY DEFAULT 'default',
+			session_data BYTEA NOT NULL,
+			wacli_data   BYTEA,
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
 	return err
 }
 
@@ -137,6 +148,32 @@ func (db *DB) SaveMessages(ctx context.Context, threadID int64, messages []Messa
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+type WhatsAppSession struct {
+	SessionData []byte
+	WacliData   []byte
+	UpdatedAt   string
+}
+
+func (db *DB) SaveWhatsAppSession(ctx context.Context, sessionData, wacliData []byte) error {
+	_, err := db.pool.Exec(ctx, `
+		INSERT INTO whatsapp_sessions (id, session_data, wacli_data, updated_at)
+		VALUES ('default', $1, $2, NOW())
+		ON CONFLICT (id) DO UPDATE SET session_data = $1, wacli_data = $2, updated_at = NOW()
+	`, sessionData, wacliData)
+	return err
+}
+
+func (db *DB) LoadWhatsAppSession(ctx context.Context) (*WhatsAppSession, error) {
+	var s WhatsAppSession
+	err := db.pool.QueryRow(ctx,
+		`SELECT session_data, wacli_data, updated_at::text FROM whatsapp_sessions WHERE id = 'default'`,
+	).Scan(&s.SessionData, &s.WacliData, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 func (db *DB) GetRecentMessages(ctx context.Context, threadID int64, limit int) ([]Message, error) {

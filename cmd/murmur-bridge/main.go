@@ -57,6 +57,11 @@ func main() {
 
 	// Start WhatsApp sync if enabled
 	if cfg.WhatsAppEnabled {
+		// Load session from Neon database before starting sync
+		if err := theBridge.LoadSessionFromDB(theCtx); err != nil {
+			log.Error().Err(err).Msg("Failed to load WhatsApp session from database")
+		}
+
 		webhookURL := fmt.Sprintf("http://localhost:7860/wacli/webhook")
 		syncMgr := whatsapp.NewSyncManager(
 			cfg.WhatsAppBinary,

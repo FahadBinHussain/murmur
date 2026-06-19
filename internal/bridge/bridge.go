@@ -165,6 +165,40 @@ func (b *Bridge) SetSyncManager(sm *whatsapp.SyncManager) {
 	b.waSync = sm
 }
 
+func (b *Bridge) LoadSessionFromDB(ctx context.Context) error {
+	if b.db == nil {
+		return nil
+	}
+	session, err := b.db.LoadWhatsAppSession(ctx)
+	if err != nil {
+		b.logger.Warn().Err(err).Msg("No WhatsApp session in database")
+		return nil
+	}
+
+	storeDir := b.cfg.WhatsAppStore
+	if storeDir == "" {
+		home, _ := os.UserHomeDir()
+		storeDir = home + "/.wacli"
+	}
+	if err := os.MkdirAll(storeDir, 0700); err != nil {
+		return fmt.Errorf("create store dir: %w", err)
+	}
+
+	if err := os.WriteFile(storeDir+"/session.db", session.SessionData, 0600); err != nil {
+		return fmt.Errorf("write session.db: %w", err)
+	}
+	b.logger.Info().Int("bytes", len(session.SessionData)).Str("updated", session.UpdatedAt).Msg("Loaded session.db from database")
+
+	if len(session.WacliData) > 0 {
+		if err := os.WriteFile(storeDir+"/wacli.db", session.WacliData, 0600); err != nil {
+			return fmt.Errorf("write wacli.db: %w", err)
+		}
+		b.logger.Info().Int("bytes", len(session.WacliData)).Msg("Loaded wacli.db from database")
+	}
+
+	return nil
+}
+
 func (b *Bridge) loadSavedModels(ctx context.Context) {
 	if b.db == nil {
 		return
@@ -1208,6 +1242,21 @@ func (b *Bridge) handleWacliSessionUpload(w http.ResponseWriter, r *http.Request
 		}
 
 		b.logger.Info().Str("path", dstPath).Int("size", len(body)).Msg("Wacli session file uploaded")
+	}
+
+	// Also save session to Neon database for persistence across restarts
+	if b.db != nil {
+		sessionPath := storeDir + "/session.db"
+		wacliPath := storeDir + "/wacli.db"
+		sessionBytes, _ := os.ReadFile(sessionPath)
+		wacliBytes, _ := os.ReadFile(wacliPath)
+		if len(sessionBytes) > 0 {
+			if err := b.db.SaveWhatsAppSession(r.Context(), sessionBytes, wacliBytes); err != nil {
+				b.logger.Error().Err(err).Msg("Failed to save WhatsApp session to database")
+			} else {
+				b.logger.Info().Msg("WhatsApp session saved to database")
+			}
+		}
 	}
 
 	if b.waSync != nil {
