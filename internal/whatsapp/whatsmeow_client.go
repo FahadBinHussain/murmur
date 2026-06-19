@@ -11,7 +11,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type WhatsmeowClient struct {
@@ -25,6 +25,8 @@ type WhatsmeowClient struct {
 func NewWhatsmeowClient(dbPath string, logger zerolog.Logger, handler MessageHandler) (*WhatsmeowClient, error) {
 	log := waLog.Zerolog(logger.With().Str("component", "whatsmeow").Logger())
 
+	// modernc.org/sqlite registers as "sqlite" driver
+	// whatsmeow expects "sqlite3" - use NewWithDB to bypass dialect check
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", log)
 	if err != nil {
 		return nil, fmt.Errorf("create device store: %w", err)
