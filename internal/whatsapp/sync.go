@@ -1,7 +1,6 @@
 package whatsapp
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -48,9 +47,8 @@ func (sm *SyncManager) start() error {
 	sm.logger.Info().Strs("args", args).Msg("Starting wacli sync")
 
 	sm.cmd = exec.CommandContext(sm.ctx, sm.binary, args...)
-	var stdout, stderr bytes.Buffer
-	sm.cmd.Stdout = &stdout
-	sm.cmd.Stderr = &stderr
+	sm.cmd.Stdout = nil
+	sm.cmd.Stderr = nil
 
 	if err := sm.cmd.Start(); err != nil {
 		return fmt.Errorf("start wacli sync: %w", err)
@@ -58,12 +56,6 @@ func (sm *SyncManager) start() error {
 
 	go func() {
 		err := sm.cmd.Wait()
-		if stderr.Len() > 0 {
-			sm.logger.Error().Str("stderr", stderr.String()).Msg("wacli sync stderr")
-		}
-		if stdout.Len() > 0 {
-			sm.logger.Error().Str("stdout", stdout.String()).Msg("wacli sync stdout")
-		}
 		if err != nil {
 			sm.logger.Error().Err(err).Msg("wacli sync exited")
 		} else {
