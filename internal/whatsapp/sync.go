@@ -48,13 +48,20 @@ func (sm *SyncManager) start() error {
 
 	sm.cmd = exec.CommandContext(sm.ctx, sm.binary, args...)
 	sm.cmd.Stdout = nil
-	sm.cmd.Stderr = nil
+	stderr, _ := sm.cmd.StderrPipe()
 
 	if err := sm.cmd.Start(); err != nil {
 		return fmt.Errorf("start wacli sync: %w", err)
 	}
 
 	go func() {
+		if stderr != nil {
+			buf := make([]byte, 4096)
+			n, _ := stderr.Read(buf)
+			if n > 0 {
+				sm.logger.Error().Str("stderr", string(buf[:n])).Msg("wacli sync stderr")
+			}
+		}
 		err := sm.cmd.Wait()
 		if err != nil {
 			sm.logger.Error().Err(err).Msg("wacli sync exited")
