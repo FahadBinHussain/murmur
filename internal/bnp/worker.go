@@ -131,17 +131,7 @@ func (w *Worker) claimItems(ctx context.Context) ([]Item, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d: %+v", resp.StatusCode, body)
 	}
-	// Only send "published" phase (skip "detected" to avoid duplicate messages)
-	var filtered []Item
-	for _, item := range body.Items {
-		if item.Phase == "published" {
-			filtered = append(filtered, item)
-		} else {
-			// ack "detected" phase items immediately so they don't block the queue
-			w.ackItem(ctx, item.ID, "sent", "", "")
-		}
-	}
-	return filtered, nil
+	return body.Items, nil
 }
 
 func (w *Worker) sendItem(ctx context.Context, item Item) {
