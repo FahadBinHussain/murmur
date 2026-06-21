@@ -1,0 +1,24 @@
+{
+  "version": "0.1.0",
+  "description": "Messenger AI bridge",
+  "homepage": "https://github.com/user/murmur",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/user/murmur/releases/download/v0.1.0/murmur-bridge-windows-amd64.exe",
+      "hash": ""
+    }
+  },
+  "bin": "murmur-bridge.exe",
+  "env_set": {
+    "MURMUR_COOKIES": "$persist_dir\\cookies.json"
+  },
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/user/murmur/releases/download/v$version/murmur-bridge-windows-amd64.exe"
+      }
+    }
+  }
+}

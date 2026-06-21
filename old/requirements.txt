@@ -1,0 +1,8 @@
+aiohttp>=3.9.0
+cryptography>=42.0.0
+curl_cffi>=0.15.0
+fbchat-muqit>=1.2.2
+fbchat-v2>=2.1.0
+psycopg[binary]>=3.2.0
+PySocks>=1.7.1
+python-dotenv>=1.0.0

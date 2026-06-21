@@ -1,0 +1,8 @@
+{
+  "name": "murmur-fca-unofficial",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@dongdev/fca-unofficial": "^4.0.3"
+  }
+}

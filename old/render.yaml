@@ -1,0 +1,59 @@
+services:
+  - type: web
+    name: murmur
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MURMUR_COOKIE_STATE_SECRET
+        generateValue: true
+      - key: MURMUR_ADMIN_USERNAME
+        sync: false
+      - key: MURMUR_ADMIN_PASSWORD
+        sync: false
+      - key: MURMUR_STATE_DATABASE_URL
+        sync: false
+      - key: MURMUR_AI_BACKEND
+        value: litellm
+      - key: LITELLM_BASE_URL
+        sync: false
+      - key: LITELLM_API_KEY
+        sync: false
+      - key: LITELLM_MODEL
+        sync: false
+      - key: OPENWEBUI_BASE_URL
+        sync: false
+      - key: OPENWEBUI_API_KEY
+        sync: false
+      - key: OPENWEBUI_MODEL
+        sync: false
+      - key: OPENWEBUI_WARMUP
+        value: "false"
+      - key: OPENWEBUI_WARMUP_CHAT
+        value: "false"
+      - key: LOBE_SYNC_ENABLED
+        value: "false"
+      - key: LOBE_DATABASE_URL
+        sync: false
+      - key: LOBE_SYNC_USER_EMAIL
+        sync: false
+      - key: LOBE_SYNC_USER_ID
+        sync: false
+      - key: IMAGE_GENERATION_MODEL
+        sync: false
+      - key: FB_COOKIES_JSON_B64
+        sync: false
+      - key: BOT_PREFIX
+        value: /ai
+      - key: RESPOND_ONLY_ON_PREFIX
+        value: "true"
+      - key: MURMUR_AUTOMATION_NOTIFICATIONS
+        value: "true"
+      - key: MURMUR_AUTOMATION_NOTIFICATION_TOKEN
+        sync: false
+      - key: MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID
+        value: "2637078310061988"
+      - key: MURMUR_AUTOMATION_NOTIFICATION_POLL_SECONDS
+        value: "10"
+      - key: MURMUR_AUTOMATION_NOTIFICATION_CLAIM_LIMIT
+        value: "5"

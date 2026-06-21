@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.exe
+*.log
+.git/
+.gitignore
+old/
+meta/
+docs/
+.hf-remote-check/
+test-*
