@@ -11,7 +11,7 @@ WORKDIR /app
 COPY --from=builder /build/murmur-bridge .
 EXPOSE 7860
 ENV MURMUR_COOKIES=/app/cookies.hf.json
-ENV LITELLM_BASE=https://alchoholpad-litellm-huggingface-template.hf.space/v1
+ENV LITELLM_BASE=https://alchoholpad-litellm.hf.space/v1
 ENV DEFAULT_CHAT=openrouter/google/gemma-4-31b-it:free
 ENV DEFAULT_IMAGE=cloudflare/@cf/black-forest-labs/flux-1-schnell
 ENV NO_COLOR=1
