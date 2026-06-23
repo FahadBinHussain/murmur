@@ -1120,9 +1120,13 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.Write([]byte("murmur"))
 	})
 
+	// WhatsApp webhook endpoint is always available (local wacli sends to this)
+	mux.HandleFunc("/wacli/webhook", b.handleWhatsAppWebhook)
+	mux.HandleFunc("/api/wacli/session", b.handleWacliSessionUpload)
+
+	// Only start built-in whatsmeow client if explicitly enabled (disabled by default, use webhook instead)
 	if b.cfg.WhatsAppEnabled {
-		mux.HandleFunc("/wacli/webhook", b.handleWhatsAppWebhook)
-		mux.HandleFunc("/api/wacli/session", b.handleWacliSessionUpload)
+		log.Info().Msg("WhatsApp built-in client enabled (WHATSAPP_ENABLED=1)")
 	}
 
 	b.httpServer = &http.Server{
