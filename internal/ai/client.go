@@ -20,7 +20,7 @@ type Client struct {
 
 func NewClient(baseURL, defaultChat, defaultImage string) *Client {
 	if baseURL == "" {
-		baseURL = "https://alchoholpad-litellm-huggingface-template.hf.space/v1"
+		baseURL = "https://alchoholpad-litellm.hf.space/v1"
 	}
 	if defaultChat == "" {
 		defaultChat = "openrouter/google/gemma-4-31b-it:free"
@@ -219,22 +219,54 @@ func (c *Client) ListModelsWithList(page int) (string, []string) {
 	return paginateWithList(all, page, "Chat Models", "models")
 }
 
+type usableModelsResponse struct {
+	Chat    []string `json:"chat"`
+	Image   []string `json:"image"`
+	Vision  []string `json:"vision"`
+}
+
 func (c *Client) AllChatModels() []string {
-	result, err := c.request("GET", "/model-catalog", nil)
+	result, err := c.request("GET", "/usable-models", nil)
 	if err != nil {
 		return nil
 	}
 	var models []string
-	if data, ok := result["data"].([]interface{}); ok {
+	if data, ok := result["chat"].([]interface{}); ok {
 		for _, m := range data {
-			if entry, ok := m.(map[string]interface{}); ok {
-				if usable, _ := entry["usable"].(bool); usable {
-					if imgUsable, _ := entry["image_usable"].(bool); !imgUsable {
-						if id, ok := entry["id"].(string); ok {
-							models = append(models, id)
-						}
-					}
-				}
+			if id, ok := m.(string); ok {
+				models = append(models, id)
+			}
+		}
+	}
+	return models
+}
+
+func (c *Client) AllImageModels() []string {
+	result, err := c.request("GET", "/usable-models", nil)
+	if err != nil {
+		return nil
+	}
+	var models []string
+	if data, ok := result["image"].([]interface{}); ok {
+		for _, m := range data {
+			if id, ok := m.(string); ok {
+				models = append(models, id)
+			}
+		}
+	}
+	return models
+}
+
+func (c *Client) AllVisionModels() []string {
+	result, err := c.request("GET", "/usable-models", nil)
+	if err != nil {
+		return nil
+	}
+	var models []string
+	if data, ok := result["vision"].([]interface{}); ok {
+		for _, m := range data {
+			if id, ok := m.(string); ok {
+				models = append(models, id)
 			}
 		}
 	}
@@ -251,28 +283,18 @@ func (c *Client) ListImageModelsWithList(page int) (string, []string) {
 	return paginateWithList(all, page, "Image Models", "image models")
 }
 
-func (c *Client) AllImageModels() []string {
-	result, err := c.request("GET", "/model-catalog", nil)
-	if err != nil {
-		return nil
-	}
-	var models []string
-	if data, ok := result["data"].([]interface{}); ok {
-		for _, m := range data {
-			if entry, ok := m.(map[string]interface{}); ok {
-				if imgUsable, _ := entry["image_usable"].(bool); imgUsable {
-					if id, ok := entry["id"].(string); ok {
-						models = append(models, id)
-					}
-				}
-			}
-		}
-	}
-	return models
+func (c *Client) ListVisionModels(page int) string {
+	text, _ := c.ListVisionModelsWithList(page)
+	return text
+}
+
+func (c *Client) ListVisionModelsWithList(page int) (string, []string) {
+	all := c.AllVisionModels()
+	return paginateWithList(all, page, "Vision Models", "vision models")
 }
 
 func (c *Client) ListAllModels(page int) string {
-	result, err := c.request("GET", "/models", nil)
+	result, err := c.request("GET", "/v1/models", nil)
 	if err != nil {
 		return fmt.Sprintf("[error] %v", err)
 	}
@@ -287,29 +309,6 @@ func (c *Client) ListAllModels(page int) string {
 		}
 	}
 	return paginate(models, page, "Models", "models full")
-}
-
-func (c *Client) ListAllImageModels(page int) string {
-	result, err := c.request("GET", "/models", nil)
-	if err != nil {
-		return fmt.Sprintf("[error] %v", err)
-	}
-	var models []string
-	if data, ok := result["data"].([]interface{}); ok {
-		for _, m := range data {
-			if entry, ok := m.(map[string]interface{}); ok {
-				if id, ok := entry["id"].(string); ok {
-					if strings.Contains(id, "image") || strings.Contains(id, "flux") ||
-						strings.Contains(id, "sd-xl") || strings.Contains(id, "stable-diffusion") ||
-						strings.Contains(id, "sdxl") || strings.Contains(id, "illustrious") ||
-						strings.Contains(id, "illustrij") {
-						models = append(models, id)
-					}
-				}
-			}
-		}
-	}
-	return paginate(models, page, "Image Models", "image models full")
 }
 
 func paginate(models []string, page int, header, cmd string) string {
@@ -378,13 +377,13 @@ func (c *Client) HandleCommand(text string) string {
 		return c.Status()
 	}
 
-	if strings.HasPrefix(lower, "/ai image models full") {
-		page := ParsePage(parts, 4)
-		return c.ListAllImageModels(page)
-	}
 	if strings.HasPrefix(lower, "/ai image models") {
 		page := ParsePage(parts, 3)
 		return c.ListImageModels(page)
+	}
+	if strings.HasPrefix(lower, "/ai vision models") {
+		page := ParsePage(parts, 3)
+		return c.ListVisionModels(page)
 	}
 	if strings.HasPrefix(lower, "/ai models full") {
 		page := ParsePage(parts, 3)
@@ -427,9 +426,9 @@ image:
 
 models:
   /ai models                list chat models
-  /ai models full           list all models
+  /ai models full           list all models (full catalog)
   /ai image models          list image models
-  /ai image models full     list all image models
+  /ai vision models         list vision models
 
 select:
   /ai model <number>        set chat model

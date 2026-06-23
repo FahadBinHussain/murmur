@@ -10,7 +10,7 @@
 param(
     [string]$CookiesPath = "$PSScriptRoot\..\cookies_map.json",
     [string]$Platform = "messenger",
-    [string]$LiteLLMBase = "https://alchoholpad-litellm-huggingface-template.hf.space/v1"
+    [string]$LiteLLMBase = "https://alchoholpad-litellm.hf.space/v1"
 )
 
 $env:MURMUR_COOKIES = $CookiesPath
