@@ -551,13 +551,13 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 	return msgID
 }
 
-func (b *Bridge) editMessage(ctx context.Context, threadID int64, messageID string, text string) {
+func (b *Bridge) EditMessage(ctx context.Context, threadID int64, messageID string, text string) error {
 	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
 		if messageID == "" {
 			b.SendMessage(ctx, threadID, text)
-			return
+			return nil
 		}
-		return
+		return fmt.Errorf("whatsapp edits are not supported")
 	}
 
 	_, err := b.client.ExecuteTasks(ctx, &socket.EditMessageTask{
@@ -566,7 +566,13 @@ func (b *Bridge) editMessage(ctx context.Context, threadID int64, messageID stri
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to edit message")
+		return err
 	}
+	return nil
+}
+
+func (b *Bridge) editMessage(ctx context.Context, threadID int64, messageID string, text string) {
+	_ = b.EditMessage(ctx, threadID, messageID, text)
 }
 
 func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte, mimeType string) {
@@ -854,24 +860,24 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 
 func (b *Bridge) handleModelSelect(ctx context.Context, threadID int64, choice int, isImage bool) {
 	if isImage {
-	if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
-		if choice >= 1 && choice <= len(models) {
-			selected := models[choice-1]
-			b.threadImgModels[threadID] = selected
-			delete(b.pendingImgModels, threadID)
-			if b.db != nil {
-				if err := b.db.SetImageModel(ctx, threadID, selected); err != nil {
-					log.Error().Err(err).Msg("Failed to save image model")
+		if models, ok := b.pendingImgModels[threadID]; ok && len(models) > 0 {
+			if choice >= 1 && choice <= len(models) {
+				selected := models[choice-1]
+				b.threadImgModels[threadID] = selected
+				delete(b.pendingImgModels, threadID)
+				if b.db != nil {
+					if err := b.db.SetImageModel(ctx, threadID, selected); err != nil {
+						log.Error().Err(err).Msg("Failed to save image model")
+					}
 				}
+				b.SendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
+				return
 			}
-			b.SendMessage(ctx, threadID, fmt.Sprintf("[image model set to %s]", selected))
+			b.SendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
 			return
 		}
-		b.SendMessage(ctx, threadID, fmt.Sprintf("[invalid choice, pick 1-%d]", len(models)))
+		b.SendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
 		return
-	}
-	b.SendMessage(ctx, threadID, "[no image models listed yet, run /ai image models first]")
-	return
 	}
 
 	if models, ok := b.pendingModels[threadID]; ok && len(models) > 0 {
@@ -1232,8 +1238,7 @@ func (b *Bridge) handleAutomationNotification(w http.ResponseWriter, r *http.Req
 
 	threadIDStr := req.ThreadID
 	if threadIDStr == "" {
-		http.Error(w, "threadId is required", http.StatusBadRequest)
-		return
+		threadIDStr = automationNotificationDefaultThreadID()
 	}
 	threadID, err := strconv.ParseInt(threadIDStr, 10, 64)
 	if err != nil {
@@ -1260,6 +1265,13 @@ func (b *Bridge) handleAutomationNotification(w http.ResponseWriter, r *http.Req
 		"id":     notifID,
 		"status": "sent",
 	})
+}
+
+func automationNotificationDefaultThreadID() string {
+	if v := os.Getenv("MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID"); v != "" {
+		return v
+	}
+	return "2637078310061988"
 }
 
 func (b *Bridge) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {

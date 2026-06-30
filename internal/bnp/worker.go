@@ -54,14 +54,16 @@ func (s *Settings) Enabled() bool {
 }
 
 type Item struct {
-	ID      string `json:"id"`
-	Message string `json:"message"`
-	Phase   string `json:"phase"`
+	ID        string `json:"id"`
+	Message   string `json:"message"`
+	Phase     string `json:"phase"`
+	Status    string `json:"status"`
+	MessageID string `json:"messageId"`
 }
 
 type Worker struct {
-	client *bridge.Bridge
-	settings *Settings
+	client     *bridge.Bridge
+	settings   *Settings
 	httpClient *http.Client
 }
 
@@ -70,8 +72,8 @@ func NewWorker(b *bridge.Bridge, s *Settings) *Worker {
 		s = LoadSettings()
 	}
 	return &Worker{
-		client: b,
-		settings: s,
+		client:     b,
+		settings:   s,
 		httpClient: &http.Client{Timeout: time.Duration(s.Timeout) * time.Second},
 	}
 }
@@ -141,19 +143,32 @@ func (w *Worker) sendItem(ctx context.Context, item Item) {
 	threadID, err := strconv.ParseInt(w.settings.ThreadID, 10, 64)
 	if err != nil {
 		fmt.Printf("BNP invalid thread ID: %v\n", err)
-		w.ackItem(ctx, item.ID, "failed", "", err.Error())
+		w.ackItem(ctx, item.ID, "failed", "", "", err.Error())
 		return
 	}
+
+	if item.Status == "edit_pending" && item.MessageID != "" {
+		if err := w.client.EditMessage(ctx, threadID, item.MessageID, item.Message); err != nil {
+			w.ackItem(ctx, item.ID, "failed", "", "", err.Error())
+			return
+		}
+		w.ackItem(ctx, item.ID, "sent", item.MessageID, "edit", "")
+		return
+	}
+
 	msgID := w.client.SendMessage(ctx, threadID, item.Message)
 	if msgID == "" {
-		w.ackItem(ctx, item.ID, "failed", "", "send returned empty message ID")
+		w.ackItem(ctx, item.ID, "failed", "", "", "send returned empty message ID")
 		return
 	}
-	w.ackItem(ctx, item.ID, "sent", msgID, "")
+	w.ackItem(ctx, item.ID, "sent", msgID, "send", "")
 }
 
-func (w *Worker) ackItem(ctx context.Context, itemID, status, messageID, errMsg string) {
+func (w *Worker) ackItem(ctx context.Context, itemID, status, messageID, mode, errMsg string) {
 	payload := map[string]string{"id": itemID, "status": status}
+	if mode != "" {
+		payload["mode"] = mode
+	}
 	if messageID != "" {
 		payload["messageId"] = messageID
 	}

@@ -62,6 +62,13 @@ murmur-bridge --cookies path/to/cookies.json --platform messenger
 | WHATSAPP_WEBHOOK_SECRET | | HMAC secret for webhook verification |
 | WHATSAPP_MAX_MESSAGES | | Max messages to store locally |
 | WHATSAPP_DOWNLOAD_MEDIA | 0 | Download media during sync |
+| BNP_MESSENGER_OUTBOX_URL | https://dailybnp.com/api/internal/bnp-messenger-outbox | DailyBNP outbox endpoint for article notifications |
+| BNP_MESSENGER_THREAD_ID | 984803114200952 | Messenger thread for DailyBNP article notifications |
+| BNP_MESSENGER_POLL_SECONDS | 30 | Poll interval for BNP outbox |
+| BNP_MESSENGER_CLAIM_LIMIT | 2 | Max BNP outbox items claimed per poll |
+| BNP_MESSENGER_REQUEST_TIMEOUT_SECONDS | 30 | HTTP timeout for BNP outbox calls |
+| MURMUR_AUTOMATION_NOTIFICATION_PATH | /api/automation/notifications | Proxy endpoint for local/Codex automation notification enqueue calls |
+| MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID | 2637078310061988 | Default Messenger thread for automation notifications when no threadId is provided |
 
 ## install (scoop)
 
