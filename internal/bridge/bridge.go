@@ -297,7 +297,7 @@ func (b *Bridge) ReloadCookies(ctx context.Context) error {
 	}
 
 	go func() {
-		err := b.client.Connect(ctx)
+		err := b.client.Connect(context.Background())
 		if err != nil {
 			log.Error().Err(err).Msg("Reconnect failed")
 		}
