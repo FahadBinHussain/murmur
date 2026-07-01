@@ -292,8 +292,9 @@ func (b *Bridge) ReloadCookies(ctx context.Context) error {
 	})
 
 	// Re-attach event handler so incoming messages are processed after reconnect
+	// Use context.Background() because the HTTP request context dies when the POST response is sent.
 	if b.stdout != nil {
-		b.client.SetEventHandler(b.makeEventHandler(ctx, b.stdout))
+		b.client.SetEventHandler(b.makeEventHandler(context.Background(), b.stdout))
 	}
 
 	go func() {
