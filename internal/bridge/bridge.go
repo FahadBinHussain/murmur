@@ -307,6 +307,16 @@ func (b *Bridge) ReloadCookies(ctx context.Context) error {
 		log.Warn().Msg("ReloadCookies: b.stdout is nil, cannot re-attach event handler")
 	}
 
+	// Load messages page to initialize broker (required before Connect)
+	log.Info().Msg("ReloadCookies: loading messages page to init broker")
+	userInfo, _, err := b.client.LoadMessagesPage(context.Background())
+	if err != nil {
+		log.Error().Err(err).Msg("ReloadCookies: LoadMessagesPage failed")
+		return fmt.Errorf("load messages page: %w", err)
+	}
+	b.uid = userInfo.GetFBID()
+	log.Info().Int64("uid", b.uid).Str("name", userInfo.GetName()).Msg("ReloadCookies: logged in")
+
 	log.Info().Msg("ReloadCookies: launching connect goroutine")
 	go func() {
 		log.Info().Msg("ReloadCookies: connect goroutine started")
