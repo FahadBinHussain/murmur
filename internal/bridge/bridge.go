@@ -87,6 +87,8 @@ type Bridge struct {
 	waClient         *whatsapp.WhatsmeowClient
 	threadChannel    map[int64]string
 	waJIDs           map[int64]string
+	stdout           io.Writer
+	startTime        time.Time
 }
 
 func writeEvent(w io.Writer, evt OutgoingEvent) {
@@ -289,6 +291,11 @@ func (b *Bridge) ReloadCookies(ctx context.Context) error {
 		MayConnectToDGW: false,
 	})
 
+	// Re-attach event handler so incoming messages are processed after reconnect
+	if b.stdout != nil {
+		b.client.SetEventHandler(b.makeEventHandler(ctx, b.stdout))
+	}
+
 	go func() {
 		err := b.client.Connect(ctx)
 		if err != nil {
@@ -299,40 +306,12 @@ func (b *Bridge) ReloadCookies(ctx context.Context) error {
 	return nil
 }
 
-func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
-	ctx, cancel := context.WithCancel(ctx)
-	b.cancel = cancel
-	defer cancel()
-
-	// Start HTTP API server for cookie uploads
-	b.startHTTPServer(ctx)
-
-	startTime := time.Now()
-
-	writeEvent(stdout, OutgoingEvent{Type: "log", Data: "Loading messages page..."})
-
-	userInfo, _, err := b.client.LoadMessagesPage(ctx)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load messages page")
-	}
-
-	b.uid = userInfo.GetFBID()
-	userName := userInfo.GetName()
-	log.Info().Int64("uid", b.uid).Str("name", userName).Msg("Logged in")
-
-	writeEvent(stdout, OutgoingEvent{
-		Type: "ready",
-		Data: ReadyData{UID: b.uid, Name: userName},
-	})
-
-	writeEvent(stdout, OutgoingEvent{Type: "log", Data: "Connecting to MQTT..."})
-
-	b.client.SetEventHandler(func(evtCtx context.Context, evt any) {
+func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(context.Context, any) {
+	return func(evtCtx context.Context, evt any) {
 		switch e := evt.(type) {
 		case *messagix.Event_Ready:
 			log.Info().Any("connection_code", e.ConnectionCode).Msg("MQTT connected")
 			writeEvent(stdout, OutgoingEvent{Type: "mqtt_connected"})
-			// Start periodic foreground state keepalive
 			go func() {
 				ticker := time.NewTicker(60 * time.Second)
 				defer ticker.Stop()
@@ -380,7 +359,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 
 				if msg.SenderId != b.uid {
 					ts := time.UnixMilli(msg.TimestampMs)
-					if ts.Before(startTime.Add(-5 * time.Second)) {
+					if ts.Before(b.startTime.Add(-5 * time.Second)) {
 						continue
 					}
 					if b.shouldRespond(msg.LSInsertMessage) {
@@ -418,7 +397,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 
 					if msg.SenderId != b.uid {
 						ts := time.UnixMilli(msg.TimestampMs)
-						if ts.Before(startTime.Add(-5 * time.Second)) {
+						if ts.Before(b.startTime.Add(-5 * time.Second)) {
 							continue
 						}
 						if b.shouldRespond(msg.LSInsertMessage) {
@@ -460,7 +439,38 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		default:
 			log.Info().Str("type", fmt.Sprintf("%T", evt)).Msg("Unhandled event type")
 		}
+	}
+}
+
+func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
+	ctx, cancel := context.WithCancel(ctx)
+	b.cancel = cancel
+	defer cancel()
+	b.stdout = stdout
+	b.startTime = time.Now()
+
+	// Start HTTP API server for cookie uploads
+	b.startHTTPServer(ctx)
+
+	writeEvent(stdout, OutgoingEvent{Type: "log", Data: "Loading messages page..."})
+
+	userInfo, _, err := b.client.LoadMessagesPage(ctx)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to load messages page")
+	}
+
+	b.uid = userInfo.GetFBID()
+	userName := userInfo.GetName()
+	log.Info().Int64("uid", b.uid).Str("name", userName).Msg("Logged in")
+
+	writeEvent(stdout, OutgoingEvent{
+		Type: "ready",
+		Data: ReadyData{UID: b.uid, Name: userName},
 	})
+
+	writeEvent(stdout, OutgoingEvent{Type: "log", Data: "Connecting to MQTT..."})
+
+	b.client.SetEventHandler(b.makeEventHandler(ctx, stdout))
 
 	go func() {
 		err := b.client.Connect(ctx)
