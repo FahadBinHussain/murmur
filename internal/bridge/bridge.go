@@ -264,10 +264,13 @@ func (b *Bridge) loadSavedModels(ctx context.Context) {
 }
 
 func (b *Bridge) ReloadCookies(ctx context.Context) error {
+	log.Info().Msg("ReloadCookies: starting")
 	cookieMap, err := cookies.LoadFromFile(b.cfg.CookiesPath)
 	if err != nil {
+		log.Error().Err(err).Msg("ReloadCookies: failed to load cookies")
 		return fmt.Errorf("load cookies: %w", err)
 	}
+	log.Info().Int("count", len(cookieMap)).Msg("ReloadCookies: cookies loaded")
 
 	var plat types.Platform
 	switch b.cfg.Platform {
@@ -281,34 +284,47 @@ func (b *Bridge) ReloadCookies(ctx context.Context) error {
 
 	c := cookies.ToMessagix(cookieMap, plat)
 	if missing := cookies.GetMissing(c); len(missing) > 0 {
+		log.Error().Strs("missing", missing).Msg("ReloadCookies: missing required cookies")
 		return fmt.Errorf("missing cookies: %v", missing)
 	}
+	log.Info().Msg("ReloadCookies: all required cookies present")
 
+	log.Info().Msg("ReloadCookies: disconnecting old client")
 	b.client.Disconnect()
 
 	logger := log.Logger.With().Str("component", "messagix").Logger()
 	b.client = messagix.NewClient(c, logger, &messagix.Config{
 		MayConnectToDGW: false,
 	})
+	log.Info().Msg("ReloadCookies: new messagix client created")
 
 	// Re-attach event handler so incoming messages are processed after reconnect
 	// Use context.Background() because the HTTP request context dies when the POST response is sent.
 	if b.stdout != nil {
 		b.client.SetEventHandler(b.makeEventHandler(context.Background(), b.stdout))
+		log.Info().Msg("ReloadCookies: event handler re-attached")
+	} else {
+		log.Warn().Msg("ReloadCookies: b.stdout is nil, cannot re-attach event handler")
 	}
 
+	log.Info().Msg("ReloadCookies: launching connect goroutine")
 	go func() {
+		log.Info().Msg("ReloadCookies: connect goroutine started")
 		err := b.client.Connect(context.Background())
 		if err != nil {
-			log.Error().Err(err).Msg("Reconnect failed")
+			log.Error().Err(err).Msg("ReloadCookies: reconnect failed")
+		} else {
+			log.Info().Msg("ReloadCookies: reconnect succeeded")
 		}
 	}()
 
+	log.Info().Msg("ReloadCookies: done")
 	return nil
 }
 
 func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(context.Context, any) {
 	return func(evtCtx context.Context, evt any) {
+		log.Info().Str("type", fmt.Sprintf("%T", evt)).Msg("event_handler: received event")
 		switch e := evt.(type) {
 		case *messagix.Event_Ready:
 			log.Info().Any("connection_code", e.ConnectionCode).Msg("MQTT connected")
@@ -337,9 +353,11 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 				Bool("table_nil", e.Table == nil).
 				Msg("PublishResponse received")
 			if e.Table == nil {
+				log.Info().Msg("PublishResponse: table is nil, returning")
 				return
 			}
 			upsertMessages, insertMessages := e.Table.WrapMessages()
+			log.Info().Int("insert_count", len(insertMessages)).Int("upsert_count", len(upsertMessages)).Msg("PublishResponse: wrapping messages")
 
 			for _, msg := range insertMessages {
 				if msg == nil || msg.LSInsertMessage == nil {
@@ -356,6 +374,7 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 					Timestamp: msg.TimestampMs,
 					IsUnsent:  msg.IsUnsent,
 				}
+				log.Info().Str("msg_id", msg.MessageId).Int64("thread_id", msg.ThreadKey).Int64("sender_id", msg.SenderId).Str("text", msg.Text).Msg("event_handler: insert message")
 				writeEvent(stdout, OutgoingEvent{Type: "message", Data: evt})
 
 				if msg.SenderId != b.uid {
@@ -363,8 +382,11 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 					if ts.Before(b.startTime.Add(-5 * time.Second)) {
 						continue
 					}
-					if b.shouldRespond(msg.LSInsertMessage) {
+					should := b.shouldRespond(msg.LSInsertMessage)
+					log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond")
+					if should {
 						text := msg.Text
+						log.Info().Str("text", text).Msg("event_handler: calling handleAICommand")
 						if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
 							b.handleAICommand(ctx, msg.ThreadKey, text)
 						} else {
@@ -394,6 +416,7 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 						Timestamp: msg.TimestampMs,
 						IsUnsent:  msg.IsUnsent,
 					}
+					log.Info().Str("msg_id", msg.MessageId).Int64("thread_id", threadID).Int64("sender_id", msg.SenderId).Str("text", msg.Text).Msg("event_handler: upsert message")
 					writeEvent(stdout, OutgoingEvent{Type: "message", Data: evt})
 
 					if msg.SenderId != b.uid {
@@ -401,8 +424,11 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 						if ts.Before(b.startTime.Add(-5 * time.Second)) {
 							continue
 						}
-						if b.shouldRespond(msg.LSInsertMessage) {
+						should := b.shouldRespond(msg.LSInsertMessage)
+						log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond (upsert)")
+						if should {
 							text := msg.Text
+							log.Info().Str("text", text).Msg("event_handler: calling handleAICommand (upsert)")
 							if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
 								b.handleAICommand(ctx, threadID, text)
 							} else {
