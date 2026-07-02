@@ -1161,10 +1161,10 @@ func (b *Bridge) HandleWhatsAppMessage(ctx context.Context, msg whatsapp.ParsedM
 
 func (b *Bridge) shouldRespondWhatsApp(text string) bool {
 	text = strings.TrimSpace(text)
-	if text == "" {
-		return false
+	if strings.HasPrefix(text, "/ai") {
+		return true
 	}
-	return true
+	return false
 }
 
 func (b *Bridge) SendMessageWhatsApp(ctx context.Context, chatJID string, text string) {
