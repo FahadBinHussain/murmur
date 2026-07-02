@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -561,6 +562,14 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) string {
 	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
 		jid := b.waJIDs[threadID]
+		if jid != "" && b.cfg.WACLI_SEND_WEBHOOK_URL != "" {
+			if err := b.postWacliSend(jid, text); err != nil {
+				b.logger.Error().Err(err).Int64("thread_id", threadID).Str("jid", jid).Msg("wacli send webhook failed")
+			} else {
+				b.logger.Info().Int64("thread_id", threadID).Str("jid", jid).Msg("wacli send webhook ok")
+				return ""
+			}
+		}
 		if jid != "" && b.waClient != nil && b.waClient.IsConnected() {
 			b.waClient.SendText(ctx, jid, text)
 			return ""
@@ -596,6 +605,33 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 		}
 	}
 	return msgID
+}
+
+func (b *Bridge) postWacliSend(jid string, text string) error {
+	payload, err := json.Marshal(map[string]string{
+		"jid":  jid,
+		"text": text,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.cfg.WACLI_SEND_WEBHOOK_URL, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 func (b *Bridge) EditMessage(ctx context.Context, threadID int64, messageID string, text string) error {

@@ -15,22 +15,23 @@ const (
 )
 
 type Config struct {
-	CookiesPath          string
-	Platform             Platform
-	LogLevel             string
-	LiteLLMBase          string
-	DefaultChat          string
-	DefaultImage         string
-	DatabaseURL          string
-	ContextWindow        int
-	WhatsAppEnabled      bool
-	WhatsAppBinary       string
-	WhatsAppStore        string
-	WhatsAppAccount      string
-	WhatsAppWebhookSecret string
-	WhatsAppMaxMessages  int
-	WhatsAppDownloadMedia bool
-	WhatsAppProxy        string
+	CookiesPath             string
+	Platform                Platform
+	LogLevel                string
+	LiteLLMBase             string
+	DefaultChat             string
+	DefaultImage            string
+	DatabaseURL             string
+	ContextWindow           int
+	WhatsAppEnabled         bool
+	WhatsAppBinary          string
+	WhatsAppStore           string
+	WhatsAppAccount         string
+	WhatsAppWebhookSecret   string
+	WhatsAppMaxMessages     int
+	WhatsAppDownloadMedia   bool
+	WhatsAppProxy           string
+	WACLI_SEND_WEBHOOK_URL  string
 }
 
 func Load() *Config {
@@ -102,6 +103,9 @@ func Load() *Config {
 	}
 	if v := os.Getenv("WHATSAPP_PROXY"); v != "" {
 		cfg.WhatsAppProxy = v
+	}
+	if v := os.Getenv("WACLI_SEND_WEBHOOK_URL"); v != "" {
+		cfg.WACLI_SEND_WEBHOOK_URL = v
 	}
 
 	return cfg
