@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -90,6 +91,8 @@ type Bridge struct {
 	waJIDs           map[int64]string
 	stdout           io.Writer
 	startTime        time.Time
+	outbox           []map[string]string
+	outboxMu         sync.Mutex
 }
 
 func writeEvent(w io.Writer, evt OutgoingEvent) {
@@ -624,11 +627,19 @@ func (b *Bridge) postWacliSend(jid string, text string) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		// Store in outbox for reverse polling
+		b.outboxMu.Lock()
+		b.outbox = append(b.outbox, map[string]string{"jid": jid, "text": text, "id": fmt.Sprintf("%d", time.Now().UnixNano())})
+		b.outboxMu.Unlock()
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
+		// Store in outbox for reverse polling
+		b.outboxMu.Lock()
+		b.outbox = append(b.outbox, map[string]string{"jid": jid, "text": text, "id": fmt.Sprintf("%d", time.Now().UnixNano())})
+		b.outboxMu.Unlock()
 		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
@@ -1212,6 +1223,8 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 	// WhatsApp webhook endpoint is always available (local wacli sends to this)
 	mux.HandleFunc("/wacli/webhook", b.handleWhatsAppWebhook)
 	mux.HandleFunc("/api/wacli/session", b.handleWacliSessionUpload)
+	mux.HandleFunc("/api/outbox", b.handleOutbox)
+	mux.HandleFunc("/api/outbox/ack", b.handleOutboxAck)
 
 	// Only start built-in whatsmeow client if explicitly enabled (disabled by default, use webhook instead)
 	if b.cfg.WhatsAppEnabled {
@@ -1492,4 +1505,46 @@ func (b *Bridge) handleWacliSessionUpload(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "store": storeDir, "restart": "ok"})
+}
+
+func (b *Bridge) handleOutbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	b.outboxMu.Lock()
+	msgs := make([]map[string]string, len(b.outbox))
+	copy(msgs, b.outbox)
+	b.outboxMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"messages": msgs})
+}
+
+func (b *Bridge) handleOutboxAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	b.outboxMu.Lock()
+	remaining := make([]map[string]string, 0, len(b.outbox))
+	idSet := make(map[string]bool)
+	for _, id := range req.IDs {
+		idSet[id] = true
+	}
+	for _, msg := range b.outbox {
+		if !idSet[msg["id"]] {
+			remaining = append(remaining, msg)
+		}
+	}
+	b.outbox = remaining
+	b.outboxMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"acked": len(req.IDs)})
 }
