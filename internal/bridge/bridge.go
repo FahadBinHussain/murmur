@@ -651,7 +651,9 @@ func (b *Bridge) EditMessage(ctx context.Context, threadID int64, messageID stri
 			b.SendMessage(ctx, threadID, text)
 			return nil
 		}
-		return fmt.Errorf("whatsapp edits are not supported")
+		// WhatsApp doesn't support edits — send a new message instead
+		b.SendMessage(ctx, threadID, text)
+		return nil
 	}
 
 	_, err := b.client.ExecuteTasks(ctx, &socket.EditMessageTask{
