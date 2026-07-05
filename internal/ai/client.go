@@ -144,16 +144,56 @@ func (c *Client) ChatWithHistory(prompt string, model string, history []ChatMess
 	if e, ok := result["error"]; ok {
 		return "", fmt.Errorf("%v", e)
 	}
-	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
-		if choice, ok := choices[0].(map[string]interface{}); ok {
-			if msg, ok := choice["message"].(map[string]interface{}); ok {
-				if content, ok := msg["content"].(string); ok {
-					return content, nil
-				}
-			}
+	content := extractChatContent(result)
+	if content == "" {
+		// log raw response shape for debugging
+		debug, _ := json.Marshal(result)
+		return "", fmt.Errorf("model returned empty content (raw: %.200s)", string(debug))
+	}
+	return content, nil
+}
+
+func extractChatContent(result map[string]interface{}) string {
+	choices, ok := result["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return ""
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	// standard openai format: choices[0].message.content
+	if msg, ok := choice["message"].(map[string]interface{}); ok {
+		if content, ok := msg["content"].(string); ok && content != "" {
+			return content
+		}
+		// some providers use "text" instead of "content"
+		if text, ok := msg["text"].(string); ok && text != "" {
+			return text
+		}
+		// check for refusal
+		if refusal, ok := msg["refusal"].(string); ok && refusal != "" {
+			return fmt.Sprintf("[refused: %s]", refusal)
 		}
 	}
-	return "no response from model", nil
+	// streaming-like delta format
+	if delta, ok := choice["delta"].(map[string]interface{}); ok {
+		if content, ok := delta["content"].(string); ok && content != "" {
+			return content
+		}
+	}
+	// fallback: direct text/response fields on choice
+	if text, ok := choice["text"].(string); ok && text != "" {
+		return text
+	}
+	// direct response fields on root
+	if text, ok := result["text"].(string); ok && text != "" {
+		return text
+	}
+	if response, ok := result["response"].(string); ok && response != "" {
+		return response
+	}
+	return ""
 }
 
 func (c *Client) ImageRaw(prompt string) ([]byte, string, error) {
