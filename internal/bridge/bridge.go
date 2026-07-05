@@ -565,6 +565,7 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) string {
 	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
 		jid := b.waJIDs[threadID]
+		b.logger.Info().Int64("thread_id", threadID).Str("jid", jid).Str("text_preview", text[:min(80, len(text))]).Int("text_len", len(text)).Msg("SendMessage WhatsApp path")
 		if jid != "" && b.cfg.WACLI_SEND_WEBHOOK_URL != "" {
 			if err := b.postWacliSend(jid, text); err != nil {
 				b.logger.Error().Err(err).Int64("thread_id", threadID).Str("jid", jid).Msg("wacli send webhook failed")
@@ -619,6 +620,7 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 }
 
 func (b *Bridge) postWacliSend(jid string, text string) error {
+	b.logger.Info().Str("jid", jid).Str("text_preview", text[:min(80, len(text))]).Int("text_len", len(text)).Msg("postWacliSend called")
 	payload, err := json.Marshal(map[string]string{
 		"jid":  jid,
 		"text": text,

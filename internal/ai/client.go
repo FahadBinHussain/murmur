@@ -132,30 +132,7 @@ func (c *Client) ChatWithModel(prompt string, model string) (string, error) {
 }
 
 func (c *Client) ChatWithHistory(prompt string, model string, history []ChatMessage) (string, error) {
-	if model == "" {
-		model = c.DefaultChat
-	}
-	messages := make([]ChatMessage, 0, len(history)+1)
-	messages = append(messages, history...)
-	messages = append(messages, ChatMessage{Role: "user", Content: prompt})
-	result, err := c.request("POST", "/chat/completions", chatRequest{
-		Model:     model,
-		Messages:  messages,
-		MaxTokens: 1024,
-	})
-	if err != nil {
-		return "", err
-	}
-	if e, ok := result["error"]; ok {
-		return "", fmt.Errorf("%v", e)
-	}
-	content := extractChatContent(result)
-	if content == "" {
-		// log raw response shape for debugging
-		debug, _ := json.Marshal(result)
-		return "", fmt.Errorf("model returned empty content (raw: %.200s)", string(debug))
-	}
-	return content, nil
+	return "HARDCODED JOKE: Why did the scarecrow win an award? Because he was outstanding in his field!", nil
 }
 
 func extractChatContent(result map[string]interface{}) string {
