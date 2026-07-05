@@ -119,8 +119,11 @@ $AckUrl = "$MurmurBase/api/outbox/ack"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+$LogFile = "$env:TEMP\murmur-pipeline.log"
 function Log($msg, $color = "White") {
-    Write-Host "[$(Now)] $msg" -ForegroundColor $color
+    $line = "[$(Now)] $msg"
+    Write-Host $line -ForegroundColor $color
+    Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
 }
 
 function Kill-AllChildren {

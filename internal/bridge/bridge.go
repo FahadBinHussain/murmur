@@ -976,7 +976,11 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	if finalModel == "" {
 		finalModel = b.ai.DefaultChat
 	}
+	// For WhatsApp, send just the text without model prefix to avoid display issues
 	final := fmt.Sprintf("[%s]\n%s", finalModel, resp)
+	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
+		final = resp
+	}
 	b.logger.Info().Str("final_text", final).Msg("Final reply before sending")
 	if msgID != "" {
 		b.editMessage(ctx, threadID, msgID, final)
