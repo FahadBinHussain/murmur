@@ -956,6 +956,19 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		b.SendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
 		return
 	}
+	if resp == "" {
+		// defensive retry without history in case context/history causes empty response
+		b.logger.Warn().Msg("Empty response from ChatWithHistory, retrying without history")
+		resp, err = b.ai.ChatWithHistory(prompt, model, nil)
+		if err != nil {
+			b.SendMessage(ctx, threadID, fmt.Sprintf("[chat error on retry] %v", err))
+			return
+		}
+		if resp == "" {
+			b.SendMessage(ctx, threadID, "[error] model returned empty response twice")
+			return
+		}
+	}
 	log.Info().Str("resp", resp[:min(50, len(resp))]).Msg("Chat response")
 	finalModel := model
 	if finalModel == "" {
