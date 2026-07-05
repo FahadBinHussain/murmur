@@ -1275,6 +1275,48 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 			"requested_model": model,
 		})
 	})
+	mux.HandleFunc("/api/debug/whatsapp-chat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		threadIDStr := r.URL.Query().Get("thread_id")
+		threadID := int64(12345)
+		if threadIDStr != "" {
+			if n, err := strconv.ParseInt(threadIDStr, 10, 64); err == nil {
+				threadID = n
+			}
+		}
+		prompt := r.URL.Query().Get("prompt")
+		if prompt == "" {
+			prompt = "tell me a joke"
+		}
+		model := b.threadModels[threadID]
+		if model == "" {
+			model = b.ai.DefaultChat
+		}
+		var history []ai.ChatMessage
+		if b.db != nil {
+			dbMsgs, err := b.db.GetRecentMessages(r.Context(), threadID, b.cfg.ContextWindow)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to load conversation history")
+			} else {
+				history = make([]ai.ChatMessage, len(dbMsgs))
+				for i, m := range dbMsgs {
+					history[i] = ai.ChatMessage{Role: m.Role, Content: m.Content}
+				}
+			}
+		}
+		resp, err := b.ai.ChatWithHistory(prompt, model, history)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"response":    resp,
+			"error":       fmt.Sprintf("%v", err),
+			"model":       model,
+			"history_len": len(history),
+			"history":     history,
+		})
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
