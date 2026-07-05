@@ -189,21 +189,15 @@ function Send-ViaWacli($jid, $text) {
     Log "  text: $preview" DarkGray
     $tmpOut = "$env:TEMP\wacli-send-$([int](Get-Random -Maximum 9999999)).log"
     $tmpErr = "$env:TEMP\wacli-err-$([int](Get-Random -Maximum 9999999)).log"
-    $proc = Start-Process -FilePath $WacliBin -ArgumentList @(
-        "send", "text",
-        "--store", $StorePath,
-        "--to", $jid,
-        "--message", $cleanText
-    ) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
-    $stdout = Get-Content $tmpOut -ErrorAction SilentlyContinue
-    $stderr = Get-Content $tmpErr -ErrorAction SilentlyContinue
-    Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue
-    Remove-Item $tmpErr -Force -ErrorAction SilentlyContinue
-    if ($proc.ExitCode -eq 0) {
+    
+    # Use call operator instead of Start-Process to properly handle spaces in --message
+    $stdout = & $WacliBin send text --store $StorePath --to $jid --message $cleanText 2>"$tmpErr"
+    if ($LASTEXITCODE -eq 0) {
         Log "  SENT OK: $stdout" Green
         return $true
     } else {
-        Log "  SEND FAILED (exit=$($proc.ExitCode)): $stderr" Red
+        $stderr = Get-Content $tmpErr -ErrorAction SilentlyContinue
+        Log "  SEND FAILED (exit=$LASTEXITCODE): $stderr" Red
         return $false
     }
 }
