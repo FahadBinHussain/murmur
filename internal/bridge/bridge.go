@@ -577,7 +577,15 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 			b.waClient.SendText(ctx, jid, text)
 			return ""
 		}
-		b.logger.Warn().Int64("thread_id", threadID).Msg("WhatsApp client not connected or JID not found")
+		// Fallback: store in outbox for reverse polling
+		if jid != "" {
+			b.outboxMu.Lock()
+			b.outbox = append(b.outbox, map[string]string{"jid": jid, "text": text, "id": fmt.Sprintf("%d", time.Now().UnixNano())})
+			b.outboxMu.Unlock()
+			b.logger.Info().Int64("thread_id", threadID).Str("jid", jid).Msg("Stored reply in outbox for reverse polling")
+		} else {
+			b.logger.Warn().Int64("thread_id", threadID).Msg("WhatsApp client not connected and no JID for outbox")
+		}
 		return ""
 	}
 
