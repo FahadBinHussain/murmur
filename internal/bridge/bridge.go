@@ -1334,41 +1334,6 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"messages": msgs, "count": len(msgs)})
 	})
-	mux.HandleFunc("/api/debug/trigger-whatsapp", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Chat      whatsapp.JID `json:"Chat"`
-			Text      string       `json:"Text"`
-			ID        string       `json:"ID"`
-			SenderJID string       `json:"SenderJID"`
-			Timestamp string       `json:"Timestamp"`
-			FromMe    bool         `json:"FromMe"`
-			PushName  string       `json:"PushName"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		msg := whatsapp.ParsedMessage{
-			Chat:      req.Chat,
-			Text:      req.Text,
-			ID:        req.ID,
-			SenderJID: req.SenderJID,
-			Timestamp: req.Timestamp,
-			FromMe:    req.FromMe,
-			PushName:  req.PushName,
-		}
-		b.HandleWhatsAppMessage(r.Context(), msg)
-		b.outboxMu.Lock()
-		msgs := make([]map[string]string, len(b.outbox))
-		copy(msgs, b.outbox)
-		b.outboxMu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "triggered", "outbox_count": len(msgs), "messages": msgs})
-	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
