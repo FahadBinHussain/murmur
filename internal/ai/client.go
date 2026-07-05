@@ -83,6 +83,10 @@ type modelsResponse struct {
 	} `json:"data"`
 }
 
+var lastDebugRawResponse []byte
+
+func GetLastDebugRawResponse() []byte { return lastDebugRawResponse }
+
 func (c *Client) request(method, path string, body interface{}) (map[string]interface{}, error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -110,6 +114,7 @@ func (c *Client) request(method, path string, body interface{}) (map[string]inte
 	if err != nil {
 		return nil, fmt.Errorf("HTTP %d: read error: %w", resp.StatusCode, err)
 	}
+	lastDebugRawResponse = respBody
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {

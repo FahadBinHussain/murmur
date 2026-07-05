@@ -1335,6 +1335,15 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 			"history":     history,
 		})
 	})
+	mux.HandleFunc("/api/debug/raw", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		raw := ai.GetLastDebugRawResponse()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(raw)
+	})
 	mux.HandleFunc("/api/debug/outbox", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "GET only", http.StatusMethodNotAllowed)
