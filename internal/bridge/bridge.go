@@ -1241,6 +1241,38 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"version":"1.0.1","fix":"extractChatContent","build":"2026-07-05"}`))
 	})
+	mux.HandleFunc("/api/debug/chat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		prompt := r.URL.Query().Get("prompt")
+		if prompt == "" {
+			prompt = "hello"
+		}
+		model := r.URL.Query().Get("model")
+		if model == "" {
+			model = b.ai.DefaultChat
+		}
+		resp, err := b.ai.ChatWithHistory(prompt, model, nil)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"base_url": b.ai.BaseURL,
+				"default_chat": b.ai.DefaultChat,
+				"requested_model": model,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"response": resp,
+			"base_url": b.ai.BaseURL,
+			"default_chat": b.ai.DefaultChat,
+			"requested_model": model,
+		})
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
