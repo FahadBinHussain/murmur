@@ -787,6 +787,21 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		return
 	}
 
+	if lower == "/ai reset" {
+		delete(b.threadModels, threadID)
+		delete(b.threadImgModels, threadID)
+		if b.db != nil {
+			if err := b.db.SetChatModel(ctx, threadID, ""); err != nil {
+				log.Error().Err(err).Msg("Failed to reset chat model")
+			}
+			if err := b.db.SetImageModel(ctx, threadID, ""); err != nil {
+				log.Error().Err(err).Msg("Failed to reset image model")
+			}
+		}
+		b.SendMessage(ctx, threadID, "[model reset] chat and image models cleared for this thread")
+		return
+	}
+
 	if strings.HasPrefix(lower, "/ai image models full") {
 		parts := strings.Fields(text)
 		page := ai.ParsePage(parts, 4)
