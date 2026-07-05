@@ -1236,6 +1236,11 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 	})
 	mux.HandleFunc("/api/send_message", b.handleSendMessage)
 	mux.HandleFunc("/api/automation/notifications", b.handleAutomationNotification)
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"version":"1.0.1","fix":"extractChatContent","build":"2026-07-05"}`))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

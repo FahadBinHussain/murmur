@@ -3,7 +3,8 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o murmur-bridge ./cmd/murmur-bridge
+RUN echo "BUILD_TIMESTAMP=2026-07-05T19:35:00" && CGO_ENABLED=0 GOOS=linux go build -ldflags="-X main.BuildTime=2026-07-05T19:35:00" -o murmur-bridge ./cmd/murmur-bridge
+RUN echo "=== verifying ai/client.go content ===" && grep -c "extractChatContent" internal/ai/client.go || echo "WARNING: extractChatContent not found in source"
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg wget && rm -rf /var/lib/apt/lists/*
