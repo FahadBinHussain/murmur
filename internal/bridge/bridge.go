@@ -1287,6 +1287,10 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 				threadID = n
 			}
 		}
+		jid := r.URL.Query().Get("jid")
+		if jid != "" {
+			threadID = whatsapp.JIDToThreadID(jid)
+		}
 		prompt := r.URL.Query().Get("prompt")
 		if prompt == "" {
 			prompt = "tell me a joke"
@@ -1313,6 +1317,7 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 			"response":    resp,
 			"error":       fmt.Sprintf("%v", err),
 			"model":       model,
+			"thread_id":   threadID,
 			"history_len": len(history),
 			"history":     history,
 		})
