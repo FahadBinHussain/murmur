@@ -330,9 +330,7 @@ function Poll-HF-ForReplies {
             $jid = $msg.jid
             $text = $msg.text
             $msgId = $msg.id
-            $preview = if ($text.Length -gt 50) { $text.Substring(0, 50) + "..." } else { $text }
-            Log "  REPLY: id=$msgId jid=$jid" Yellow
-            Log "    text: $preview" DarkGray
+            Log "  REPLY: id=$msgId jid=$jid text_len=$($text.Length) text='$(if($text.Length -gt 80){$text.Substring(0,80)+'...'}else{$text})'" Yellow
             if ($global:SentMsgIds[$msgId]) {
                 Log "    ALREADY SENT - skipping" DarkGray
                 $acked += $msgId
