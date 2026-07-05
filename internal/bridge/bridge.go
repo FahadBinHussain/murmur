@@ -949,6 +949,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		}
 	}()
 	resp, err := b.ai.ChatWithHistory(prompt, model, history)
+	b.logger.Info().Str("resp_raw", resp).Err(err).Str("model_used", model).Int("history_len", len(history)).Msg("ChatWithHistory result in handleAICommand")
 	close(stop)
 	if err != nil {
 		log.Error().Err(err).Msg("Chat error")
@@ -961,6 +962,7 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		finalModel = b.ai.DefaultChat
 	}
 	final := fmt.Sprintf("[%s]\n%s", finalModel, resp)
+	b.logger.Info().Str("final_text", final).Msg("Final reply before sending")
 	if msgID != "" {
 		b.editMessage(ctx, threadID, msgID, final)
 	} else {
