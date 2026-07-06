@@ -916,6 +916,12 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 
 	model := b.threadModels[threadID]
 
+	// Check if this is WhatsApp — we skip thinking/edit for WhatsApp
+	isWhatsApp := false
+	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
+		isWhatsApp = true
+	}
+
 	// Load conversation history
 	var history []ai.ChatMessage
 	if b.db != nil {
@@ -930,36 +936,79 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 		}
 	}
 
-	msgID := b.SendMessage(ctx, threadID, "thinking.")
-	log.Info().Str("prompt", prompt).Str("model", model).Int("history", len(history)).Msg("Chat request")
-	stop := make(chan struct{})
-	go func() {
-		dots := []string{"thinking.", "thinking..", "thinking..."}
-		i := 0
-		edits := 0
-		for edits < 4 {
-			select {
-			case <-stop:
-				return
-			case <-time.After(500 * time.Millisecond):
-				i = (i + 1) % len(dots)
-				if msgID != "" {
-					b.editMessage(ctx, threadID, msgID, dots[i])
+	var msgID string
+	if !isWhatsApp {
+		msgID = b.SendMessage(ctx, threadID, "thinking.")
+		log.Info().Str("prompt", prompt).Str("model", model).Int("history", len(history)).Msg("Chat request")
+		stop := make(chan struct{})
+		go func() {
+			dots := []string{"thinking.", "thinking..", "thinking..."}
+			i := 0
+			edits := 0
+			for edits < 4 {
+				select {
+				case <-stop:
+					return
+				case <-time.After(500 * time.Millisecond):
+					i = (i + 1) % len(dots)
+					if msgID != "" {
+						b.editMessage(ctx, threadID, msgID, dots[i])
+					}
+					edits++
 				}
-				edits++
+			}
+		}()
+		resp, err := b.ai.ChatWithHistory(prompt, model, history)
+		close(stop)
+		if err != nil {
+			log.Error().Err(err).Msg("Chat error")
+			b.SendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
+			return
+		}
+		if resp == "" {
+			b.logger.Warn().Msg("Empty response from ChatWithHistory, retrying without history")
+			resp, err = b.ai.ChatWithHistory(prompt, model, nil)
+			if err != nil {
+				b.SendMessage(ctx, threadID, fmt.Sprintf("[chat error on retry] %v", err))
+				return
+			}
+			if resp == "" {
+				b.SendMessage(ctx, threadID, "[error] model returned empty response twice")
+				return
 			}
 		}
-	}()
+		log.Info().Str("resp", resp[:min(50, len(resp))]).Msg("Chat response")
+		finalModel := model
+		if finalModel == "" {
+			finalModel = b.ai.DefaultChat
+		}
+		final := fmt.Sprintf("[%s]\n%s", finalModel, resp)
+		b.logger.Info().Str("final_text", final).Msg("Final reply before sending")
+		if msgID != "" {
+			b.editMessage(ctx, threadID, msgID, final)
+		} else {
+			b.SendMessage(ctx, threadID, final)
+		}
+		// Save conversation history
+		if b.db != nil {
+			messages := append(history, ai.ChatMessage{Role: "user", Content: prompt})
+			messages = append(messages, ai.ChatMessage{Role: "assistant", Content: resp})
+			if err := b.db.SaveMessages(ctx, threadID, toDBMessages(messages)); err != nil {
+				log.Error().Err(err).Msg("Failed to save conversation history")
+			}
+		}
+		return
+	}
+
+	// WhatsApp path: no thinking/edit, just send final response
+	log.Info().Str("prompt", prompt).Str("model", model).Int("history", len(history)).Msg("WhatsApp chat request")
 	resp, err := b.ai.ChatWithHistory(prompt, model, history)
-	b.logger.Info().Str("resp_raw", resp).Err(err).Str("model_used", model).Int("history_len", len(history)).Msg("ChatWithHistory result in handleAICommand")
-	close(stop)
 	if err != nil {
 		log.Error().Err(err).Msg("Chat error")
 		b.SendMessage(ctx, threadID, fmt.Sprintf("[chat error] %v", err))
 		return
 	}
 	if resp == "" {
-		// defensive retry without history in case context/history causes empty response
 		b.logger.Warn().Msg("Empty response from ChatWithHistory, retrying without history")
 		resp, err = b.ai.ChatWithHistory(prompt, model, nil)
 		if err != nil {
@@ -976,17 +1025,9 @@ func (b *Bridge) handleAICommand(ctx context.Context, threadID int64, text strin
 	if finalModel == "" {
 		finalModel = b.ai.DefaultChat
 	}
-	// For WhatsApp, put model name on same line to avoid display issues with newlines
-	final := fmt.Sprintf("[%s]\n%s", finalModel, resp)
-	if ch, ok := b.threadChannel[threadID]; ok && ch == "whatsapp" {
-		final = fmt.Sprintf("[%s] %s", finalModel, resp)
-	}
-	b.logger.Info().Str("final_text", final).Msg("Final reply before sending")
-	if msgID != "" {
-		b.editMessage(ctx, threadID, msgID, final)
-	} else {
-		b.SendMessage(ctx, threadID, final)
-	}
+	final := fmt.Sprintf("[%s] %s", finalModel, resp)
+	b.logger.Info().Str("final_text", final).Msg("WhatsApp final reply")
+	b.SendMessage(ctx, threadID, final)
 
 	// Save conversation history
 	if b.db != nil {
