@@ -271,47 +271,45 @@ type usableModelsResponse struct {
 }
 
 func (c *Client) AllChatModels() []string {
-	result, err := c.request("GET", "/usable-models", nil)
-	if err != nil {
-		return nil
-	}
-	var models []string
-	if data, ok := result["chat"].([]interface{}); ok {
-		for _, m := range data {
-			if id, ok := m.(string); ok {
-				models = append(models, id)
-			}
-		}
-	}
-	return models
+	return c.fetchModelIDs("/models")
 }
 
 func (c *Client) AllImageModels() []string {
-	result, err := c.request("GET", "/usable-models", nil)
-	if err != nil {
-		return nil
-	}
+	all := c.fetchModelIDs("/models")
 	var models []string
-	if data, ok := result["image"].([]interface{}); ok {
-		for _, m := range data {
-			if id, ok := m.(string); ok {
-				models = append(models, id)
-			}
+	for _, id := range all {
+		l := strings.ToLower(id)
+		if strings.Contains(l, "flux") || strings.Contains(l, "image") || strings.Contains(l, "dall") || strings.Contains(l, "schnell") || strings.Contains(l, "dev") {
+			models = append(models, id)
 		}
 	}
 	return models
 }
 
 func (c *Client) AllVisionModels() []string {
-	result, err := c.request("GET", "/usable-models", nil)
+	all := c.fetchModelIDs("/models")
+	var models []string
+	for _, id := range all {
+		l := strings.ToLower(id)
+		if strings.Contains(l, "vision") || strings.Contains(l, "vlm") || strings.Contains(l, "vl") || strings.Contains(l, "mimo") || strings.Contains(l, "gpt-4o") {
+			models = append(models, id)
+		}
+	}
+	return models
+}
+
+func (c *Client) fetchModelIDs(path string) []string {
+	result, err := c.request("GET", path, nil)
 	if err != nil {
 		return nil
 	}
 	var models []string
-	if data, ok := result["vision"].([]interface{}); ok {
+	if data, ok := result["data"].([]interface{}); ok {
 		for _, m := range data {
-			if id, ok := m.(string); ok {
-				models = append(models, id)
+			if entry, ok := m.(map[string]interface{}); ok {
+				if id, ok := entry["id"].(string); ok {
+					models = append(models, id)
+				}
 			}
 		}
 	}
@@ -339,20 +337,7 @@ func (c *Client) ListVisionModelsWithList(page int) (string, []string) {
 }
 
 func (c *Client) ListAllModels(page int) string {
-	result, err := c.request("GET", "/v1/models", nil)
-	if err != nil {
-		return fmt.Sprintf("[error] %v", err)
-	}
-	var models []string
-	if data, ok := result["data"].([]interface{}); ok {
-		for _, m := range data {
-			if entry, ok := m.(map[string]interface{}); ok {
-				if id, ok := entry["id"].(string); ok {
-					models = append(models, id)
-				}
-			}
-		}
-	}
+	models := c.fetchModelIDs("/models")
 	return paginate(models, page, "Models", "models full")
 }
 
