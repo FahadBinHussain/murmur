@@ -117,13 +117,27 @@ $ProxyUrl = "http://localhost:$ResolvedProxyPort/webhook"
 $PollUrl = "$MurmurBase/api/outbox"
 $AckUrl = "$MurmurBase/api/outbox/ack"
 
+# ── cookie-refresh-on-failure config ────────────────────────────────────────
+# Passive monitoring: query the daily-bnp outbox for FB send failures matching
+# "send returned empty message ID". When failures cross a threshold inside a
+# recent window, run murmur-cookie-refresher.mjs and reset the failed rows back
+# to pending so murmur's BNP worker retries them automatically.
+$BnpDatabaseUrl         = if ($env:BNP_DATABASE_URL) { $env:BNP_DATABASE_URL.Trim() } else { "" }
+$CookieRefreshIntervalS = if ($env:BNP_COOKIE_REFRESH_INTERVAL_SECONDS) { [int]$env:BNP_COOKIE_REFRESH_INTERVAL_SECONDS } else { 600 }
+$CookieRefreshWindowM   = if ($env:BNP_COOKIE_REFRESH_FAILURE_WINDOW_MINUTES) { [int]$env:BNP_COOKIE_REFRESH_FAILURE_WINDOW_MINUTES } else { 30 }
+$CookieRefreshThreshold = if ($env:BNP_COOKIE_REFRESH_FAILURE_THRESHOLD) { [int]$env:BNP_COOKIE_REFRESH_FAILURE_THRESHOLD } else { 2 }
+$PsqlBin                = if ($env:BNP_PSQL_BIN) { $env:BNP_PSQL_BIN } else { "C:\Users\Admin\scoop\apps\postgresql\current\bin\psql.exe" }
+$CookieRefresherScript  = Join-Path $RepoRoot "scripts\murmur-cookie-refresher.mjs"
+$CookieEngine           = "bnp-outbox"  # surfaced in logs
+$LastCookieCheck        = [DateTime]::MinValue
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 $LogFile = "$env:TEMP\murmur-pipeline.log"
 function Log($msg, $color = "White") {
     $line = "[$(Now)] $msg"
     Write-Host $line -ForegroundColor $color
-    Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
+    try { [System.IO.File]::AppendAllText($LogFile, "$line`n") } catch { }
 }
 
 function Kill-AllChildren {
@@ -363,6 +377,124 @@ function Pipeline-HealthCheck {
     return $issues
 }
 
+function Get-BnpSendFailureCount {
+    # Returns count of outbox rows that failed with the FB-empty-message-id
+    # signature within the recent window. 0 = healthy, >0 = cookie send path
+    # is degraded. Returns -1 on connection/config error so callers can choose
+    # to skip the reset instead of acting blindly.
+    if (-not $BnpDatabaseUrl) { return -1 }
+    if (-not (Test-Path $PsqlBin)) { Log "psql not found: $PsqlBin" Yellow; return -1 }
+
+    $query = @"
+SELECT count(*) FROM `"BnpMessengerNotification`"
+WHERE status = 'failed'
+  AND `"lastError"` = 'send returned empty message ID'
+  AND `"updatedAt"` >= NOW() - (INTERVAL '$CookieRefreshWindowM minutes');
+"@
+    # parse the neon connection string into psql flags so we don't leak the
+    # password in process args visible in task manager / logs.
+    $m = [regex]::Match($BnpDatabaseUrl, '^postgresql://([^:]+):([^@]+)@([^:]+?)(?::(\d+))?/(\w+)')
+    if (-not $m.Success) { Log "BNP_DATABASE_URL not parseable" Yellow; return -1 }
+    $pgUser = $m.Groups[1].Value
+    $pgPass = $m.Groups[2].Value
+    $pgHost = $m.Groups[3].Value
+    $pgPort = if ($m.Groups[4].Value) { $m.Groups[4].Value } else { '5432' }
+    $pgDb   = $m.Groups[5].Value
+
+    $env:PGPASSWORD = $pgPass
+    try {
+        $out = & $PsqlBin -h $pgHost -p $pgPort -U $pgUser -d $pgDb -t -A -c $query --no-password 2>&1
+        if ($LASTEXITCODE -ne 0) { Log "psql count failed: $out" Yellow; return -1 }
+        $n = 0
+        $raw = ($out -join '').Trim()
+        if ([int]::TryParse($raw, [ref]$n)) { return $n }
+        Log "psql count unparseable: $out" Yellow
+        return -1
+    } finally {
+        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    }
+}
+
+function Reset-FailedBnpOutbox {
+    if (-not $BnpDatabaseUrl) { return }
+    if (-not (Test-Path $PsqlBin)) { return }
+
+    $sql = @"
+UPDATE `"BnpMessengerNotification`"
+SET status = 'pending',
+    `"lockedAt"` = NULL,
+    `"lastError"` = NULL,
+    attempts = 0,
+    `"updatedAt"` = NOW()
+WHERE status = 'failed'
+  AND `"lastError"` = 'send returned empty message ID'
+  AND `"updatedAt"` >= NOW() - (INTERVAL '$CookieRefreshWindowM minutes')
+  AND phase IN ('detected', 'published');
+"@
+    $m = [regex]::Match($BnpDatabaseUrl, '^postgresql://([^:]+):([^@]+)@([^:]+?)(?::(\d+))?/(\w+)')
+    if (-not $m.Success) { return }
+    $pgPort = if ($m.Groups[4].Value) { $m.Groups[4].Value } else { '5432' }
+    $env:PGPASSWORD = $m.Groups[2].Value
+    try {
+        $out = & $PsqlBin -h $m.Groups[3].Value -p $pgPort -U $m.Groups[1].Value -d $m.Groups[5].Value -c $sql --no-password 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Log "reset failed outbox rows: $((($out -join "`n") -split "`n" | Select-String 'UPDATE (\d+)').Matches.Groups[1].Value)" Green
+        } else {
+            Log "reset failed outbox error: $out" Yellow
+        }
+    } finally {
+        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-CookieRefresh {
+    Log "=== COOKIE REFRESH TRIGGERED ($CookieEngine) ===" Cyan
+    if (-not (Test-Path $CookieRefresherScript)) {
+        Log "cookie refresher missing: $CookieRefresherScript" Red
+        return
+    }
+    $proc = Start-Process -FilePath "node" -ArgumentList $CookieRefresherScript -PassThru -NoNewWindow
+    $proc.WaitForExit()
+    if ($proc.ExitCode -eq 0) {
+        Log "cookie refresher ok (exit 0)" Green
+    } else {
+        Log "cookie refresher failed (exit $($proc.ExitCode))" Yellow
+        return
+    }
+    # give murmur's bridge ~15s to settle the async MQTT reconnect after ReloadCookies
+    Start-Sleep -Seconds 15
+    Reset-FailedBnpOutbox
+    Log "=== COOKIE REFRESH CYCLE DONE ===" Cyan
+}
+
+function Check-CookieHealth {
+    Log "--- COOKIE HEALTH CHECK ---" Cyan
+    # Cheap gate: if murmur's HTTP API is down entirely there's no point
+    # refreshing FB cookies (the bridge isn't up to receive them).
+    try {
+        $null = Invoke-RestMethod -Uri "$MurmurBase/api/health" -Headers @{ Authorization = "Bearer $HfToken" } -TimeoutSec 10
+        Log "  murmur /api/health: ok" Green
+    } catch {
+        Log "  murmur /api/health: UNREACHABLE ($($_.Exception.Message))" Red
+        Log "  cookie-check skipped — bridge down" Yellow
+        return
+    }
+
+    $failed = Get-BnpSendFailureCount
+    if ($failed -lt 0) {
+        Log "  BNP outbox query: error (skipping refresh)" Yellow
+        return
+    }
+    if ($failed -ge $CookieRefreshThreshold) {
+        Log "  BNP outbox: $failed failed sends in last ${CookieRefreshWindowM}m (threshold $CookieRefreshThreshold)" Red
+        Log "  >>> TRIGGERING COOKIE REFRESH <<<" Yellow
+        Invoke-CookieRefresh
+    } else {
+        Log "  BNP outbox: $failed recent failures (healthy)" Green
+        Log "--- COOKIE HEALTH: OK ---" DarkCyan
+    }
+}
+
 # ── main loop ────────────────────────────────────────────────────────────────
 
 while ($true) {
@@ -391,9 +523,16 @@ while ($true) {
         Start-Sleep -Seconds $ResolvedPollSeconds
         $elapsed = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
         $pollCounter++
-        
+
         Poll-HF-ForReplies
-        
+
+        # passive cookie-health check on a coarse cadence (default 10 min)
+        $now = Get-Date
+        if (([int64]($now - $LastCookieCheck).TotalSeconds -ge $CookieRefreshIntervalS)) {
+            $LastCookieCheck = $now
+            Check-CookieHealth
+        }
+
         if ($elapsed % 1 -lt 0.1) {
             $issues = Pipeline-HealthCheck
             if ($issues.Count -eq 0) {
@@ -402,12 +541,12 @@ while ($true) {
                 Log "HEALTH CHECK: issues: $($issues -join '; ')" Yellow
             }
         }
-        
+
         if ($wacliProc.HasExited) {
             Log "WACLI EXITED (code $($wacliProc.ExitCode)), restarting..." Yellow
             break
         }
-        
+
         if ($proxyProc -and $proxyProc.HasExited) {
             Log "PROXY DIED, restarting..." Yellow
             break

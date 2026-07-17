@@ -591,6 +591,42 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 	}
 
 	otid := time.Now().UnixMilli()
+
+	// Messenger truncates messages around 2000 chars — chunk long replies
+	const maxMsgLen = 1900
+	if len(text) > maxMsgLen {
+		chunks := splitMessage(text, maxMsgLen)
+		var lastMsgID string
+		for _, chunk := range chunks {
+			otid = time.Now().UnixMilli()
+			resp, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
+				ThreadId:          threadID,
+				Otid:              otid,
+				Source:            table.MESSENGER_INBOX_IN_THREAD,
+				SendType:          table.TEXT,
+				Text:              chunk,
+				SyncGroup:         1,
+				InitiatingSource:  table.FACEBOOK_INBOX,
+				SkipUrlPreviewGen: 1,
+				MultiTabEnv:       0,
+			})
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to send AI reply chunk")
+				return lastMsgID
+			}
+			if resp != nil {
+				otidStr := fmt.Sprintf("%d", otid)
+				for _, replace := range resp.LSReplaceOptimsiticMessage {
+					if replace.OfflineThreadingId == otidStr {
+						lastMsgID = replace.MessageId
+						break
+					}
+				}
+			}
+		}
+		return lastMsgID
+	}
+
 	resp, err := b.client.ExecuteTasks(ctx, &socket.SendMessageTask{
 		ThreadId:          threadID,
 		Otid:              otid,
@@ -1280,6 +1316,31 @@ func truncateStr(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// splitMessage breaks a long string into chunks, preferring to split at
+// newlines or spaces near the max length boundary.
+func splitMessage(text string, max int) []string {
+	if len(text) <= max {
+		return []string{text}
+	}
+	var chunks []string
+	for len(text) > max {
+		cut := max
+		// Try to split at a newline
+		if idx := strings.LastIndex(text[:max], "\n"); idx > max/2 {
+			cut = idx + 1
+		} else if idx := strings.LastIndex(text[:max], " "); idx > max/2 {
+			// Otherwise split at a space
+			cut = idx + 1
+		}
+		chunks = append(chunks, strings.TrimSpace(text[:cut]))
+		text = text[cut:]
+	}
+	if strings.TrimSpace(text) != "" {
+		chunks = append(chunks, strings.TrimSpace(text))
+	}
+	return chunks
 }
 
 func getPort() string {

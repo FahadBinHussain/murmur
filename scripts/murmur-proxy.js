@@ -18,7 +18,7 @@ const HF_TOKEN = process.env.HF_TOKEN || (() => {
   return '';
 })();
 
-const WACLI_STORE = process.env.WACLI_STORE || 'C:\\Users\\Admin\\AppData\\Roaming\\mainframe\\accounts\\whatsapp\\+8801911104251\\store';
+const WACLI_STORE = process.env.WACLI_STORE || 'C:\\Users\\Admin\\AppData\\Roaming\\mainframe\\accounts\\whatsapp\\8801911104251\\store';
 const WACLI_BINARY = process.env.WACLI_BINARY || 'C:\\Users\\Admin\\go\\bin\\wacli.exe';
 const SQLITE3 = process.env.SQLITE3 || 'sqlite3';
 
