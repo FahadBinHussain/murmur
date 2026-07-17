@@ -374,13 +374,6 @@ function HealthCheck {
     if (-not $port) { $issues += "proxy not on $ResolvedProxyPort" }
     $w = Get-Process -Name "wacli" -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $w) { $issues += "wacli not running" }
-    # Check wacli connection health
-    try {
-        $doc = & $WacliBin doctor --store $StorePath --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($doc -and $doc.data.connected -eq $false) {
-            $issues += "wacli not connected"
-        }
-    } catch {}
     return $issues
 }
 
@@ -553,6 +546,15 @@ while ($true) {
             Log "WACLI EXITED (code $($wacliProc.ExitCode)), restarting..." Yellow
             break
         }
+
+        # Check wacli connection health - restart if disconnected
+        try {
+            $doc = & $WacliBin doctor --store $StorePath --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($doc -and $doc.data.connected -eq $false) {
+                Log "WACLI DISCONNECTED, restarting..." Yellow
+                break
+            }
+        } catch {}
 
         if ($proxyProc -and $proxyProc.HasExited) {
             Log "PROXY DIED, restarting..." Yellow
