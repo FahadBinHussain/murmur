@@ -1357,6 +1357,16 @@ func (b *Bridge) startHTTPServer(ctx context.Context) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/api/debug/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		models := b.ai.AllChatModels()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"count":   len(models),
+			"models":  models,
+			"base_url": b.ai.BaseURL,
+			"raw_last": string(ai.GetLastDebugRawResponse()[:min(500, len(ai.GetLastDebugRawResponse()))]),
+		})
+	})
 	mux.HandleFunc("/api/send_message", b.handleSendMessage)
 	mux.HandleFunc("/api/automation/notifications", b.handleAutomationNotification)
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {

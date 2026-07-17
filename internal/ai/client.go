@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -301,6 +302,7 @@ func (c *Client) AllVisionModels() []string {
 func (c *Client) fetchModelIDs(path string) []string {
 	result, err := c.request("GET", path, nil)
 	if err != nil {
+		fmt.Fprintf(os.Stdout, "[Mojify-AI] fetchModelIDs error: %v (url: %s%s)\n", err, c.BaseURL, path)
 		return nil
 	}
 	var models []string
@@ -313,6 +315,7 @@ func (c *Client) fetchModelIDs(path string) []string {
 			}
 		}
 	}
+	fmt.Fprintf(os.Stdout, "[Mojify-AI] fetchModelIDs: found %d models from %s%s\n", len(models), c.BaseURL, path)
 	return models
 }
 
