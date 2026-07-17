@@ -1,8 +1,8 @@
-# wacli-pipeline.ps1 - single script: wacli sync + reverse polling for AI replies
+# murmur.ps1 - single script: wacli sync + reverse polling for AI replies
 # no tunnel needed. local machine polls HF for outgoing replies.
 # RUN IN A VISIBLE WINDOW to see real-time logs.
 #
-# usage: pwsh scripts/wacli-pipeline.ps1
+# usage: pwsh scripts/murmur.ps1
 # config: create .env in repo root from .env.example
 #
 # expects to be run from the murmur repo root (or scripts/ subdir).
@@ -64,33 +64,33 @@ if (-not $StorePath) {
     if ($env:WACLI_STORE_PATH) {
         $StorePath = $env:WACLI_STORE_PATH
     } else {
-        $waAccounts = Get-ChildItem "$env:APPDATA\mainframe\accounts\whatsapp" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        $waAccounts = Get-ChildItem "$env:APPDATA\mainframe\accounts\whatsapp" -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
         if ($waAccounts) {
             $StorePath = "$env:APPDATA\mainframe\accounts\whatsapp\$($waAccounts.Name)\store"
         }
     }
 }
 
-$WindowTitle = "Murmur WhatsApp Pipeline"
+$WindowTitle = "murmur"
 $Host.UI.RawUI.WindowTitle = $WindowTitle
 
-# ── kill any previous pipeline windows ─────────────────────────────────────────
+# ── kill any previous murmur windows ─────────────────────────────────────────
 Get-Process -Name "pwsh" -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_.Id -ne $PID -and $_.MainWindowTitle -eq $WindowTitle) {
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Killed old pipeline PID $($_.Id)" -ForegroundColor Yellow
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Killed old murmur PID $($_.Id)" -ForegroundColor Yellow
     }
 }
 Start-Sleep -Seconds 2
 
 # ── singleton guard ───────────────────────────────────────────────────────────
-$SingletonFile = "$env:TEMP\murmur-pipeline.lock"
+$SingletonFile = "$env:TEMP\murmur.lock"
 if (Test-Path $SingletonFile) {
     $existingPid = Get-Content $SingletonFile -ErrorAction SilentlyContinue
     if ($existingPid) {
         $running = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
         if ($running) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Another pipeline is already running (PID $existingPid). Exiting." -ForegroundColor Yellow
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Another murmur is already running (PID $existingPid). Exiting." -ForegroundColor Yellow
             Start-Sleep -Seconds 3
             exit 1
         }
@@ -133,7 +133,7 @@ $LastCookieCheck        = [DateTime]::MinValue
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-$LogFile = "$env:TEMP\murmur-pipeline.log"
+$LogFile = "$env:TEMP\murmur.log"
 function Log($msg, $color = "White") {
     $line = "[$(Now)] $msg"
     Write-Host $line -ForegroundColor $color
@@ -185,7 +185,7 @@ function Start-Wacli {
         "--webhook-secret", $WebhookSecret,
         "--webhook-allow-private"
     )
-    $proc = Start-Process -FilePath "wacli" -ArgumentList $args -WindowStyle Hidden -PassThru
+    $proc = Start-Process -FilePath $WacliBin -ArgumentList $args -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 5
     $running = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
     if ($running) {
@@ -368,7 +368,7 @@ function Poll-HF-ForReplies {
     }
 }
 
-function Pipeline-HealthCheck {
+function HealthCheck {
     $issues = @()
     $port = Get-NetTCPConnection -LocalPort $ResolvedProxyPort -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $port) { $issues += "proxy not on $ResolvedProxyPort" }
@@ -461,7 +461,7 @@ function Invoke-CookieRefresh {
         Log "cookie refresher failed (exit $($proc.ExitCode))" Yellow
         return
     }
-    # give murmur's bridge ~15s to settle the async MQTT reconnect after ReloadCookies
+    # give murmur ~15s to settle the async MQTT reconnect after ReloadCookies
     Start-Sleep -Seconds 15
     Reset-FailedBnpOutbox
     Log "=== COOKIE REFRESH CYCLE DONE ===" Cyan
@@ -470,13 +470,13 @@ function Invoke-CookieRefresh {
 function Check-CookieHealth {
     Log "--- COOKIE HEALTH CHECK ---" Cyan
     # Cheap gate: if murmur's HTTP API is down entirely there's no point
-    # refreshing FB cookies (the bridge isn't up to receive them).
+    # refreshing FB cookies (the murmur isn't up to receive them).
     try {
         $null = Invoke-RestMethod -Uri "$MurmurBase/api/health" -Headers @{ Authorization = "Bearer $HfToken" } -TimeoutSec 10
         Log "  murmur /api/health: ok" Green
     } catch {
         Log "  murmur /api/health: UNREACHABLE ($($_.Exception.Message))" Red
-        Log "  cookie-check skipped — bridge down" Yellow
+        Log "  cookie-check skipped — murmur down" Yellow
         return
     }
 
@@ -499,7 +499,7 @@ function Check-CookieHealth {
 
 while ($true) {
     Log "========================================" Cyan
-    Log "=== MURMUR WHATSAPP PIPELINE STARTING ===" Cyan
+    Log "=== MURMUR STARTING ===" Cyan
     Log "========================================" Cyan
     Log "Store:  $StorePath" White
     Log "Proxy:  :$ResolvedProxyPort" White
@@ -534,7 +534,7 @@ while ($true) {
         }
 
         if ($elapsed % 1 -lt 0.1) {
-            $issues = Pipeline-HealthCheck
+            $issues = HealthCheck
             if ($issues.Count -eq 0) {
                 Log "HEALTH CHECK: healthy (${elapsed}m)" DarkGray
             } else {
@@ -553,6 +553,6 @@ while ($true) {
         }
     }
     
-    Log "Pipeline restart in 5s..." Yellow
+    Log "murmur restart in 5s..." Yellow
     Start-Sleep -Seconds 5
 }

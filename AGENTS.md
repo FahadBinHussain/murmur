@@ -21,7 +21,7 @@
 
 ### Store Wipe / Re-pair Workflow
 - If messages stop syncing or the store is corrupt:
-  1. Stop `MurmurWacliBridge` scheduled task: `schtasks /end /tn "MurmurWacliBridge"`
+  1. Stop `murmur` scheduled task: `schtasks /end /tn "murmur"`
   2. Kill all wacli + murmur-proxy node processes
   3. Delete `LOCK` and `.send.sock` from the store dir
   4. If `wacli.db` schema/migration is broken, delete `wacli.db` and `wacli.db-*` (keep `session.db`)
@@ -30,14 +30,14 @@
      (launch in a visible window so the QR can be scanned from the phone)
   6. After auth, bootstrap sync runs automatically and populates initial messages
   7. Run `wacli history backfill --store <path> --chat <jid> --count 500 --requests 10 --wait 90s` to pull older history
-  8. Re-enable task: `schtasks /run /tn "MurmurWacliBridge"`
+  8. Re-enable task: `schtasks /run /tn "murmur"`
 
 ### WhatsApp History Sync Limitation (IMPORTANT)
 - WhatsApp multi-device protocol only keeps a limited buffer of messages on the
   primary phone for history sync to linked devices.
 - Once a message is delivered live to a linked device (via `sync --follow`),
   WhatsApp removes it from the phone's history sync buffer.
-- If the linked device was offline (wacli crashed, pipeline stopped) for a period,
+- If the linked device was offline (wacli crashed, murmur stopped) for a period,
   messages from that window are **NOT re-fetchable via `history backfill`** —
   the phone's sync batch no longer has them.
 - `history backfill` only goes **backward** from the oldest local message.
@@ -52,14 +52,14 @@
      messages extracted before the store was wiped.
 - Backing up `wacli.db` before any destructive operation is strongly advised.
 
-### Scheduled Task: MurmurWacliBridge
-- Runs `scripts\wacli-pipeline.ps1` via Task Scheduler, trigger "At logon"
-- Pipeline: wacli `sync --follow` + murmur-proxy node + reverse-poll for AI replies
-- Pipeline script auto-restarts wacli if it exits (restart loop)
+### Scheduled Task: murmur
+- Runs `scripts\murmur.ps1` via Task Scheduler, trigger "At logon"
+- murmur: wacli `sync --follow` + murmur-proxy node + reverse-poll for AI replies
+- murmur script auto-restarts wacli if it exits (restart loop)
 - Each wacli crash leaves `LOCK` and `.send.sock` in the store dir — pipeline
   cleans them on restart via `Kill-AllChildren`
-- Singleton guard: `$env:TEMP\murmur-pipeline.lock`
-- Log: `$env:TEMP\murmur-pipeline.log`
+- Singleton guard: `$env:TEMP\murmur.lock`
+- Log: `$env:TEMP\murmur.log`
 - Cookie health: pipeline queries `BnpMessengerNotification` outbox for FB send
   failures and runs `murmur-cookie-refresher.mjs` if threshold is hit
 
