@@ -518,10 +518,12 @@ while ($true) {
     $wacliProc = Start-Wacli
     $start = Get-Date
     $pollCounter = 0
+    $maxRunSeconds = 60
     
     while ($true) {
         Start-Sleep -Seconds $ResolvedPollSeconds
-        $elapsed = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
+        $elapsedSec = [math]::Round(((Get-Date) - $start).TotalSeconds, 0)
+        $elapsedMin = [math]::Round(((Get-Date) - $start).TotalMinutes, 1)
         $pollCounter++
 
         Poll-HF-ForReplies
@@ -533,10 +535,10 @@ while ($true) {
             Check-CookieHealth
         }
 
-        if ($elapsed % 1 -lt 0.1) {
+        if ($elapsedMin % 1 -lt 0.1) {
             $issues = HealthCheck
             if ($issues.Count -eq 0) {
-                Log "HEALTH CHECK: healthy (${elapsed}m)" DarkGray
+                Log "HEALTH CHECK: healthy (${elapsedMin}m)" DarkGray
             } else {
                 Log "HEALTH CHECK: issues: $($issues -join '; ')" Yellow
             }
@@ -547,14 +549,10 @@ while ($true) {
             break
         }
 
-        # Check wacli connection health - restart if disconnected
-        try {
-            $doc = & $WacliBin doctor --store $StorePath --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
-            if ($doc -and $doc.data.connected -eq $false) {
-                Log "WACLI DISCONNECTED, restarting..." Yellow
-                break
-            }
-        } catch {}
+        if ($elapsedSec -ge $maxRunSeconds) {
+            Log "WACLI FORCE RESTART after ${maxRunSeconds}s" Yellow
+            break
+        }
 
         if ($proxyProc -and $proxyProc.HasExited) {
             Log "PROXY DIED, restarting..." Yellow
