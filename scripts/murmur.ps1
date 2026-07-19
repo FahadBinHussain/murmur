@@ -131,6 +131,14 @@ $CookieRefresherScript  = Join-Path $RepoRoot "scripts\murmur-cookie-refresher.m
 $CookieEngine           = "bnp-outbox"  # surfaced in logs
 $LastCookieCheck        = [DateTime]::MinValue
 
+# ── Neon usage warning config ───────────────────────────────────────────────
+$NeonUsageScript        = if ($env:NEON_USAGE_TABLE_SCRIPT) { $env:NEON_USAGE_TABLE_SCRIPT } else { "C:\Users\Admin\Downloads\mainframe\neon-hours-table.ps1" }
+$NeonCheckIntervalS     = if ($env:NEON_USAGE_CHECK_INTERVAL_SECONDS) { [int]$env:NEON_USAGE_CHECK_INTERVAL_SECONDS } else { 3600 }
+$NeonWarningHours       = if ($env:NEON_USAGE_WARNING_HOURS) { [double]$env:NEON_USAGE_WARNING_HOURS } else { 90 }
+$NeonWarningThreadId    = if ($env:NEON_USAGE_WARNING_THREAD_ID) { $env:NEON_USAGE_WARNING_THREAD_ID.Trim() } else { "2637078310061988" }
+$NeonWarningStatePath   = if ($env:NEON_USAGE_WARNING_STATE_PATH) { $env:NEON_USAGE_WARNING_STATE_PATH } else { "$env:APPDATA\mainframe\state\murmur-neon-usage-warnings.json" }
+$LastNeonUsageCheck     = [DateTime]::MinValue
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 $LogFile = "$env:TEMP\murmur.log"
@@ -495,6 +503,94 @@ function Check-CookieHealth {
     }
 }
 
+function Send-NeonUsageWarning($project) {
+    if (-not $HfToken) {
+        Log "  Neon warning not sent: HF token missing" Yellow
+        return $false
+    }
+
+    $used = [double]$project.CU_Hours_Used
+    $left = [double]$project.CU_Hours_Left
+    $reset = if ($project.Quota_Reset -and $project.Quota_Reset -ne '-') { $project.Quota_Reset } else { 'unknown' }
+    $body = @{
+        source = 'neon-usage'
+        threadId = $NeonWarningThreadId
+        title = 'Neon usage warning'
+        message = "$($project.Project) ($($project.Account)) has used $used of 100 CU-hours. $left CU-hours remain. Quota reset: $reset."
+        dedupeKey = "neon-90:$($project.ProjectId):$reset"
+    } | ConvertTo-Json -Compress
+
+    try {
+        $null = Invoke-RestMethod -Uri "$MurmurBase/api/automation/notifications" -Method POST -Headers @{
+            Authorization = "Bearer $HfToken"
+            'X-HF-Authorization' = "Bearer $HfToken"
+            'Content-Type' = 'application/json'
+        } -Body $body -TimeoutSec 30
+        return $true
+    } catch {
+        Log "  Neon warning send failed: $($_.Exception.Message)" Yellow
+        return $false
+    }
+}
+
+function Check-NeonUsage {
+    Log "--- NEON USAGE CHECK (warning at ${NeonWarningHours} CU-h) ---" Cyan
+    if (-not (Test-Path $NeonUsageScript)) {
+        Log "  Neon usage script missing: $NeonUsageScript" Yellow
+        return
+    }
+
+    try {
+        $json = & $NeonUsageScript -Json 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "usage script exited $LASTEXITCODE`: $($json -join ' ')" }
+        $projects = @($json | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        Log "  Neon usage query failed: $($_.Exception.Message)" Yellow
+        return
+    }
+
+    $state = @{}
+    if (Test-Path $NeonWarningStatePath) {
+        try {
+            $saved = Get-Content $NeonWarningStatePath -Raw | ConvertFrom-Json -ErrorAction Stop
+            $saved.PSObject.Properties | ForEach-Object { $state[$_.Name] = [string]$_.Value }
+        } catch {
+            Log "  Neon warning state unreadable; rebuilding it" Yellow
+        }
+    }
+
+    $overThreshold = @($projects | Where-Object {
+        $_.ProjectId -and $_.ProjectId -ne '-' -and
+        $_.Status -notmatch 'ERR' -and
+        [double]$_.CU_Hours_Used -ge $NeonWarningHours
+    })
+    foreach ($project in $overThreshold) {
+        $period = if ($project.Quota_Reset -and $project.Quota_Reset -ne '-') { [string]$project.Quota_Reset } else { 'unknown' }
+        if ($state[[string]$project.ProjectId] -eq $period) {
+            Log "  already warned: $($project.Project) ($($project.CU_Hours_Used) CU-h)" DarkGray
+            continue
+        }
+
+        Log "  threshold reached: $($project.Project) ($($project.CU_Hours_Used) CU-h used)" Yellow
+        if (Send-NeonUsageWarning $project) {
+            $state[[string]$project.ProjectId] = $period
+            $stateDir = Split-Path -Parent $NeonWarningStatePath
+            if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+            $state | ConvertTo-Json | Set-Content $NeonWarningStatePath -Force
+            Log "  Neon usage warning sent" Green
+        }
+    }
+
+    if ($overThreshold.Count -eq 0) {
+        $highest = $projects | Where-Object { $_.ProjectId -and $_.ProjectId -ne '-' } | Sort-Object CU_Hours_Used -Descending | Select-Object -First 1
+        if ($highest) {
+            Log "  no project at threshold; highest is $($highest.Project) at $($highest.CU_Hours_Used) CU-h" Green
+        } else {
+            Log "  no Neon projects returned" Yellow
+        }
+    }
+}
+
 # ── main loop ────────────────────────────────────────────────────────────────
 
 while ($true) {
@@ -533,6 +629,11 @@ while ($true) {
         if (([int64]($now - $LastCookieCheck).TotalSeconds -ge $CookieRefreshIntervalS)) {
             $LastCookieCheck = $now
             Check-CookieHealth
+        }
+
+        if (([int64]($now - $LastNeonUsageCheck).TotalSeconds -ge $NeonCheckIntervalS)) {
+            $LastNeonUsageCheck = $now
+            Check-NeonUsage
         }
 
         if ($elapsedMin % 1 -lt 0.1) {

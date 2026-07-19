@@ -62,6 +62,12 @@
 - Log: `$env:TEMP\murmur.log`
 - Cookie health: pipeline queries `BnpMessengerNotification` outbox for FB send
   failures and runs `murmur-cookie-refresher.mjs` if threshold is hit
+- Neon usage: pipeline runs mainframe `neon-hours-table.ps1 -Json` hourly and
+  sends one Messenger warning per project/quota period at 90 of 100 CU-hours.
+  State: `%APPDATA%\mainframe\state\murmur-neon-usage-warnings.json`.
+  Overrides: `NEON_USAGE_CHECK_INTERVAL_SECONDS`, `NEON_USAGE_WARNING_HOURS`,
+  `NEON_USAGE_WARNING_THREAD_ID`, `NEON_USAGE_TABLE_SCRIPT`, and
+  `NEON_USAGE_WARNING_STATE_PATH`.
 
 ### Useful wacli Commands
 - `wacli sync --store <path> --once --idle-exit 60s` — quick sync, then exit
