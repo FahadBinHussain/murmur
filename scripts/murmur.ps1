@@ -105,6 +105,14 @@ if (Test-Path $SentMsgIdsPath) {
     if ($data) { $data | Get-Member -MemberType NoteProperty | ForEach-Object { $global:SentMsgIds[$_.Name] = $true } }
 }
 
+# HF reverse-poll flap tracking. When HF proxy returns 5xx intermittently
+# (happens on free-tier Spaces), we must NOT force-restart wacli — wacli
+# is fine, only HF is hiccuping. The 60s force-restart stays in effect for
+# real wacli desyncs, but is suppressed while HF is actively flapping.
+$HfConsecutiveErrors = 0
+$HfFlapThreshold = 2        # at or above this many consec errors, treat HF as flapping
+$HfFlapPauseUntil = [DateTime]::MinValue   # if > now, skip force-restart entirely
+
 function Now { Get-Date -Format 'HH:mm:ss' }
 
 $ProxyScript = if ($env:MURMUR_PROXY_SCRIPT) { $env:MURMUR_PROXY_SCRIPT } else { Join-Path $RepoRoot "scripts\murmur-proxy.js" }
@@ -334,9 +342,20 @@ function Poll-HF-ForReplies {
                 $delaySec = $delaySec * 2
             } else {
                 Log "REVERSE POLL ERROR: $msg" Yellow
+                $HfConsecutiveErrors++
+                if ($HfConsecutiveErrors -ge $HfFlapThreshold) {
+                    $HfFlapPauseUntil = (Get-Date).AddSeconds(180)
+                    Log "HF flap detected ($HfConsecutiveErrors consec errors). Suppressing wacli force-restart until $($HfFlapPauseUntil.ToString('HH:mm:ss'))." Yellow
+                }
                 return
             }
         }
+    }
+
+    if ($HfConsecutiveErrors -gt 0) {
+        Log "HF recovered after $HfConsecutiveErrors consec error(s)." Green
+        $HfConsecutiveErrors = 0
+        $HfFlapPauseUntil = [DateTime]::MinValue
     }
 
     if (-not $resp) { return }
@@ -651,8 +670,15 @@ while ($true) {
         }
 
         if ($elapsedSec -ge $maxRunSeconds) {
-            Log "WACLI FORCE RESTART after ${maxRunSeconds}s" Yellow
-            break
+            # Skip the force-restart while HF is flapping — wacli is fine,
+            # only HF is hiccuping. Reschedule Force-restart to fire 60s after
+            # HF flap pause ends, so we still re-sync wacli once HF recovers.
+            if ((Get-Date) -lt $HfFlapPauseUntil) {
+                Log "FORCE RESTART skipped (HF flap until $($HfFlapPauseUntil.ToString('HH:mm:ss'))). wacli stays up." DarkGray
+            } else {
+                Log "WACLI FORCE RESTART after ${maxRunSeconds}s" Yellow
+                break
+            }
         }
 
         if ($proxyProc -and $proxyProc.HasExited) {
