@@ -69,6 +69,7 @@ murmur-bridge --cookies path/to/cookies.json --platform messenger
 | BNP_MESSENGER_REQUEST_TIMEOUT_SECONDS | 30 | HTTP timeout for BNP outbox calls |
 | MURMUR_AUTOMATION_NOTIFICATION_PATH | /api/automation/notifications | Proxy endpoint for local/Codex automation notification enqueue calls |
 | MURMUR_AUTOMATION_NOTIFICATION_DEFAULT_THREAD_ID | 2637078310061988 | Default Messenger thread for automation notifications when no threadId is provided |
+| MURMUR_ALLOWED_THREAD_IDS | 984803114200952,2637078310061988 | Comma-separated allowlist of Messenger thread IDs murmur will respond to with AI replies. Messages in threads not in this list are ignored for AI responses (notifications still send normally). Empty = allow all. |
 
 ## install (scoop)
 

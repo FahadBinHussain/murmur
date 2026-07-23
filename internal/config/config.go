@@ -32,12 +32,17 @@ type Config struct {
 	WhatsAppDownloadMedia   bool
 	WhatsAppProxy           string
 	WACLI_SEND_WEBHOOK_URL  string
+	AllowedThreadIDs        map[int64]bool
 }
 
 func Load() *Config {
 	cfg := &Config{
 		Platform: PlatformMessenger,
 		LogLevel: "info",
+		AllowedThreadIDs: map[int64]bool{
+			984803114200952:  true,
+			2637078310061988: true,
+		},
 	}
 
 	if v := os.Getenv("MURMUR_COOKIES"); v != "" {
@@ -106,6 +111,19 @@ func Load() *Config {
 	}
 	if v := os.Getenv("WACLI_SEND_WEBHOOK_URL"); v != "" {
 		cfg.WACLI_SEND_WEBHOOK_URL = v
+	}
+
+	if v := os.Getenv("MURMUR_ALLOWED_THREAD_IDS"); v != "" {
+		cfg.AllowedThreadIDs = make(map[int64]bool)
+		for _, s := range strings.Split(v, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+				cfg.AllowedThreadIDs[n] = true
+			}
+		}
 	}
 
 	return cfg

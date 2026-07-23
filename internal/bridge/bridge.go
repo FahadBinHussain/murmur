@@ -391,28 +391,32 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 				log.Info().Str("msg_id", msg.MessageId).Int64("thread_id", msg.ThreadKey).Int64("sender_id", msg.SenderId).Str("text", msg.Text).Msg("event_handler: insert message")
 				writeEvent(stdout, OutgoingEvent{Type: "message", Data: evt})
 
-				if msg.SenderId != b.uid {
-					ts := time.UnixMilli(msg.TimestampMs)
-					if ts.Before(b.startTime.Add(-5 * time.Second)) {
-						continue
-					}
-					should := b.shouldRespond(msg.LSInsertMessage)
-					log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond")
-					if should {
-						text := msg.Text
-						log.Info().Str("text", text).Msg("event_handler: calling handleAICommand")
-						if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
-							b.handleAICommand(ctx, msg.ThreadKey, text)
-						} else {
-							cleaned := b.cleanPrompt(text, msg.LSInsertMessage)
-							if cleaned != "" {
-								b.handleAICommand(ctx, msg.ThreadKey, "/ai "+cleaned)
-							}
+			if msg.SenderId != b.uid {
+				ts := time.UnixMilli(msg.TimestampMs)
+				if ts.Before(b.startTime.Add(-5 * time.Second)) {
+					continue
+				}
+				if !b.threadAllowed(msg.ThreadKey) {
+					log.Info().Int64("thread_id", msg.ThreadKey).Msg("event_handler: thread not in allowlist, skipping AI response")
+					continue
+				}
+				should := b.shouldRespond(msg.LSInsertMessage)
+				log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond")
+				if should {
+					text := msg.Text
+					log.Info().Str("text", text).Msg("event_handler: calling handleAICommand")
+					if strings.HasPrefix(strings.TrimSpace(text), "/ai") {
+						b.handleAICommand(ctx, msg.ThreadKey, text)
+					} else {
+						cleaned := b.cleanPrompt(text, msg.LSInsertMessage)
+						if cleaned != "" {
+							b.handleAICommand(ctx, msg.ThreadKey, "/ai "+cleaned)
 						}
 					}
 				}
-				_ = upsertMessages
 			}
+			_ = upsertMessages
+		}
 
 			for threadID, upsert := range upsertMessages {
 				for _, msg := range upsert.Messages {
@@ -433,13 +437,17 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 					log.Info().Str("msg_id", msg.MessageId).Int64("thread_id", threadID).Int64("sender_id", msg.SenderId).Str("text", msg.Text).Msg("event_handler: upsert message")
 					writeEvent(stdout, OutgoingEvent{Type: "message", Data: evt})
 
-					if msg.SenderId != b.uid {
-						ts := time.UnixMilli(msg.TimestampMs)
-						if ts.Before(b.startTime.Add(-5 * time.Second)) {
-							continue
-						}
-						should := b.shouldRespond(msg.LSInsertMessage)
-						log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond (upsert)")
+				if msg.SenderId != b.uid {
+					ts := time.UnixMilli(msg.TimestampMs)
+					if ts.Before(b.startTime.Add(-5 * time.Second)) {
+						continue
+					}
+					if !b.threadAllowed(threadID) {
+						log.Info().Int64("thread_id", threadID).Msg("event_handler: thread not in allowlist, skipping AI response (upsert)")
+						continue
+					}
+					should := b.shouldRespond(msg.LSInsertMessage)
+					log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond (upsert)")
 						if should {
 							text := msg.Text
 							log.Info().Str("text", text).Msg("event_handler: calling handleAICommand (upsert)")
@@ -751,6 +759,13 @@ func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send image message")
 	}
+}
+
+func (b *Bridge) threadAllowed(threadID int64) bool {
+	if len(b.cfg.AllowedThreadIDs) == 0 {
+		return true
+	}
+	return b.cfg.AllowedThreadIDs[threadID]
 }
 
 func (b *Bridge) shouldRespond(msg *table.LSInsertMessage) bool {
