@@ -396,10 +396,6 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 				if ts.Before(b.startTime.Add(-5 * time.Second)) {
 					continue
 				}
-				if !b.threadAllowed(msg.ThreadKey) {
-					log.Info().Int64("thread_id", msg.ThreadKey).Msg("event_handler: thread not in allowlist, skipping AI response")
-					continue
-				}
 				should := b.shouldRespond(msg.LSInsertMessage)
 				log.Info().Bool("should_respond", should).Int64("sender_id", msg.SenderId).Int64("uid", b.uid).Msg("event_handler: checking shouldRespond")
 				if should {
@@ -440,10 +436,6 @@ func (b *Bridge) makeEventHandler(ctx context.Context, stdout io.Writer) func(co
 				if msg.SenderId != b.uid {
 					ts := time.UnixMilli(msg.TimestampMs)
 					if ts.Before(b.startTime.Add(-5 * time.Second)) {
-						continue
-					}
-					if !b.threadAllowed(threadID) {
-						log.Info().Int64("thread_id", threadID).Msg("event_handler: thread not in allowlist, skipping AI response (upsert)")
 						continue
 					}
 					should := b.shouldRespond(msg.LSInsertMessage)
@@ -598,6 +590,11 @@ func (b *Bridge) SendMessage(ctx context.Context, threadID int64, text string) s
 		return ""
 	}
 
+	if !b.threadAllowed(threadID) {
+		b.logger.Warn().Int64("thread_id", threadID).Str("text_preview", text[:min(80, len(text))]).Msg("SendMessage blocked: thread not in allowlist")
+		return ""
+	}
+
 	otid := time.Now().UnixMilli()
 
 	// Messenger truncates messages around 2000 chars — chunk long replies
@@ -710,6 +707,11 @@ func (b *Bridge) EditMessage(ctx context.Context, threadID int64, messageID stri
 		return nil
 	}
 
+	if !b.threadAllowed(threadID) {
+		b.logger.Warn().Int64("thread_id", threadID).Str("message_id", messageID).Msg("EditMessage blocked: thread not in allowlist")
+		return fmt.Errorf("thread %d not in allowlist", threadID)
+	}
+
 	_, err := b.client.ExecuteTasks(ctx, &socket.EditMessageTask{
 		MessageID: messageID,
 		Text:      text,
@@ -726,6 +728,10 @@ func (b *Bridge) editMessage(ctx context.Context, threadID int64, messageID stri
 }
 
 func (b *Bridge) sendImage(ctx context.Context, threadID int64, imageData []byte, mimeType string) {
+	if !b.threadAllowed(threadID) {
+		b.logger.Warn().Int64("thread_id", threadID).Msg("sendImage blocked: thread not in allowlist")
+		return
+	}
 	resp, err := b.client.SendMercuryUploadRequest(ctx, threadID, &messagix.MercuryUploadMedia{
 		Filename:  "image.png",
 		MimeType:  mimeType,
@@ -1137,6 +1143,19 @@ func (b *Bridge) handleCommand(ctx context.Context, stdout io.Writer, cmd Incomi
 		var data SendMessageData
 		if err := json.Unmarshal(cmd.Data, &data); err != nil {
 			log.Error().Err(err).Msg("Failed to parse send_message data")
+			return
+		}
+
+		if !b.threadAllowed(data.ThreadID) {
+			b.logger.Warn().Int64("thread_id", data.ThreadID).Msg("handleCommand send_message blocked: thread not in allowlist")
+			writeEvent(stdout, OutgoingEvent{
+				Type: "error",
+				Data: map[string]interface{}{
+					"command": cmd.Type,
+					"error":   fmt.Sprintf("thread %d not in allowlist", data.ThreadID),
+					"id":      cmd.ID,
+				},
+			})
 			return
 		}
 
