@@ -61,6 +61,7 @@ async function main() {
     const sourceCat = categories.find((c) => c.startsWith("source:"));
     const source = sourceCat ? sourceCat.replace("source:", "") : "";
 
+    if (source === "amazon prime") continue;
     items.push({ title, guid, link, content, source });
   }
 
