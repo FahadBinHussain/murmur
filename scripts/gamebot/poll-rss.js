@@ -74,12 +74,13 @@ async function main() {
 
     const msg = item.content || "New free game available!";
     const sourceLabel = item.source ? `[${item.source}] ` : "";
+    const linkLine = item.link ? `\n\n${item.link}` : "";
 
     const payload = {
       source: "gamebot",
       threadId: "2637078310061988",
       title: `🎮 FREE: ${item.title}`,
-      message: `${sourceLabel}${msg}`,
+      message: `${sourceLabel}${msg}${linkLine}`,
       url: item.link,
       dedupeKey: item.guid,
     };
