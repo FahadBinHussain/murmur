@@ -78,7 +78,7 @@ async function main() {
 
     const payload = {
       source: "gamebot",
-      threadId: "2637078310061988",
+      threadId: "30738305889116993",
       title: `🎮 FREE: ${item.title}`,
       message: `${sourceLabel}${msg}${linkLine}`,
       url: item.link,
