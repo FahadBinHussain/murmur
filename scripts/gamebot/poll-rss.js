@@ -7,6 +7,12 @@ async function main() {
     process.exit(1);
   }
 
+  const hfToken = process.env.HF_TOKEN;
+  const headers = { "Content-Type": "application/json" };
+  if (hfToken) {
+    headers["Authorization"] = `Bearer ${hfToken}`;
+  }
+
   const seenFile = process.env.SEEN_FILE || "seen-games.json";
   let seen = {};
   try {
@@ -81,7 +87,7 @@ async function main() {
     try {
       const res = await fetch(webhookUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(payload),
       });
       if (res.ok) {
