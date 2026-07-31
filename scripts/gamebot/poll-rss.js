@@ -73,7 +73,7 @@ async function main() {
       const host = link ? new URL(link).hostname.replace(/^www\./, "") : "";
       if (host && blockedHosts.some((b) => host === b || host.endsWith("." + b))) {
         console.log(`Skipping blocked host ${host}: ${title}`);
-        seen[item.guid] = Date.now(); // mark seen so it's not retried
+        seen[guid] = Date.now(); // mark seen so it's not retried
         continue;
       }
     } catch {
