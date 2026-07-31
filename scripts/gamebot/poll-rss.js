@@ -62,6 +62,24 @@ async function main() {
     const source = sourceCat ? sourceCat.replace("source:", "") : "";
 
     if (source === "amazon prime") continue;
+
+    // block non-game / unwanted storefront links
+    const blockedHosts = [
+      "luna.amazon.com", // Amazon Luna (Prime-adjacent, not standalone free game)
+      "appraven.net",    // AppRaven storefront
+      "fab.com",         // Fab 3D asset marketplace, not a game storefront
+    ];
+    try {
+      const host = link ? new URL(link).hostname.replace(/^www\./, "") : "";
+      if (host && blockedHosts.some((b) => host === b || host.endsWith("." + b))) {
+        console.log(`Skipping blocked host ${host}: ${title}`);
+        seen[item.guid] = Date.now(); // mark seen so it's not retried
+        continue;
+      }
+    } catch {
+      // ignore malformed link, let it through
+    }
+
     items.push({ title, guid, link, content, source });
   }
 
