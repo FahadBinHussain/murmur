@@ -63,11 +63,24 @@
 - Cookie health: pipeline queries `BnpMessengerNotification` outbox for FB send
   failures and runs `murmur-cookie-refresher.mjs` if threshold is hit
 - Neon usage: pipeline runs mainframe `neon-hours-table.ps1 -Json` hourly and
-  sends one Messenger warning per project/quota period at 90 of 100 CU-hours.
+  sends one Messenger warning per org/quota period at 90 of 100 CU-hours.
   State: `%APPDATA%\mainframe\state\murmur-neon-usage-warnings.json`.
   Overrides: `NEON_USAGE_CHECK_INTERVAL_SECONDS`, `NEON_USAGE_WARNING_HOURS`,
   `NEON_USAGE_WARNING_THREAD_ID`, `NEON_USAGE_TABLE_SCRIPT`, and
   `NEON_USAGE_WARNING_STATE_PATH`.
+- Neon quota bug (fixed 2026-08-01): `neon-hours-table.ps1` previously used
+  project-detail `compute_time_seconds`, which is LIFETIME-cumulative and never
+  resets — so the murmur warning kept firing 93 CU-h used for Daily-BNP even
+  after the period reset, while Neon UI showed ~0. The neon-hours script was
+  rewritten to use the period-bounded `/organizations/{org_id}/consumption`
+  endpoint, which matches Neon UI exactly. Quotas are now reported per-org
+  (one row per org, `ProjectId` = org id, `Project` = comma-joined names); on
+  this machine 13 of 14 Neon accounts have 1 project so per-org == per-project
+  for them, and the 1 multi-project account (ahmedtouhid88) shows combined
+  usage across its 3 projects. No local baseline state file is needed.
+  Murmur dedup key also now uses canonically formatted `yyyy-MM-dd` UTC for
+  both state compare and message (was previously comparing raw ISO against
+  localized state, which mismatched and re-fired every hour).
 
 ### Useful wacli Commands
 - `wacli sync --store <path> --once --idle-exit 60s` — quick sync, then exit

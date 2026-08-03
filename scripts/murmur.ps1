@@ -530,13 +530,22 @@ function Send-NeonUsageWarning($project) {
 
     $used = [double]$project.CU_Hours_Used
     $left = [double]$project.CU_Hours_Left
-    $reset = if ($project.Quota_Reset -and $project.Quota_Reset -ne '-') { $project.Quota_Reset } else { 'unknown' }
+    # Normalize Quota_Reset to a stable yyyy-MM-dd UTC date so the dedup key
+    # and human message stay consistent across API format / locale shifts and
+    # don't change when a value like "2026-09-01T00:00:00Z" is rendered locally.
+    $resetDate = 'unknown'
+    if ($project.Quota_Reset -and $project.Quota_Reset -ne '-') {
+        try {
+            $dt = [DateTimeOffset]::Parse($project.Quota_Reset, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::RoundtripKind)
+            $resetDate = $dt.UtcDateTime.ToString('yyyy-MM-dd')
+        } catch { $resetDate = [string]$project.Quota_Reset }
+    }
     $body = @{
         source = 'neon-usage'
         threadId = $NeonWarningThreadId
         title = 'Neon usage warning'
-        message = "$($project.Project) ($($project.Account)) has used $used of 100 CU-hours. $left CU-hours remain. Quota reset: $reset."
-        dedupeKey = "neon-90:$($project.ProjectId):$reset"
+        message = "$($project.Project) ($($project.Account)) has used $used of 100 CU-hours. $left CU-hours remain. Quota reset: $resetDate UTC."
+        dedupeKey = "neon-$NeonWarningHours`:$($project.ProjectId):$resetDate"
     } | ConvertTo-Json -Compress
 
     try {
@@ -584,7 +593,13 @@ function Check-NeonUsage {
         [double]$_.CU_Hours_Used -ge $NeonWarningHours
     })
     foreach ($project in $overThreshold) {
-        $period = if ($project.Quota_Reset -and $project.Quota_Reset -ne '-') { [string]$project.Quota_Reset } else { 'unknown' }
+        $period = 'unknown'
+        if ($project.Quota_Reset -and $project.Quota_Reset -ne '-') {
+            try {
+                $dt = [DateTimeOffset]::Parse($project.Quota_Reset, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::RoundtripKind)
+                $period = $dt.UtcDateTime.ToString('yyyy-MM-dd')
+            } catch { $period = [string]$project.Quota_Reset }
+        }
         if ($state[[string]$project.ProjectId] -eq $period) {
             Log "  already warned: $($project.Project) ($($project.CU_Hours_Used) CU-h)" DarkGray
             continue
