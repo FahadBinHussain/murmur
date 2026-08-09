@@ -54,6 +54,14 @@
 
 ### Scheduled Task: murmur
 - Runs `scripts\murmur.ps1` via Task Scheduler, trigger "At logon"
+- Logon trigger has a 30-min repetition interval (PT30M / P9999D) with
+  MultipleInstancesPolicy=IgnoreNew: the supervisor process can be killed on
+  sleep/session transitions and the task would otherwise never re-fire until
+  next logon (bug fixed 2026-08-09 — murmur and AgentsMdSync both died at
+  sleep with LastTaskResult 0xFFFFFFFF). The repetition re-runs the task every
+  30 min; IgnoreNew skips it while the supervisor is alive, so no duplicates.
+- When murmur is broken, first kill any orphaned `node ... murmur-proxy.js`
+  that still holds port 7870, else the new proxy can't bind on restart.
 - murmur: wacli `sync --follow` + murmur-proxy node + reverse-poll for AI replies
 - murmur script auto-restarts wacli if it exits (restart loop)
 - Each wacli crash leaves `LOCK` and `.send.sock` in the store dir — pipeline
