@@ -137,9 +137,30 @@
 ## GameBot workflows (GitHub Actions)
 
 - `gamebot.yml` (every 6h) - polls the free-games RSS feed (`feed.eikowagenknecht.com/lootscraper.xml`) via `scripts/gamebot/poll-rss.js` and notifies Murmur of new free games. dedupe via `seen-games.json` (actions/cache).
-- `steam-updates.yml` (every 6h, manual dispatch too) - polls keyless `ISteamNews/GetNewsForApp/v2` per appid in `GAME_APPIDS` (env in workflow, format `appid:Display Name`) via `scripts/gamebot/poll-steam-updates.js` and notifies on new "Community Announcements" (dev patch posts). dedupe via `seen-steam-updates.json` (actions/cache).
+- `steam-updates.yml` was DELETED 2026-08-11 — fully superseded by the real-time vercel/ poller (below), which uses the same "Community Announcements" filter and the same webhook/threads.
 - both use repo secret `MURMUR_WEBHOOK_URL` (and optional `HF_TOKEN`).
 - `poll-steam-updates.js` filters: feedlabel must be exactly "Community Announcements" (external press posts are skipped), and `MAX_AGE_DAYS` (default 30) guards first runs against flooding old posts - older items are silently marked seen.
 - to watch another game: append `appid:Name` to `GAME_APPIDS` in `steam-updates.yml`.
 
 - **subscriptions**: `scripts/gamebot/subscriptions.json` maps thread id -> list of sources (`gamebot`, `steam-updates`). each script loads its own subscribers via `scripts/gamebot/subscriptions.js` (env `MURMUR_THREAD_ID` overrides the file when set). to subscribe a thread to a source, add its id to that source's list; to unsubscribe, remove it.
+
+## Steam Updates - real-time poller (vercel/)
+
+### what it is
+- `vercel/` is a small Next.js + TypeScript + drizzle app (inside the murmur repo) that polls Steam community-announcement news every minute and posts new ones to Murmur, replacing the 6h GH Actions `steam-updates.yml` (deleted 2026-08-11; git history keeps it as reference).
+- route: `GET https://triton.vercel.app/api/steam-updates` — polls keyless `ISteamNews/GetNewsForApp/v2` per appid in `GAME_APPIDS`, filters feedlabel == "Community Announcements", dedupes against Neon table `steam_seen`, POSTs new ones to the Murmur HF Space webhook with `X-HF-Authorization: <HF_TOKEN>`.
+- pre-seeded `steam_seen` with the 29 current announcements on first deploy so nothing re-sends.
+
+### accounts/ownership
+- Vercel project `murmur`: account `fahadbix@gmail.com`, team `fahads-projects-4ed2eafb`, project id `prj_EWeinTGTbfW5iC2bciQ65ZuA4WyZ`.
+- **production domain is `triton.vercel.app`** (attached 2026-08-11; Neptune's largest moon — picked after ~200 availability probes because every meaningful single-word vercel.app name is taken). `murmur.vercel.app` is a DIFFERENT user's domain — never use it (this cost a long debug session 2026-08-11; the deployments list/alias API reports the real project domain via `/v9/projects/murmur/domains`). `murmur-beryl-ten.vercel.app` still works as fallback alias.
+- Neon project `murmur` (`aged-leaf-93258928`) on `fahad.bin.hussain001@gmail.com` (its 1st and only project per the 1-project rule). DATABASE_URL backed up at `%APPDATA%\mainframe\state\murmur-neon-database-url.txt`.
+- cron-job.org job `8250790` (profile `fahadbinhussain001@gmail.com`), every 1 min, Asia/Dhaka, 60s timeout — see global AGENTS.md rule 11 inventory.
+
+### env vars (Vercel project env)
+`DATABASE_URL`, `HF_TOKEN`, `GAME_APPIDS` (format `appid:Display Name`), `STEAM_THREAD_IDS` (comma-separated). set/update via Vercel REST API, not CLI (CLI is broken on this machine — pnpm shim issue).
+
+### deploying via REST API (vercel CLI broken on this machine)
+- no git link on the project; deployments are created via `POST /v13/deployments?teamId=<team>&forceNew=1` with inline base64 files + **`config.builds: [{src:"package.json", use:"@vercel/next"}]`** — without the explicit builder the deploy goes READY but empty (UNUSED_FILES_IN_DEPLOYMENT, 404s everywhere).
+- after the FIRST project creation, Vercel Authentication (SSO) defaults to `all_except_custom_domains` — vercel.app domains get a login wall that breaks cron-job.org. disable with `PATCH /v9/projects/murmur` body `{"ssoProtection":null}` (valid deploymentType values: `prod_deployment_urls_and_all_previews` | `all` | `preview` | null).
+- old API-only deployments get purged by Vercel (deployment-specific URLs 404 later); the project domain always serves the latest production.
