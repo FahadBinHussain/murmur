@@ -7,6 +7,16 @@ async function main() {
     process.exit(1);
   }
 
+  const threadId = process.env.MURMUR_THREAD_ID;
+  if (!threadId) {
+    console.error("MURMUR_THREAD_ID not set");
+    process.exit(1);
+  }
+  const threadIds = threadId
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+
   const hfToken = process.env.HF_TOKEN;
   const headers = { "Content-Type": "application/json" };
   if (hfToken) {
@@ -95,33 +105,41 @@ async function main() {
     const sourceLabel = item.source ? `[${item.source}] ` : "";
     const linkLine = item.link ? `\n\n${item.link}` : "";
 
-    const payload = {
-      source: "gamebot",
-      threadId: "30738305889116993",
-      title: `🎮 FREE: ${item.title}`,
-      message: `${sourceLabel}${msg}${linkLine}`,
-      url: item.link,
-      dedupeKey: item.guid,
-    };
+    let sentToAll = true;
+    for (const tid of threadIds) {
+      const payload = {
+        source: "gamebot",
+        threadId: tid,
+        title: `🎮 FREE: ${item.title}`,
+        message: `${sourceLabel}${msg}${linkLine}`,
+        url: item.link,
+        dedupeKey: item.guid,
+      };
 
-    try {
-      const res = await fetch(webhookUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        console.log(`Sent: ${item.title}`);
-        seen[item.guid] = Date.now();
-        newCount++;
-      } else {
-        console.error(`Failed to send (${res.status}): ${await res.text()}`);
+      try {
+        const res = await fetch(webhookUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          console.log(`Sent to ${tid}: ${item.title}`);
+        } else {
+          sentToAll = false;
+          console.error(`Failed to send to ${tid} (${res.status}): ${await res.text()}`);
+        }
+      } catch (err) {
+        sentToAll = false;
+        console.error(`Network error for ${tid}: ${err.message}`);
       }
-    } catch (err) {
-      console.error(`Network error: ${err.message}`);
+
+      await new Promise((r) => setTimeout(r, 500));
     }
 
-    await new Promise((r) => setTimeout(r, 500));
+    if (sentToAll) {
+      seen[item.guid] = Date.now();
+      newCount++;
+    }
   }
 
   // trim seen list to last 500

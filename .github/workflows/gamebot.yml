@@ -27,6 +27,7 @@ jobs:
       - name: Poll RSS and notify Murmur
         env:
           MURMUR_WEBHOOK_URL: ${{ secrets.MURMUR_WEBHOOK_URL }}
+          MURMUR_THREAD_ID: ${{ secrets.MURMUR_THREAD_ID }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SEEN_FILE: seen-games.json
         run: node scripts/gamebot/poll-rss.js

@@ -77,6 +77,17 @@ murmur-bridge --cookies path/to/cookies.json --platform messenger
 scoop install murmur-bridge
 ```
 
+## free games bot (github actions)
+
+`gamebot.yml` polls a free-games RSS feed every 6 hours and posts new entries
+through murmur's webhook. it needs three repo secrets:
+
+| secret | description |
+|--------|-------------|
+| MURMUR_WEBHOOK_URL | murmur webhook endpoint that accepts the notification payload |
+| MURMUR_THREAD_ID | messenger thread id the notifications should land in |
+| HF_TOKEN | optional; Bearer auth for the webhook host when it's a private HF space |
+
 ## commands (stdin JSON)
 
 ```json
