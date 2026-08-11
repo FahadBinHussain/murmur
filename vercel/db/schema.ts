@@ -6,3 +6,9 @@ export const steamSeen = pgTable("steam_seen", {
   title: text("title").notNull(),
   seenAt: timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const gameSeen = pgTable("game_seen", {
+  guid: text("guid").primaryKey(),
+  title: text("title").notNull(),
+  seenAt: timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
+});
