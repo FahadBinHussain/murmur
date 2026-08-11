@@ -1,4 +1,5 @@
 const FEED_URL = "https://feed.eikowagenknecht.com/lootscraper.xml";
+const { loadThreads } = require("./subscriptions");
 
 async function main() {
   const webhookUrl = process.env.MURMUR_WEBHOOK_URL;
@@ -7,15 +8,11 @@ async function main() {
     process.exit(1);
   }
 
-  const threadId = process.env.MURMUR_THREAD_ID;
-  if (!threadId) {
-    console.error("MURMUR_THREAD_ID not set");
+  const threadIds = loadThreads("gamebot");
+  if (threadIds.length === 0) {
+    console.error("no threads subscribed to gamebot");
     process.exit(1);
   }
-  const threadIds = threadId
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
 
   const hfToken = process.env.HF_TOKEN;
   const headers = { "Content-Type": "application/json" };

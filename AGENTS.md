@@ -133,3 +133,13 @@
 - Production URL: `dailybnp.com`
 - Owning account: `dailybnp1978@gmail.com` (mainframe vercel profile)
 - Env vars accessible via Vercel REST API: `GET /v9/projects/dailybnp/env?teamSlug=daily-bnps-projects`
+
+## GameBot workflows (GitHub Actions)
+
+- `gamebot.yml` (every 6h) - polls the free-games RSS feed (`feed.eikowagenknecht.com/lootscraper.xml`) via `scripts/gamebot/poll-rss.js` and notifies Murmur of new free games. dedupe via `seen-games.json` (actions/cache).
+- `steam-updates.yml` (every 6h, manual dispatch too) - polls keyless `ISteamNews/GetNewsForApp/v2` per appid in `GAME_APPIDS` (env in workflow, format `appid:Display Name`) via `scripts/gamebot/poll-steam-updates.js` and notifies on new "Community Announcements" (dev patch posts). dedupe via `seen-steam-updates.json` (actions/cache).
+- both use repo secret `MURMUR_WEBHOOK_URL` (and optional `HF_TOKEN`).
+- `poll-steam-updates.js` filters: feedlabel must be exactly "Community Announcements" (external press posts are skipped), and `MAX_AGE_DAYS` (default 30) guards first runs against flooding old posts - older items are silently marked seen.
+- to watch another game: append `appid:Name` to `GAME_APPIDS` in `steam-updates.yml`.
+
+- **subscriptions**: `scripts/gamebot/subscriptions.json` maps thread id -> list of sources (`gamebot`, `steam-updates`). each script loads its own subscribers via `scripts/gamebot/subscriptions.js` (env `MURMUR_THREAD_ID` overrides the file when set). to subscribe a thread to a source, add its id to that source's list; to unsubscribe, remove it.
