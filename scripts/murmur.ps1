@@ -135,6 +135,7 @@ $CookieRefreshIntervalS = if ($env:BNP_COOKIE_REFRESH_INTERVAL_SECONDS) { [int]$
 $CookieRefreshWindowM   = if ($env:BNP_COOKIE_REFRESH_FAILURE_WINDOW_MINUTES) { [int]$env:BNP_COOKIE_REFRESH_FAILURE_WINDOW_MINUTES } else { 30 }
 $CookieRefreshThreshold = if ($env:BNP_COOKIE_REFRESH_FAILURE_THRESHOLD) { [int]$env:BNP_COOKIE_REFRESH_FAILURE_THRESHOLD } else { 2 }
 $PsqlBin                = if ($env:BNP_PSQL_BIN) { $env:BNP_PSQL_BIN } else { "C:\Users\Admin\scoop\apps\postgresql\current\bin\psql.exe" }
+$BnpDbScript            = Join-Path $RepoRoot "scripts\bnp-db.mjs"
 $CookieRefresherScript  = Join-Path $RepoRoot "scripts\murmur-cookie-refresher.mjs"
 $CookieEngine           = "bnp-outbox"  # surfaced in logs
 $LastCookieCheck        = [DateTime]::MinValue
@@ -410,6 +411,21 @@ function Get-BnpSendFailureCount {
     # is degraded. Returns -1 on connection/config error so callers can choose
     # to skip the reset instead of acting blindly.
     if (-not $BnpDatabaseUrl) { return -1 }
+    # wss:443 path first — the Neon serverless driver rides the VPN tunnel while
+    # ProtonVPN's WFP filter drops psql's 5432 flow. falls back to psql below.
+    if (Test-Path $BnpDbScript) {
+        $env:BNP_DATABASE_URL = $BnpDatabaseUrl
+        $env:BNP_WINDOW_MINUTES = "$CookieRefreshWindowM"
+        $out = & node $BnpDbScript count 2>&1
+        $rc = $LASTEXITCODE
+        Remove-Item Env:\BNP_DATABASE_URL, Env:\BNP_WINDOW_MINUTES -ErrorAction SilentlyContinue
+        if ($rc -eq 0) {
+            $n = 0
+            $raw = ($out -join '').Trim()
+            if ([int]::TryParse($raw, [ref]$n)) { return $n }
+        }
+        Log "bnp-db.mjs count failed (rc=$rc): $out - falling back to psql" Yellow
+    }
     if (-not (Test-Path $PsqlBin)) { Log "psql not found: $PsqlBin" Yellow; return -1 }
 
     $query = @"
@@ -444,6 +460,19 @@ WHERE status = 'failed'
 
 function Reset-FailedBnpOutbox {
     if (-not $BnpDatabaseUrl) { return }
+    # wss:443 reset first (same rationale as Get-BnpSendFailureCount), psql fallback below.
+    if (Test-Path $BnpDbScript) {
+        $env:BNP_DATABASE_URL = $BnpDatabaseUrl
+        $env:BNP_WINDOW_MINUTES = "$CookieRefreshWindowM"
+        $out = & node $BnpDbScript reset 2>&1
+        $rc = $LASTEXITCODE
+        Remove-Item Env:\BNP_DATABASE_URL, Env:\BNP_WINDOW_MINUTES -ErrorAction SilentlyContinue
+        if ($rc -eq 0) {
+            Log "reset failed outbox rows: $((($out -join ' ').Trim()))" Green
+            return
+        }
+        Log "bnp-db.mjs reset failed (rc=$rc): $out - falling back to psql" Yellow
+    }
     if (-not (Test-Path $PsqlBin)) { return }
 
     $sql = @"

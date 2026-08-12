@@ -2,27 +2,35 @@
 /**
  * scripts/murmur-cookie-refresher.mjs
  *
- * Headed Facebook cookie refresh for murmur HF Space.
+ * Browserless facebook cookie refresh for murmur HF Space.
  *
  * Workflow:
- * 1. Launches Edge visibly with the saved mainframe browserui profile
- * 2. Navigates to Facebook messenger.com
- * 3. Looks for "Continue as NAME" button and clicks it
- * 4. Extracts c_user / xs / datr cookies
- * 5. POSTs to murmur /api/cookies/upload
+ * 1. Reads the fresh agent-browser lightweight cookie snapshot for the FB
+ *    account (saved by `agent-browser-account.ps1 cookies save <email>`
+ *    from a live login) at:
+ *      %APPDATA%\mainframe\accounts\agent-browser\cookies\<email>.cookies.json
+ * 2. Converts the CDP cookie array to the plain {name:value} map the bridge
+ *    expects (c_user / xs / datr / sb / wd).
+ * 3. POSTs to murmur /api/cookies/upload with Authorization: Bearer <HF_TOKEN>
+ *    and verifies the "Cookies uploaded and bridge reloaded" response.
+ *
+ * No browser is spawned: if the vault is missing or the required trio
+ * (c_user/xs/datr) is expired, the refresher fails loudly with the exact
+ * helper command needed to refresh the vault (one manual login).
  *
  * Usage:
  *   node scripts/murmur-cookie-refresher.mjs
  *
  * Env (from .env in repo root):
+ *   AGENT_BROWSER_EMAIL         - FB account email for the cookie vault
+ *                                 (fallback: MAINFRAME_BROWSERUI_EMAIL, kept
+ *                                 for compat with older .env files)
  *   HF_EMAIL                    - mainframe HF profile email (used to locate token)
  *   MURMUR_HF_SPACE_URL         - murmur space URL
- *   MAINFRAME_BROWSERUI_EMAIL   - browserui profile email
- *   MURMUR_REFRESH_PORT         - remote debugging port (default: 9377)
- *   MURMUR_REFRESH_FB_URL       - facebook url (default: https://www.messenger.com)
+ *   MURMUR_REFRESH_ALLOW_EXPIRED- "1" to upload even if the vault trio is
+ *                                 past its expiry (default: fail instead)
  */
 
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -42,17 +50,17 @@ function loadEnv(path = join(process.cwd(), ".env")) {
 loadEnv();
 
 const DEFAULTS = {
-  email: process.env.MAINFRAME_BROWSERUI_EMAIL || "",
+  email:
+    process.env.AGENT_BROWSER_EMAIL ||
+    process.env.MAINFRAME_BROWSERUI_EMAIL ||
+    "",
   hfEmail: process.env.HF_EMAIL || "",
   murmurUrl: process.env.MURMUR_HF_SPACE_URL || "",
-  facebookUrl: process.env.MURMUR_REFRESH_FB_URL || "https://www.messenger.com",
-  port: Number(process.env.MURMUR_REFRESH_PORT || 9377),
-  connectMs: Number(process.env.MURMUR_REFRESH_CONNECT_MS || 8000),
-  clickWaitMs: Number(process.env.MURMUR_REFRESH_CLICK_WAIT_MS || 10000),
-  postClickWaitMs: Number(process.env.MURMUR_REFRESH_POST_CLICK_MS || 5000),
+  allowExpired: process.env.MURMUR_REFRESH_ALLOW_EXPIRED === "1",
 };
 
 const REQUIRED_COOKIES = ["c_user", "xs", "datr"];
+const NICE_TO_HAVE_COOKIES = ["sb", "wd"];
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -62,15 +70,16 @@ function err(...args) {
   console.error(new Date().toISOString(), "[error]", ...args);
 }
 
-function getBrowserUiProfileDir(email) {
+function getCookieVaultPath(email) {
   return join(
     homedir(),
     "AppData",
     "Roaming",
     "mainframe",
     "accounts",
-    "browserui",
-    email,
+    "agent-browser",
+    "cookies",
+    `${email}.cookies.json`,
   );
 }
 
@@ -90,33 +99,6 @@ function resolveHfToken() {
   return readFileSync(tokenPath, "utf-8").trim();
 }
 
-function findBrowserPath() {
-  const candidates = [
-    join(process.env.LOCALAPPDATA || "", "Microsoft", "Edge", "Application", "msedge.exe"),
-    join(process.env.ProgramFiles || "", "Microsoft", "Edge", "Application", "msedge.exe"),
-    join(process.env.ProgramFilesX86 || "", "Microsoft", "Edge", "Application", "msedge.exe"),
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-    join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
-    join(process.env.ProgramFiles || "", "Google", "Chrome", "Application", "chrome.exe"),
-    join(process.env.ProgramFilesX86 || "", "Google", "Chrome", "Application", "chrome.exe"),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
-  }
-  throw new Error("No Chromium-compatible browser found. Install Chrome or Edge.");
-}
-
-function delay(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-  return res.json();
-}
-
 async function postJson(url, body, headers = {}) {
   const res = await fetch(url, {
     method: "POST",
@@ -127,152 +109,80 @@ async function postJson(url, body, headers = {}) {
   return { status: res.status, text };
 }
 
-async function connectCdp(port, connectMs) {
-  const deadline = Date.now() + connectMs;
-  while (Date.now() < deadline) {
-    try {
-      const targets = await fetchJson(`http://127.0.0.1:${port}/json`);
-      const page = targets.find((t) => t.type === "page");
-      if (page) {
-        const ws = new WebSocket(page.webSocketDebuggerUrl);
-        await new Promise((resolve, reject) => {
-          ws.addEventListener("open", () => resolve(ws), { once: true });
-          ws.addEventListener("error", (e) => reject(e), { once: true });
-          setTimeout(() => reject(new Error("WebSocket connect timeout")), 5000);
-        });
-        return { ws, page };
-      }
-    } catch {}
-    await delay(500);
+function loadVaultCookies(vaultPath) {
+  const raw = JSON.parse(readFileSync(vaultPath, "utf-8"));
+  const arr = Array.isArray(raw) ? raw : [];
+  return arr.filter((c) => c && typeof c.name === "string" && typeof c.value === "string");
+}
+
+function toCookieMap(cookies) {
+  const map = {};
+  for (const name of [...REQUIRED_COOKIES, ...NICE_TO_HAVE_COOKIES]) {
+    const c = cookies.find((x) => x.name === name);
+    if (c) map[c.name] = c.value;
   }
-  throw new Error("Could not connect to browser CDP");
+  return map;
 }
 
-function sendCdp(ws, id, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    let resolved = false;
-    const onMessage = (event) => {
-      try {
-        const data = event.data || event;
-        const msg = JSON.parse(data.toString ? data.toString() : data);
-        if (msg.id === id) {
-          if (!resolved) {
-            resolved = true;
-            ws.removeEventListener("message", onMessage);
-            resolve(msg);
-          }
-        }
-      } catch {}
-    };
-    ws.addEventListener("message", onMessage);
-    ws.send(JSON.stringify({ id, method, params }));
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        ws.removeEventListener("message", onMessage);
-        reject(new Error(`CDP timeout: ${method}`));
-      }
-    }, 15000);
-  });
-}
-
-async function getCookies(ws) {
-  const res = await sendCdp(ws, 1, "Network.getAllCookies");
-  return res.result && res.result.cookies ? res.result.cookies : [];
-}
-
-async function navigate(ws, url) {
-  await sendCdp(ws, 2, "Network.enable");
-  await sendCdp(ws, 3, "Page.navigate", { url });
-  await new Promise((resolve) => {
-    const onMsg = (event) => {
-      try {
-        const data = event.data || event;
-        const msg = JSON.parse(data.toString ? data.toString() : data);
-        if (msg.method === "Page.loadEventFired") {
-          ws.removeEventListener("message", onMsg);
-          resolve();
-        }
-      } catch {}
-    };
-    ws.addEventListener("message", onMsg);
-    setTimeout(() => {
-      ws.removeEventListener("message", onMsg);
-      resolve();
-    }, 20000);
-  });
-  await delay(2000);
-}
-
-async function evaluateJs(ws, expression) {
-  const res = await sendCdp(ws, 10, "Runtime.evaluate", {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-  return res.result && res.result.result ? res.result.result.value : null;
-}
-
-async function clickContinueAs(ws) {
-  const script = `
-    (function() {
-      const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"]'));
-      for (const btn of buttons) {
-        const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
-        if (text.includes('continue as') || (text.includes('continue') && text.includes('as'))) {
-          btn.click();
-          return { found: true, text: text };
-        }
-      }
-      const all = Array.from(document.querySelectorAll('*'));
-      for (const el of all) {
-        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-        if (aria.includes('continue as')) {
-          el.click();
-          return { found: true, text: aria };
-        }
-      }
-      return { found: false };
-    })()
-  `;
-  return await evaluateJs(ws, script);
-}
-
-function extractRequiredCookies(allCookies) {
-  const out = {};
-  for (const c of allCookies) {
-    if (REQUIRED_COOKIES.includes(c.name)) {
-      out[c.name] = c.value;
-    }
-  }
-  return out;
-}
-
-async function uploadCookiesToMurmur(cookies, murmurUrl, hfToken) {
-  const url = `${murmurUrl.replace(/\/$/, "")}/api/cookies/upload`;
-  log("uploading cookies to", url);
-  const { status, text } = await postJson(url, cookies, hfToken ? { Authorization: `Bearer ${hfToken}` } : {});
-  if (status >= 400) {
-    throw new Error(`Murmur upload failed: HTTP ${status} ${text}`);
-  }
-  log("murmur upload response:", text);
-  return status;
+function expiredRequiredCookies(cookies, nowSec = Math.floor(Date.now() / 1000)) {
+  return cookies.filter(
+    (c) =>
+      REQUIRED_COOKIES.includes(c.name) &&
+      Number(c.expires) > 0 &&
+      Number(c.expires) <= nowSec,
+  );
 }
 
 async function main() {
   const args = DEFAULTS;
 
   if (!args.email) {
-    throw new Error("MAINFRAME_BROWSERUI_EMAIL not set in .env");
+    throw new Error("AGENT_BROWSER_EMAIL (or MAINFRAME_BROWSERUI_EMAIL) not set in .env");
   }
   if (!args.murmurUrl) {
     throw new Error("MURMUR_HF_SPACE_URL not set in .env");
   }
 
-  const profileDir = getBrowserUiProfileDir(args.email);
-  if (!existsSync(profileDir)) {
-    throw new Error(`BrowserUI profile not found: ${profileDir}. Run: browserui-account.ps1 use ${args.email}`);
+  const vaultPath = getCookieVaultPath(args.email);
+  if (!existsSync(vaultPath)) {
+    throw new Error(
+      `no agent-browser cookie vault for ${args.email}: ${vaultPath}. ` +
+        `Log into messenger once in an agent-browser window, then run: ` +
+        `agent-browser-account.ps1 cookies save ${args.email} (or with -FromSession after a login)`,
+    );
   }
+  log("cookie vault:", vaultPath);
+
+  const cookies = loadVaultCookies(vaultPath);
+  log("vault cookies:", cookies.length);
+
+  const missing = REQUIRED_COOKIES.filter((k) => !cookies.some((c) => c.name === k));
+  if (missing.length > 0) {
+    throw new Error(
+      `vault is missing required cookies: ${missing.join(", ")}. ` +
+        `Re-save the vault after a fresh login: agent-browser-account.ps1 cookies run ${args.email}`,
+    );
+  }
+
+  const expired = expiredRequiredCookies(cookies);
+  if (expired.length > 0 && !args.allowExpired) {
+    throw new Error(
+      `vault required cookies are expired: ${expired.map((c) => c.name).join(", ")}. ` +
+        `Re-login in an agent-browser window and re-save: ` +
+        `agent-browser-account.ps1 cookies run ${args.email}  (then cookies save ${args.email} -FromSession)`,
+    );
+  }
+  if (expired.length > 0) {
+    log("WARNING: required cookies are past expiry but MURMUR_REFRESH_ALLOW_EXPIRED=1 - uploading anyway");
+  }
+
+  const cookieMap = toCookieMap(cookies);
+  log(
+    "cookie map:",
+    Object.keys(cookieMap)
+      .map((k) => `${k}=${cookieMap[k].slice(-4)}`)
+      .join(", "),
+  );
 
   const hfToken = resolveHfToken();
   if (!hfToken) {
@@ -280,84 +190,26 @@ async function main() {
   }
   log("hf token loaded (...", hfToken.slice(-4), ")");
 
-  const browserPath = findBrowserPath();
-  log("using browser:", browserPath);
-  log("profile:", profileDir);
-
-  const browserArgs = [
-    `--remote-debugging-port=${args.port}`,
-    `--user-data-dir=${profileDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-background-networking",
-    "--disable-component-update",
-    "--disable-domain-reliability",
-    "--disable-sync",
-    "--disable-features=OptimizationHints,MediaRouter,AutofillServerCommunication",
-    "--metrics-recording-only",
-    "--disk-cache-size=1",
-    "--media-cache-size=1",
-  ];
-  browserArgs.push(args.facebookUrl);
-
-  log("launching browser (HEADED - visible window)...");
-  const proc = spawn(browserPath, browserArgs, {
-    detached: false,
-    stdio: "inherit",
+  const url = `${args.murmurUrl.replace(/\/$/, "")}/api/cookies/upload`;
+  log("uploading cookies to", url);
+  const { status, text } = await postJson(url, cookieMap, {
+    Authorization: `Bearer ${hfToken}`,
   });
-
-  let ws = null;
-  try {
-    log("connecting CDP on port", args.port);
-    const cdp = await connectCdp(args.port, args.connectMs);
-    ws = cdp.ws;
-    log("cdp connected");
-
-    log("navigating to", args.facebookUrl);
-    await navigate(ws, args.facebookUrl);
-
-    log("checking for 'Continue as' button...");
-    const clickResult = await clickContinueAs(ws);
-    if (clickResult && clickResult.found) {
-      log("clicked button:", clickResult.text);
-      log("waiting", args.postClickWaitMs, "ms for cookies to refresh...");
-      await delay(args.postClickWaitMs);
-    } else {
-      log("no 'Continue as' button found, proceeding with current cookies");
-    }
-
-    const cookies = await getCookies(ws);
-    const required = extractRequiredCookies(cookies);
-    log("extracted cookies:", Object.keys(required).join(", "));
-
-    const hasAll = REQUIRED_COOKIES.every((k) => required[k]);
-    if (!hasAll) {
-      throw new Error("Missing required cookies: " + REQUIRED_COOKIES.filter((k) => !required[k]).join(", "));
-    }
-
-    await uploadCookiesToMurmur(required, args.murmurUrl, hfToken);
-    log("done -- murmur cookies refreshed");
-
-    try {
-      const healthRes = await fetch(`${args.murmurUrl.replace(/\/$/, "")}/api/health`);
-      if (healthRes.ok) {
-        log("murmur health:", await healthRes.text());
-      }
-    } catch {}
-  } finally {
-    if (ws) {
-      try {
-        await sendCdp(ws, 99, "Browser.close");
-      } catch {}
-      try {
-        ws.close();
-      } catch {}
-    }
-    try {
-      proc.kill();
-    } catch {}
-    log("browser closed");
+  if (status >= 400) {
+    throw new Error(`Murmur upload failed: HTTP ${status} ${text}`);
   }
+  log("murmur upload response:", text);
+  if (!/Cookies uploaded and bridge reloaded/i.test(text)) {
+    throw new Error(`unexpected murmur upload response: HTTP ${status} ${text}`);
+  }
+  log("done -- murmur cookies refreshed");
+
+  try {
+    const healthRes = await fetch(`${args.murmurUrl.replace(/\/$/, "")}/api/health`);
+    if (healthRes.ok) {
+      log("murmur health:", await healthRes.text());
+    }
+  } catch {}
 }
 
 main().catch((e) => {

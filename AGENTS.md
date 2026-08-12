@@ -70,6 +70,54 @@
 - Log: `$env:TEMP\murmur.log`
 - Cookie health: pipeline queries `BnpMessengerNotification` outbox for FB send
   failures and runs `murmur-cookie-refresher.mjs` if threshold is hit
+
+### Messenger sends fail SILENTLY on stale cookies (diagnosed 2026-08-12)
+- `POST /api/automation/notifications` always returns `{"status":"sent"}`
+  regardless of actual delivery — `handleAutomationNotification` calls
+  `SendMessage` and ignores the error. Messenger-side send failures (stale
+  `c_user`/`xs` cookies on the space) log only inside the HF space container
+  ("Failed to send AI reply"), which is NOT visible from outside.
+- Result: free-games posts and steam patchnote announcements (GAMEBOT threads,
+  STEAM thread 30738305889116993) silently vanish while every cron job, Vercel
+  route, and space endpoint reports healthy.
+- Verify delivery by ASKING the user (or checking the thread): the webhook 200
+  proves nothing.
+- Fix without a browser: the messenger cookies live in the fresh agent-browser
+  lightweight cookie snapshot at
+  `%APPDATA%\mainframe\accounts\agent-browser\cookies\<fb-email>.cookies.json`
+  (array of `{name,value,...}` for `.messenger.com` domains — c_user/xs/datr/sb/
+  wd). Convert to a plain `{name:value}` JSON object and `POST` it to
+  `https://fahadbinhussain-murmur.hf.space/api/cookies/upload` with
+  `Authorization: Bearer <HF_TOKEN>` (NOT X-HF-...) — response
+  `{"status":"ok","message":"Cookies uploaded and bridge reloaded"}` means the
+  bridge reconnected with the new cookies. Verify with a test notification
+  post.
+- `murmur-cookie-refresher.mjs` (rewired 2026-08-12) is now BROWSERLESS: it
+  reads the fresh agent-browser lightweight cookie vault
+  (`%APPDATA%\mainframe\accounts\agent-browser\cookies\<email>.cookies.json`),
+  converts it to the plain `{name:value}` map (c_user/xs/datr/sb/wd), and POSTs
+  to `/api/cookies/upload` — no Edge spawn, no CDP, no browserui. If the vault
+  is missing or the trio is expired it fails loudly with the exact helper
+  command to refresh it (`cookies run` then `cookies save -FromSession`).
+  Env: `AGENT_BROWSER_EMAIL` (fallback legacy `MAINFRAME_BROWSERUI_EMAIL`).
+  Verified live 2026-08-12: upload → `{"status":"ok","message":"Cookies
+  uploaded and bridge reloaded"}`.
+- Neon via wss (ProtonVPN gotcha, fixed 2026-08-12): psql's 5432 outbound to
+  Neon is silently dropped while ProtonVPN is up (the `IDMWFP` WFP driver kills
+  non-tunnel flows; TCP connects but the server never answers the SSLRequest,
+  and adding /32 routes around the tunnel gets WSAEACCES 10013). `murmur.ps1`
+  now tries `scripts/bnp-db.mjs` FIRST — the Neon serverless driver
+  (`@neondatabase/serverless`, installed globally at the scoop nodejs-lts
+  `node_modules`) over `wss://` port 443, which rides the VPN fine — and falls
+  back to psql if it fails. Usage: `node bnp-db.mjs <count|reset>`, reads
+  `BNP_DATABASE_URL` + `BNP_WINDOW_MINUTES` env (or `../.env`), exit 0 + plain
+  result on success. Gotchas: tagged-template `${}` interpolation inside SQL
+  string literals breaks (bind param mismatch) — use
+  `sql\`${sql.unsafe(rawSql)}\``; `await sql.unsafe(q)` does NOT execute, it
+  only builds a fragment; the global package's ESM wrapper exposes the driver
+  under `module.exports.neon` (or `default.neon`). The first BNP failure was
+  8/11 22:03:25, ~9 min after ProtonVPN service start 8/11 21:54:59 — the
+  check had 0 successes out of 30 before the fix.
 - Neon usage: pipeline runs mainframe `neon-hours-table.ps1 -Json` hourly and
   sends one Messenger warning per org/quota period at 90 of 100 CU-hours.
   State: `%APPDATA%\mainframe\state\murmur-neon-usage-warnings.json`.
@@ -139,7 +187,7 @@
 - `gamebot.yml` was DELETED 2026-08-11 — fully superseded by the real-time vercel/ poller (below), same RSS feed, same webhook/threads, dedupe now in Neon `game_seen`.
 - `steam-updates.yml` was DELETED 2026-08-11 — fully superseded by the real-time vercel/ poller (below), which uses the same "Community Announcements" filter and the same webhook/threads.
 - **subscriptions**: `scripts/gamebot/subscriptions.json` maps thread id -> list of sources (`gamebot`, `steam-updates`). each script loads its own subscribers via `scripts/gamebot/subscriptions.js` (env `MURMUR_THREAD_ID` overrides the file when set). to subscribe a thread to a source, add its id to that source's list; to unsubscribe, remove it.
-- note: the vercel/ pollers read their thread lists from Vercel env (`STEAM_THREAD_IDS`, `GAMEBOT_THREAD_IDS`) instead of subscriptions.json; the file now only documents which thread wants what.
+- note: the vercel/ pollers read their thread lists from Vercel env instead of subscriptions.json; the file now only documents which thread wants what. actual values (2026-08-11): `STEAM_THREAD_IDS=30738305889116993` (only; thread 2637078310061988 was NOT subscribed to steam-updates — a PATCH went to both at first deploy, fixed same day), `GAMEBOT_THREAD_IDS=30738305889116993,953525124128433` (2637078310061988 dropped as 2nd free-game thread 2026-08-11; replaced by 953525124128433).
 - `poll-rss.js` behavior notes (deleted file, for reference): skipped `amazon prime` source + blocked hosts (luna.amazon.com, appraven.net, fab.com). the "amazon prime" check never actually fired on modern feeds (categories are uppercase `AMAZON`) — the vercel port fixes this with `source.toLowerCase().includes("amazon")`.
 
 ## Steam Updates - real-time poller (vercel/)
@@ -161,7 +209,7 @@
 - **production domain is `triton.vercel.app`** (attached 2026-08-11; Neptune's largest moon — picked after ~200 availability probes because every meaningful single-word vercel.app name is taken). `murmur.vercel.app` is a DIFFERENT user's domain — never use it (this cost a long debug session 2026-08-11; the deployments list/alias API reports the real project domain via `/v9/projects/murmur/domains`). `murmur-beryl-ten.vercel.app` still works as fallback alias.
 - Neon project `murmur` (`aged-leaf-93258928`) on `fahad.bin.hussain001@gmail.com` (its 1st and only project per the 1-project rule). DATABASE_URL backed up at `%APPDATA%\mainframe\state\murmur-neon-database-url.txt`.
 - cron-job.org job `8250790` (profile `fahadbinhussain001@gmail.com`), every 1 min, Asia/Dhaka, 60s timeout — see global AGENTS.md rule 11 inventory.
-- cron-job.org job `8251034` (profile `fahadbinhussain001@gmail.com`) `murmur - free-games-rss`, every 6h at :00 (Asia/Dhaka, hours [0,6,12,18]), 60s timeout — see global AGENTS.md rule 11 inventory.
+- cron-job.org job `8251034` (profile `fahadbinhussain001@gmail.com`) `murmur - free-games-rss`, every 1 min (Asia/Dhaka, 60s timeout; was every 6h until 2026-08-11) — see global AGENTS.md rule 11 inventory.
 
 ### env vars (Vercel project env)
 `DATABASE_URL`, `HF_TOKEN`, `GAME_APPIDS` (format `appid:Display Name`), `STEAM_THREAD_IDS` (comma-separated), `GAMEBOT_THREAD_IDS` (comma-separated). set/update via Vercel REST API, not CLI (CLI is broken on this machine — pnpm shim issue).
