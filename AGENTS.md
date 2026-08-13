@@ -201,7 +201,7 @@
 
 ### what it is
 - `vercel/` also hosts the free-games poller: route `GET https://triton.vercel.app/api/free-games` — fetches the lootscraper Atom feed (`feed.eikowagenknecht.com/lootscraper.xml`), parses `<entry>` blocks with regex, skips `amazon` sources (case-insensitive — old GH script compared against `"amazon prime"` which never matched the uppercase `AMAZON` category, so Prime games leaked through; fixed in the port) and blocked hosts (`luna.amazon.com`, `appraven.net`, `fab.com`), dedupes against Neon table `game_seen`, POSTs new ones to the Murmur webhook as source `gamebot`. replaces the 6h GH Actions `gamebot.yml` (deleted 2026-08-11).
-- threads come from Vercel env `GAMEBOT_THREAD_IDS` (not subscriptions.json).
+- threads come from Vercel env `GAMEBOT_THREAD_IDS` (not subscriptions.json). **the space has its OWN send allowlist** - `MURMUR_ALLOWED_THREAD_IDS` variable on the space (`internal/config/config.go`, default `984803114200952,2637078310061988`; `threadAllowed()` blocks non-listed threads with a log-only warn and the API still returns `{"status":"sent"}`). adding a new thread to the Vercel env is NOT enough - you must also add it to the HF space variable and restart the space. free-games thread `953525124128433` was added to `GAMEBOT_THREAD_IDS` 2026-08-11 but NOT to the space allowlist until 2026-08-13 - all its alerts were silently blocked at SendMessage while `game_seen`/cron/Vercel all looked healthy.
 - seeded 2026-08-11 with all 28 feed items current at migration time (mirroring the GH cache state: last GH run 13:02Z processed everything before it; the 3 Fab items + AppRaven-linked Apple items were host-blocked there too).
 
 ### accounts/ownership
