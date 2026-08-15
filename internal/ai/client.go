@@ -21,7 +21,7 @@ type Client struct {
 
 func NewClient(baseURL, defaultChat, defaultImage string) *Client {
 	if baseURL == "" {
-		baseURL = "https://alchoholpad-litellm.hf.space/v1"
+		baseURL = "https://litellm-fjfe.onrender.com/v1"
 	}
 	if defaultChat == "" {
 		defaultChat = "openrouter/google/gemma-4-31b-it:free"

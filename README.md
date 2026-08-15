@@ -50,7 +50,7 @@ murmur-bridge --cookies path/to/cookies.json --platform messenger
 | MURMUR_COOKIES | ~/.config/murmur/cookies.json | Facebook cookies path |
 | MURMUR_PLATFORM | messenger | messenger/facebook/messenger-lite |
 | MURMUR_LOG_LEVEL | info | Log level |
-| LITELLM_BASE | https://alchoholpad-litellm-huggingface-template.hf.space/v1 | LiteLLM gateway |
+| LITELLM_BASE | https://litellm-fjfe.onrender.com/v1 | LiteLLM gateway |
 | DEFAULT_CHAT | openrouter/google/gemma-4-31b-it:free | Default chat model |
 | DEFAULT_IMAGE | cloudflare/@cf/black-forest-labs/flux-1-schnell | Default image model |
 | DATABASE_URL | | Postgres URL for persistence |

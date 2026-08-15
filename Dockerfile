@@ -12,7 +12,7 @@ WORKDIR /app
 COPY --from=builder /build/murmur-bridge .
 EXPOSE 7860
 ENV MURMUR_COOKIES=/app/cookies.hf.json
-ENV LITELLM_BASE=https://alchoholpad-litellm.hf.space/v1
+ENV LITELLM_BASE=https://litellm-fjfe.onrender.com/v1
 ENV DEFAULT_CHAT=console_groq_com_fahadbinhussain001/llama-3.1-8b-instant
 ENV DEFAULT_IMAGE=cloudflare/@cf/black-forest-labs/flux-1-schnell
 ENV BNP_MESSENGER_OUTBOX_URL=https://dailybnp.com/api/internal/bnp-messenger-outbox
