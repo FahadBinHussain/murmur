@@ -32,6 +32,26 @@
   7. Run `wacli history backfill --store <path> --chat <jid> --count 500 --requests 10 --wait 90s` to pull older history
   8. Re-enable task: `schtasks /run /tn "murmur"`
 
+### Session upload to Neon (scripts/upload-session.ps1)
+- One-off: uploads the local `session.db` (+ `wacli.db`) into the murmur Neon
+  `whatsapp_sessions` table (the row the Go bridge loads on startup). use after a
+  re-pair or a store wipe so the space does not need a fresh QR.
+- `pwsh scripts/upload-session.ps1` (store from `WACLI_STORE_PATH`) or
+  `-StorePath`. reads `DATABASE_URL` from repo-root `.env` (same key the bridge
+  reads, `internal/config/config.go`) - it is NOT in `.env` locally by default
+  (it is a space secret; backed up at
+  `%APPDATA%\mainframe\state\murmur-neon-database-url.txt`), so set it or pass
+  it in the env first. fails loudly if missing - no fallback DSN.
+- **ProtonVPN**: `psql` to Neon over 5432 is silently dropped while the VPN is up
+  (WFP driver kills non-tunnel flows). run with the VPN off. the script prints a
+  reminder on failure; if a wss route is ever wanted, port the insert to the
+  serverless driver like `scripts/bnp-db.mjs`.
+- after a good upload: `hf spaces restart fahadbinhussain/murmur` (the bridge only
+  reloads the session on startup).
+- moved here from the automata repo 2026-09-17 (the old
+  `automata/murmur/upload-session.ps1` read `.env.local` / `WACLI_STORE`; this
+  copy follows the repo `.env` + `WACLI_STORE_PATH` convention).
+
 ### WhatsApp History Sync Limitation (IMPORTANT)
 - WhatsApp multi-device protocol only keeps a limited buffer of messages on the
   primary phone for history sync to linked devices.
