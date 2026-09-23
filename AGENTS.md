@@ -234,6 +234,14 @@
 ### env vars (Vercel project env)
 `DATABASE_URL`, `HF_TOKEN`, `GAME_APPIDS` (format `appid:Display Name`), `STEAM_THREAD_IDS` (comma-separated), `GAMEBOT_THREAD_IDS` (comma-separated). set/update via Vercel REST API, not CLI (CLI is broken on this machine — pnpm shim issue).
 
+- **Neon credential repair (2026-09-23):** the old `DATABASE_URL` pointed at a
+  stale/decommissioned Murmur project and caused both routes to return 500 on
+  their dedupe query. The live Murmur database is project
+  `floral-waterfall-97471048` under the `alchoholpad@gmail.com` Neon profile;
+  refresh the connection string with `neon connection-string main`, update the
+  Vercel production secret, and ensure `steam_seen` and `game_seen` exist before
+  deploying. Keep the DSN out of git and logs.
+
 ### deploying via REST API (vercel CLI broken on this machine)
 - no git link on the project; deployments are created via `POST /v13/deployments?teamId=<team>&forceNew=1` with inline base64 files. body: `{target, name, project, projectSettings:{framework:"nextjs"}, files:[{file, encoding:"base64", data}]}`. do NOT add a top-level `config` key — v13 rejects it with `bad_request` (the "config.builds required" note in earlier docs was wrong; the working deploy never used it).
 - after the FIRST project creation, Vercel Authentication (SSO) defaults to `all_except_custom_domains` — vercel.app domains get a login wall that breaks cron-job.org. disable with `PATCH /v9/projects/murmur` body `{"ssoProtection":null}` (valid deploymentType values: `prod_deployment_urls_and_all_previews` | `all` | `preview` | null).
