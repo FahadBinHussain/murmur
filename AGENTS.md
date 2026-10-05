@@ -202,6 +202,12 @@
 - Owning account: `dailybnp1978@gmail.com` (mainframe vercel profile)
 - Env vars accessible via Vercel REST API: `GET /v9/projects/dailybnp/env?teamSlug=daily-bnps-projects`
 
+## Automation notification client (scripts/codex-notify.mjs)
+
+- queued client for `POST /api/automation/notifications` (bridge handler `internal/bridge/bridge.go`): commands `enqueue` / `send` / `flush` / `summary`. messages queue locally first (`CODEX_NOTIFY_STATE_PATH`, cwd-relative default `game_detect_local/automation_state/codex_notifications.json`), so an unconfigured or down murmur never drops them.
+- moved here from automata-private `tools/codex/` 2026-10-05 — this repo owns the API. the only caller is automata-private's `youtube.com-stream-watch-codex-automation.mjs`, which spawns it module-relative (`../../murmur/scripts/codex-notify.mjs`, cwd-independent); caller docs live in that repo's `youtube.com/AGENTS.md`.
+- flush needs `CODEX_NOTIFY_MURMUR_URL` + `CODEX_NOTIFY_MURMUR_TOKEN` (plus `CODEX_NOTIFY_HF_PROFILE` / `CODEX_NOTIFY_HF_TOKEN` for a private space); without them flush returns `missing CODEX_NOTIFY_MURMUR_URL or CODEX_NOTIFY_MURMUR_TOKEN` and the queue just holds. note the endpoint always answers `{"status":"sent"}` even when the messenger send fails (see the stale-cookies section) — verify delivery in the thread, not from the response.
+
 ## GameBot workflows (GitHub Actions)
 
 - `gamebot.yml` was DELETED 2026-08-11 — fully superseded by the real-time vercel/ poller (below), same RSS feed, same webhook/threads, dedupe now in Neon `game_seen`.
