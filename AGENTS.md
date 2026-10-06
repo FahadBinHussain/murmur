@@ -102,26 +102,28 @@
   route, and space endpoint reports healthy.
 - Verify delivery by ASKING the user (or checking the thread): the webhook 200
   proves nothing.
-- Fix without a browser: the messenger cookies live in the fresh agent-browser
-  lightweight cookie snapshot at
-  `%APPDATA%\mainframe\accounts\agent-browser\cookies\<fb-email>.cookies.json`
-  (array of `{name,value,...}` for `.messenger.com` domains — c_user/xs/datr/sb/
-  wd). Convert to a plain `{name:value}` JSON object and `POST` it to
+- Fix without a browser: the messenger cookies are read live from the real Edge
+  session over CDP through the browser-use skill helper (`browser-use` on PATH,
+  http://127.0.0.1:9222), scoped to `.messenger.com` (c_user/xs/datr/sb/wd).
+  Convert to a plain `{name:value}` JSON object and `POST` it to
   `https://fahadbinhussain-murmur.hf.space/api/cookies/upload` with
   `Authorization: Bearer <HF_TOKEN>` (NOT X-HF-...) — response
   `{"status":"ok","message":"Cookies uploaded and bridge reloaded"}` means the
   bridge reconnected with the new cookies. Verify with a test notification
   post.
-- `murmur-cookie-refresher.mjs` (rewired 2026-08-12) is now BROWSERLESS: it
-  reads the fresh agent-browser lightweight cookie vault
-  (`%APPDATA%\mainframe\accounts\agent-browser\cookies\<email>.cookies.json`),
-  converts it to the plain `{name:value}` map (c_user/xs/datr/sb/wd), and POSTs
-  to `/api/cookies/upload` — no Edge spawn, no CDP, no browserui. If the vault
-  is missing or the trio is expired it fails loudly with the exact helper
-  command to refresh it (`cookies run` then `cookies save -FromSession`).
-  Env: `AGENT_BROWSER_EMAIL` (fallback legacy `MAINFRAME_BROWSERUI_EMAIL`).
-  Verified live 2026-08-12: upload → `{"status":"ok","message":"Cookies
-  uploaded and bridge reloaded"}`.
+- `murmur-cookie-refresher.mjs` (rewired 2026-10-06) reads cookies LIVE from the
+  real Edge: it pipes python into the `browser-use` helper, calls CDP
+  `Network.getCookies` for `MURMUR_REFRESH_FB_URL` (default
+  `https://www.messenger.com` — the same page the original refresher extracted
+  from), converts the result to the plain `{name:value}` map
+  (c_user/xs/datr/sb/wd) and POSTs to `/api/cookies/upload` — no cookie vault,
+  no separate profile, no Edge spawn (the skill drives the running Edge). If
+  Edge is unreachable or the trio is missing/expired it fails loudly with the
+  exact fix (sign in at www.messenger.com in the real Edge window, then re-run).
+  Env: `MURMUR_REFRESH_FB_URL` (cookie scope), `HF_EMAIL`, `MURMUR_HF_SPACE_URL`.
+  Verified live 2026-10-06: live read (5 cookies), map, token and POST all work;
+  the space answered 503 (runtime stage PAUSED), so the 200/bridge-reload check
+  needs the space resumed first.
 - Neon via wss (ProtonVPN gotcha, fixed 2026-08-12): psql's 5432 outbound to
   Neon is silently dropped while ProtonVPN is up (the `IDMWFP` WFP driver kills
   non-tunnel flows; TCP connects but the server never answers the SSLRequest,

@@ -2,35 +2,36 @@
 /**
  * scripts/murmur-cookie-refresher.mjs
  *
- * Browserless facebook cookie refresh for murmur HF Space.
+ * Facebook cookie refresh for murmur HF Space, read LIVE from the real Edge
+ * session (browser-use skill, http://127.0.0.1:9222) - no cookie vault, no
+ * separate automation profile.
  *
  * Workflow:
- * 1. Reads the fresh agent-browser lightweight cookie snapshot for the FB
- *    account (saved by `agent-browser-account.ps1 cookies save <email>`
- *    from a live login) at:
- *      %APPDATA%\mainframe\accounts\agent-browser\cookies\<email>.cookies.json
+ * 1. Pipes python into the `browser-use` helper (the same invocation the
+ *    browser-use skill uses) and calls CDP `Network.getCookies` for
+ *    MURMUR_REFRESH_FB_URL (default https://www.messenger.com - the same page
+ *    the original refresher navigated to before extracting).
  * 2. Converts the CDP cookie array to the plain {name:value} map the bridge
  *    expects (c_user / xs / datr / sb / wd).
  * 3. POSTs to murmur /api/cookies/upload with Authorization: Bearer <HF_TOKEN>
  *    and verifies the "Cookies uploaded and bridge reloaded" response.
  *
- * No browser is spawned: if the vault is missing or the required trio
- * (c_user/xs/datr) is expired, the refresher fails loudly with the exact
- * helper command needed to refresh the vault (one manual login).
+ * Fails loudly: if the browser-use call fails (Edge not running, skill not on
+ * PATH) or the required trio (c_user/xs/datr) is missing or expired in the
+ * live session, it throws the exact fix instead of uploading a broken set.
  *
  * Usage:
  *   node scripts/murmur-cookie-refresher.mjs
  *
  * Env (from .env in repo root):
- *   AGENT_BROWSER_EMAIL         - FB account email for the cookie vault
- *                                 (fallback: MAINFRAME_BROWSERUI_EMAIL, kept
- *                                 for compat with older .env files)
  *   HF_EMAIL                    - mainframe HF profile email (used to locate token)
  *   MURMUR_HF_SPACE_URL         - murmur space URL
- *   MURMUR_REFRESH_ALLOW_EXPIRED- "1" to upload even if the vault trio is
+ *   MURMUR_REFRESH_FB_URL       - cookie scope URL (default: https://www.messenger.com)
+ *   MURMUR_REFRESH_ALLOW_EXPIRED- "1" to upload even if the live trio is
  *                                 past its expiry (default: fail instead)
  */
 
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -50,10 +51,7 @@ function loadEnv(path = join(process.cwd(), ".env")) {
 loadEnv();
 
 const DEFAULTS = {
-  email:
-    process.env.AGENT_BROWSER_EMAIL ||
-    process.env.MAINFRAME_BROWSERUI_EMAIL ||
-    "",
+  fbUrl: process.env.MURMUR_REFRESH_FB_URL || "https://www.messenger.com",
   hfEmail: process.env.HF_EMAIL || "",
   murmurUrl: process.env.MURMUR_HF_SPACE_URL || "",
   allowExpired: process.env.MURMUR_REFRESH_ALLOW_EXPIRED === "1",
@@ -68,19 +66,6 @@ function log(...args) {
 
 function err(...args) {
   console.error(new Date().toISOString(), "[error]", ...args);
-}
-
-function getCookieVaultPath(email) {
-  return join(
-    homedir(),
-    "AppData",
-    "Roaming",
-    "mainframe",
-    "accounts",
-    "agent-browser",
-    "cookies",
-    `${email}.cookies.json`,
-  );
 }
 
 function resolveHfToken() {
@@ -99,6 +84,44 @@ function resolveHfToken() {
   return readFileSync(tokenPath, "utf-8").trim();
 }
 
+/**
+ * Pipe python into the `browser-use` CLI and return the JSON payload of the
+ * single `BU::<json>` line it prints. Anything else (non-zero exit, no BU::
+ * line, unparseable payload) is a hard error carrying the full output.
+ */
+function invokeBU(pythonCode) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("browser-use", [], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (e) =>
+      reject(new Error(`could not start browser-use: ${e.message}`)),
+    );
+    child.on("close", (code) => {
+      const line = stdout.split(/\r?\n/).find((l) => l.startsWith("BU::"));
+      if (code !== 0 || !line) {
+        reject(
+          new Error(
+            `browser-use exited ${code} without a BU:: payload:\n${(stdout + stderr).trim()}`,
+          ),
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(line.slice(4)));
+      } catch {
+        reject(
+          new Error(`browser-use returned an unparseable BU:: payload:\n${line}`),
+        );
+      }
+    });
+    child.stdin.write(pythonCode);
+    child.stdin.end();
+  });
+}
+
 async function postJson(url, body, headers = {}) {
   const res = await fetch(url, {
     method: "POST",
@@ -107,12 +130,6 @@ async function postJson(url, body, headers = {}) {
   });
   const text = await res.text();
   return { status: res.status, text };
-}
-
-function loadVaultCookies(vaultPath) {
-  const raw = JSON.parse(readFileSync(vaultPath, "utf-8"));
-  const arr = Array.isArray(raw) ? raw : [];
-  return arr.filter((c) => c && typeof c.name === "string" && typeof c.value === "string");
 }
 
 function toCookieMap(cookies) {
@@ -133,50 +150,69 @@ function expiredRequiredCookies(cookies, nowSec = Math.floor(Date.now() / 1000))
   );
 }
 
+function buildCookieReadPython(scopeUrl) {
+  const keep = [...REQUIRED_COOKIES, ...NICE_TO_HAVE_COOKIES]
+    .map((n) => JSON.stringify(n))
+    .join(", ");
+  return [
+    "import json",
+    `cookies = cdp("Network.getCookies", urls=[${JSON.stringify(scopeUrl)}])["cookies"]`,
+    `keep = [c for c in cookies if c.get("name") in (${keep})]`,
+    'print("BU::" + json.dumps(keep))',
+    "",
+  ].join("\n");
+}
+
 async function main() {
   const args = DEFAULTS;
 
-  if (!args.email) {
-    throw new Error("AGENT_BROWSER_EMAIL (or MAINFRAME_BROWSERUI_EMAIL) not set in .env");
-  }
   if (!args.murmurUrl) {
     throw new Error("MURMUR_HF_SPACE_URL not set in .env");
   }
 
-  const vaultPath = getCookieVaultPath(args.email);
-  if (!existsSync(vaultPath)) {
+  const scopeUrl = args.fbUrl;
+  log("reading live cookies from the real Edge (browser-use skill), scope:", scopeUrl);
+
+  let cookies;
+  try {
+    cookies = await invokeBU(buildCookieReadPython(scopeUrl));
+  } catch (e) {
     throw new Error(
-      `no agent-browser cookie vault for ${args.email}: ${vaultPath}. ` +
-        `Log into messenger once in an agent-browser window, then run: ` +
-        `agent-browser-account.ps1 cookies save ${args.email} (or with -FromSession after a login)`,
+      `${e.message}\nhint: the browser-use skill drives the real Edge at http://127.0.0.1:9222 - open Edge (signed in at ${scopeUrl}) and re-run.`,
     );
   }
-  log("cookie vault:", vaultPath);
+  if (!Array.isArray(cookies)) {
+    throw new Error(
+      `unexpected browser-use payload (expected a cookie array): ${JSON.stringify(cookies).slice(0, 200)}`,
+    );
+  }
 
-  const cookies = loadVaultCookies(vaultPath);
-  log("vault cookies:", cookies.length);
+  const liveCookies = cookies.filter(
+    (c) => c && typeof c.name === "string" && typeof c.value === "string",
+  );
+  log("live cookies read:", liveCookies.length);
 
-  const missing = REQUIRED_COOKIES.filter((k) => !cookies.some((c) => c.name === k));
+  const missing = REQUIRED_COOKIES.filter((k) => !liveCookies.some((c) => c.name === k));
   if (missing.length > 0) {
     throw new Error(
-      `vault is missing required cookies: ${missing.join(", ")}. ` +
-        `Re-save the vault after a fresh login: agent-browser-account.ps1 cookies run ${args.email}`,
+      `the live Edge session (scope ${scopeUrl}) is missing required cookies: ${missing.join(", ")}. ` +
+        `Open ${scopeUrl} in the real Edge window, sign in to facebook/messenger there, then re-run.`,
     );
   }
 
-  const expired = expiredRequiredCookies(cookies);
+  const expired = expiredRequiredCookies(liveCookies);
   if (expired.length > 0 && !args.allowExpired) {
     throw new Error(
-      `vault required cookies are expired: ${expired.map((c) => c.name).join(", ")}. ` +
-        `Re-login in an agent-browser window and re-save: ` +
-        `agent-browser-account.ps1 cookies run ${args.email}  (then cookies save ${args.email} -FromSession)`,
+      `live session cookies are expired: ${expired.map((c) => c.name).join(", ")}. ` +
+        `Sign in again at ${scopeUrl} in the real Edge window, then re-run ` +
+        `(set MURMUR_REFRESH_ALLOW_EXPIRED=1 to upload anyway).`,
     );
   }
   if (expired.length > 0) {
     log("WARNING: required cookies are past expiry but MURMUR_REFRESH_ALLOW_EXPIRED=1 - uploading anyway");
   }
 
-  const cookieMap = toCookieMap(cookies);
+  const cookieMap = toCookieMap(liveCookies);
   log(
     "cookie map:",
     Object.keys(cookieMap)
