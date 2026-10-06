@@ -121,9 +121,10 @@
   Edge is unreachable or the trio is missing/expired it fails loudly with the
   exact fix (sign in at www.messenger.com in the real Edge window, then re-run).
   Env: `MURMUR_REFRESH_FB_URL` (cookie scope), `HF_EMAIL`, `MURMUR_HF_SPACE_URL`.
-  Verified live 2026-10-06: live read (5 cookies), map, token and POST all work;
-  the space answered 503 (runtime stage PAUSED), so the 200/bridge-reload check
-  needs the space resumed first.
+  Verified live 2026-10-06 end to end: `hf spaces restart` took the space PAUSED ->
+  RUNNING, then the refresher read 5 live cookies from Edge, uploaded, and got
+  `200 {"status":"ok","message":"Cookies uploaded and bridge reloaded"}` - full
+  chain (Edge -> CDP read -> map -> token -> POST -> bridge reload) confirmed.
 - Neon via wss (ProtonVPN gotcha, fixed 2026-08-12): psql's 5432 outbound to
   Neon is silently dropped while ProtonVPN is up (the `IDMWFP` WFP driver kills
   non-tunnel flows; TCP connects but the server never answers the SSLRequest,
