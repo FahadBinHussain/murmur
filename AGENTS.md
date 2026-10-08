@@ -141,7 +141,7 @@
   under `module.exports.neon` (or `default.neon`). The first BNP failure was
   8/11 22:03:25, ~9 min after ProtonVPN service start 8/11 21:54:59 — the
   check had 0 successes out of 30 before the fix.
-- Neon usage: pipeline runs mainframe `neon-hours-table.ps1 -Json` hourly and
+- Neon usage: pipeline runs `automata-private\neon.com\neon-hours-table.ps1 -Json` hourly and
   sends one Messenger warning per org/quota period at 90 of 100 CU-hours.
   State: `%APPDATA%\mainframe\state\murmur-neon-usage-warnings.json`.
   Overrides: `NEON_USAGE_CHECK_INTERVAL_SECONDS`, `NEON_USAGE_WARNING_HOURS`,

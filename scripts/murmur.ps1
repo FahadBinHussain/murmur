@@ -141,7 +141,7 @@ $CookieEngine           = "bnp-outbox"  # surfaced in logs
 $LastCookieCheck        = [DateTime]::MinValue
 
 # ── Neon usage warning config ───────────────────────────────────────────────
-$NeonUsageScript        = if ($env:NEON_USAGE_TABLE_SCRIPT) { $env:NEON_USAGE_TABLE_SCRIPT } else { "C:\Users\Admin\Downloads\mainframe\neon-hours-table.ps1" }
+$NeonUsageScript        = if ($env:NEON_USAGE_TABLE_SCRIPT) { $env:NEON_USAGE_TABLE_SCRIPT } else { "C:\Users\Admin\Downloads\automata-private\neon.com\neon-hours-table.ps1" }
 $NeonCheckIntervalS     = if ($env:NEON_USAGE_CHECK_INTERVAL_SECONDS) { [int]$env:NEON_USAGE_CHECK_INTERVAL_SECONDS } else { 3600 }
 $NeonWarningHours       = if ($env:NEON_USAGE_WARNING_HOURS) { [double]$env:NEON_USAGE_WARNING_HOURS } else { 90 }
 $NeonWarningThreadId    = if ($env:NEON_USAGE_WARNING_THREAD_ID) { $env:NEON_USAGE_WARNING_THREAD_ID.Trim() } else { "2637078310061988" }
